@@ -1,0 +1,219 @@
+{% extends "base.html" %}
+
+{% block title %}Cricket Match Predictor - Home{% endblock %}
+
+{% block content %}
+<div class="hero">
+    <h1>Cricket Match Predictor</h1>
+    <p>AI-powered predictions for T20 and ODI matches using ELO ratings and Monte Carlo simulation</p>
+</div>
+
+<div class="grid grid-3">
+    <div class="card" id="stats-matches">
+        <div class="stat-value">-</div>
+        <div class="stat-label">Total Matches</div>
+    </div>
+    <div class="card" id="stats-teams">
+        <div class="stat-value">-</div>
+        <div class="stat-label">Teams Tracked</div>
+    </div>
+    <div class="card" id="stats-players">
+        <div class="stat-value">-</div>
+        <div class="stat-label">Players Rated</div>
+    </div>
+</div>
+
+<div class="grid grid-2">
+    <div class="card">
+        <h3 class="card-title">Quick Prediction</h3>
+        <form id="quick-predict-form">
+            <div class="form-group">
+                <label>Team 1</label>
+                <select id="team1-select" required>
+                    <option value="">Select Team</option>
+                </select>
+            </div>
+            <div class="form-group">
+                <label>Team 2</label>
+                <select id="team2-select" required>
+                    <option value="">Select Team</option>
+                </select>
+            </div>
+            <div class="form-group">
+                <label>Format</label>
+                <select id="format-select">
+                    <option value="T20">T20</option>
+                    <option value="ODI">ODI</option>
+                </select>
+            </div>
+            <button type="submit" class="btn btn-primary">Predict Match</button>
+        </form>
+        
+        <div id="prediction-result" style="margin-top: 1.5rem; display: none;">
+            <h4 style="margin-bottom: 1rem;">Prediction</h4>
+            <div id="prediction-content"></div>
+        </div>
+    </div>
+    
+    <div class="card">
+        <h3 class="card-title">Top Teams (T20)</h3>
+        <table class="table">
+            <thead>
+                <tr>
+                    <th>#</th>
+                    <th>Team</th>
+                    <th>ELO</th>
+                </tr>
+            </thead>
+            <tbody id="top-teams-body">
+                <tr><td colspan="3" class="loading"><div class="spinner"></div></td></tr>
+            </tbody>
+        </table>
+    </div>
+</div>
+
+<div class="card">
+    <h3 class="card-title">About the Model</h3>
+    <div class="grid grid-3">
+        <div>
+            <h4 style="color: var(--accent-primary); margin-bottom: 0.5rem;">ELO Ratings</h4>
+            <p style="color: var(--text-secondary);">
+                Teams and players have dynamic ELO ratings that update after each match, 
+                considering opponent strength and performance.
+            </p>
+        </div>
+        <div>
+            <h4 style="color: var(--accent-secondary); margin-bottom: 0.5rem;">Monte Carlo Simulation</h4>
+            <p style="color: var(--text-secondary);">
+                Ball-by-ball match simulation using probability distributions 
+                calibrated from historical data and player ratings.
+            </p>
+        </div>
+        <div>
+            <h4 style="color: var(--accent-warning); margin-bottom: 0.5rem;">Deep Learning</h4>
+            <p style="color: var(--text-secondary);">
+                Neural network models trained on match features including ELO differentials,
+                recent form, and head-to-head records.
+            </p>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+    // Load stats
+    async function loadStats() {
+        const result = await fetchAPI('/api/stats');
+        if (result.success) {
+            document.querySelector('#stats-matches .stat-value').textContent = 
+                formatNumber(result.stats.total_matches);
+            document.querySelector('#stats-teams .stat-value').textContent = 
+                formatNumber(result.stats.total_teams);
+            document.querySelector('#stats-players .stat-value').textContent = 
+                formatNumber(result.stats.total_players);
+        }
+    }
+    
+    // Load teams
+    async function loadTeams() {
+        const result = await fetchAPI('/api/teams');
+        if (result.success) {
+            const options = result.teams.map(t => 
+                `<option value="${t.team_id}">${t.name}</option>`
+            ).join('');
+            
+            document.getElementById('team1-select').innerHTML = 
+                '<option value="">Select Team</option>' + options;
+            document.getElementById('team2-select').innerHTML = 
+                '<option value="">Select Team</option>' + options;
+        }
+    }
+    
+    // Load top teams
+    async function loadTopTeams() {
+        const result = await fetchAPI('/api/rankings/teams?limit=10');
+        if (result.success) {
+            const rows = result.rankings.map((t, i) => `
+                <tr>
+                    <td>${i + 1}</td>
+                    <td>${t.name}</td>
+                    <td><span class="badge badge-success">${Math.round(t.elo)}</span></td>
+                </tr>
+            `).join('');
+            
+            document.getElementById('top-teams-body').innerHTML = rows || 
+                '<tr><td colspan="3">No data available</td></tr>';
+        }
+    }
+    
+    // Quick prediction
+    document.getElementById('quick-predict-form').addEventListener('submit', async (e) => {
+        e.preventDefault();
+        
+        const team1Id = document.getElementById('team1-select').value;
+        const team2Id = document.getElementById('team2-select').value;
+        const format = document.getElementById('format-select').value;
+        
+        if (!team1Id || !team2Id) {
+            alert('Please select both teams');
+            return;
+        }
+        
+        if (team1Id === team2Id) {
+            alert('Please select different teams');
+            return;
+        }
+        
+        const result = await fetchAPI('/api/predict', {
+            method: 'POST',
+            body: JSON.stringify({
+                team1_id: parseInt(team1Id),
+                team2_id: parseInt(team2Id),
+                format: format
+            })
+        });
+        
+        const resultDiv = document.getElementById('prediction-result');
+        const contentDiv = document.getElementById('prediction-content');
+        
+        if (result.success) {
+            const p = result.prediction;
+            contentDiv.innerHTML = `
+                <div style="margin-bottom: 1rem;">
+                    <strong>${p.team1.name}</strong>
+                    <div class="probability-bar">
+                        <div class="probability-fill" style="width: ${p.team1.win_probability * 100}%; background: var(--gradient-1);"></div>
+                    </div>
+                    <span style="color: var(--accent-primary); font-family: 'JetBrains Mono', monospace;">
+                        ${formatPercent(p.team1.win_probability)}
+                    </span>
+                </div>
+                <div style="margin-bottom: 1rem;">
+                    <strong>${p.team2.name}</strong>
+                    <div class="probability-bar">
+                        <div class="probability-fill" style="width: ${p.team2.win_probability * 100}%; background: var(--gradient-2);"></div>
+                    </div>
+                    <span style="color: var(--accent-warning); font-family: 'JetBrains Mono', monospace;">
+                        ${formatPercent(p.team2.win_probability)}
+                    </span>
+                </div>
+                <div style="color: var(--text-secondary); font-size: 0.875rem;">
+                    Expected scores: ${p.team1.name} ${Math.round(p.team1.expected_score)} - 
+                    ${p.team2.name} ${Math.round(p.team2.expected_score)}
+                </div>
+            `;
+            resultDiv.style.display = 'block';
+        } else {
+            contentDiv.innerHTML = `<p style="color: #ef4444;">Error: ${result.error}</p>`;
+            resultDiv.style.display = 'block';
+        }
+    });
+    
+    // Initialize
+    loadStats();
+    loadTeams();
+    loadTopTeams();
+</script>
+{% endblock %}
+

@@ -1,0 +1,145 @@
+{% extends "base.html" %}
+
+{% block title %}ELO Rankings - Cricket Match Predictor{% endblock %}
+
+{% block content %}
+<h1 style="margin-bottom: 2rem;">ELO Rankings</h1>
+
+<div style="margin-bottom: 2rem;">
+    <button class="btn btn-primary" id="btn-t20" onclick="setFormat('T20')">T20</button>
+    <button class="btn btn-secondary" id="btn-odi" onclick="setFormat('ODI')">ODI</button>
+</div>
+
+<div class="grid grid-3">
+    <div class="card">
+        <h3 class="card-title">Team Rankings</h3>
+        <table class="table">
+            <thead>
+                <tr>
+                    <th>#</th>
+                    <th>Team</th>
+                    <th>ELO</th>
+                </tr>
+            </thead>
+            <tbody id="team-rankings-body">
+                <tr><td colspan="3" class="loading"><div class="spinner"></div></td></tr>
+            </tbody>
+        </table>
+    </div>
+    
+    <div class="card">
+        <h3 class="card-title">Top Batters</h3>
+        <table class="table">
+            <thead>
+                <tr>
+                    <th>#</th>
+                    <th>Player</th>
+                    <th>ELO</th>
+                </tr>
+            </thead>
+            <tbody id="batting-rankings-body">
+                <tr><td colspan="3" class="loading"><div class="spinner"></div></td></tr>
+            </tbody>
+        </table>
+    </div>
+    
+    <div class="card">
+        <h3 class="card-title">Top Bowlers</h3>
+        <table class="table">
+            <thead>
+                <tr>
+                    <th>#</th>
+                    <th>Player</th>
+                    <th>ELO</th>
+                </tr>
+            </thead>
+            <tbody id="bowling-rankings-body">
+                <tr><td colspan="3" class="loading"><div class="spinner"></div></td></tr>
+            </tbody>
+        </table>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+    let currentFormat = 'T20';
+    
+    function setFormat(format) {
+        currentFormat = format;
+        
+        // Update buttons
+        document.getElementById('btn-t20').className = 
+            format === 'T20' ? 'btn btn-primary' : 'btn btn-secondary';
+        document.getElementById('btn-odi').className = 
+            format === 'ODI' ? 'btn btn-primary' : 'btn btn-secondary';
+        
+        // Reload data
+        loadAllRankings();
+    }
+    
+    async function loadTeamRankings() {
+        const result = await fetchAPI(`/api/rankings/teams?format=${currentFormat}&limit=20`);
+        
+        if (result.success && result.rankings.length > 0) {
+            document.getElementById('team-rankings-body').innerHTML = 
+                result.rankings.map((t, i) => `
+                    <tr>
+                        <td>${i + 1}</td>
+                        <td>${t.name}</td>
+                        <td><span class="badge badge-success">${Math.round(t.elo)}</span></td>
+                    </tr>
+                `).join('');
+        } else {
+            document.getElementById('team-rankings-body').innerHTML = 
+                '<tr><td colspan="3">No rankings available</td></tr>';
+        }
+    }
+    
+    async function loadBattingRankings() {
+        const result = await fetchAPI(`/api/rankings/players/batting?format=${currentFormat}&limit=20`);
+        
+        if (result.success && result.rankings.length > 0) {
+            document.getElementById('batting-rankings-body').innerHTML = 
+                result.rankings.map((p, i) => `
+                    <tr>
+                        <td>${i + 1}</td>
+                        <td>${p.name}</td>
+                        <td><span class="badge badge-success">${Math.round(p.elo)}</span></td>
+                    </tr>
+                `).join('');
+        } else {
+            document.getElementById('batting-rankings-body').innerHTML = 
+                '<tr><td colspan="3">No rankings available</td></tr>';
+        }
+    }
+    
+    async function loadBowlingRankings() {
+        const result = await fetchAPI(`/api/rankings/players/bowling?format=${currentFormat}&limit=20`);
+        
+        if (result.success && result.rankings.length > 0) {
+            document.getElementById('bowling-rankings-body').innerHTML = 
+                result.rankings.map((p, i) => `
+                    <tr>
+                        <td>${i + 1}</td>
+                        <td>${p.name}</td>
+                        <td><span class="badge badge-success">${Math.round(p.elo)}</span></td>
+                    </tr>
+                `).join('');
+        } else {
+            document.getElementById('bowling-rankings-body').innerHTML = 
+                '<tr><td colspan="3">No rankings available</td></tr>';
+        }
+    }
+    
+    function loadAllRankings() {
+        loadTeamRankings();
+        loadBattingRankings();
+        loadBowlingRankings();
+    }
+    
+    // Initialize
+    loadAllRankings();
+</script>
+{% endblock %}
+

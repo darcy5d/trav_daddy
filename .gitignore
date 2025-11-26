@@ -1,30 +1,98 @@
-# Virtual Environment
-venv/
-env/
-ENV/
-
 # Python
 __pycache__/
 *.py[cod]
 *$py.class
 *.so
 .Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual Environment
+venv/
+ENV/
+env/
+.venv/
 
 # IDE
-.vscode/
 .idea/
+.vscode/
 *.swp
 *.swo
+*~
 
-# OS
+# Environment variables
+.env
+.env.local
+.env.*.local
+
+# Data files (large files should not be committed)
+data/raw/
+data/processed/
+*.zip
+*.csv
+*.json
+!src/data/schema.sql
+
+# Database files
+*.db
+*.sqlite
+*.sqlite3
+
+# Model checkpoints and weights
+models/checkpoints/
+*.h5
+*.pt
+*.pth
+*.ckpt
+*.pkl
+*.joblib
+
+# Jupyter Notebooks
+.ipynb_checkpoints/
+*.ipynb_checkpoints
+
+# OS files
 .DS_Store
 .DS_Store?
 ._*
 .Spotlight-V100
 .Trashes
+ehthumbs.db
+Thumbs.db
 
-# Distribution / packaging
-dist/
-build/
-*.egg-info/
+# Logs
+*.log
+logs/
 
+# Coverage reports
+htmlcov/
+.tox/
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+.hypothesis/
+.pytest_cache/
+
+# mypy
+.mypy_cache/
+
+# Temporary files
+tmp/
+temp/
+*.tmp

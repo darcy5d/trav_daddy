@@ -1,0 +1,219 @@
+{% extends "base.html" %}
+
+{% block title %}Match Prediction - Cricket Match Predictor{% endblock %}
+
+{% block content %}
+<h1 style="margin-bottom: 2rem;">Match Prediction</h1>
+
+<div class="grid grid-2">
+    <div class="card">
+        <h3 class="card-title">Configure Match</h3>
+        <form id="predict-form">
+            <div class="grid grid-2">
+                <div class="form-group">
+                    <label>Team 1</label>
+                    <select id="team1-select" required>
+                        <option value="">Select Team</option>
+                    </select>
+                </div>
+                <div class="form-group">
+                    <label>Team 2</label>
+                    <select id="team2-select" required>
+                        <option value="">Select Team</option>
+                    </select>
+                </div>
+            </div>
+            
+            <div class="form-group">
+                <label>Match Format</label>
+                <select id="format-select">
+                    <option value="T20">T20 International</option>
+                    <option value="ODI">One Day International</option>
+                </select>
+            </div>
+            
+            <div class="form-group">
+                <label>Number of Simulations</label>
+                <select id="simulations-select">
+                    <option value="100">Quick (100)</option>
+                    <option value="1000" selected>Standard (1,000)</option>
+                    <option value="5000">Detailed (5,000)</option>
+                    <option value="10000">Comprehensive (10,000)</option>
+                </select>
+            </div>
+            
+            <button type="submit" class="btn btn-primary" id="predict-btn">
+                Run Prediction
+            </button>
+        </form>
+    </div>
+    
+    <div class="card" id="results-card" style="display: none;">
+        <h3 class="card-title">Prediction Results</h3>
+        <div id="results-content"></div>
+    </div>
+</div>
+
+<div class="card" id="team-info-card" style="display: none;">
+    <h3 class="card-title">Team Comparison</h3>
+    <div class="grid grid-2" id="team-comparison"></div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+    let teams = [];
+    
+    // Load teams
+    async function loadTeams() {
+        const result = await fetchAPI('/api/teams');
+        if (result.success) {
+            teams = result.teams;
+            const options = teams.map(t => 
+                `<option value="${t.team_id}">${t.name}</option>`
+            ).join('');
+            
+            document.getElementById('team1-select').innerHTML = 
+                '<option value="">Select Team</option>' + options;
+            document.getElementById('team2-select').innerHTML = 
+                '<option value="">Select Team</option>' + options;
+        }
+    }
+    
+    // Update team info on selection
+    function updateTeamInfo() {
+        const team1Id = document.getElementById('team1-select').value;
+        const team2Id = document.getElementById('team2-select').value;
+        const format = document.getElementById('format-select').value;
+        
+        if (!team1Id || !team2Id) {
+            document.getElementById('team-info-card').style.display = 'none';
+            return;
+        }
+        
+        const team1 = teams.find(t => t.team_id == team1Id);
+        const team2 = teams.find(t => t.team_id == team2Id);
+        
+        const eloKey = format === 'T20' ? 'elo_t20' : 'elo_odi';
+        
+        document.getElementById('team-comparison').innerHTML = `
+            <div>
+                <h4 style="color: var(--accent-primary); margin-bottom: 1rem;">${team1.name}</h4>
+                <div style="margin-bottom: 0.5rem;">
+                    <span style="color: var(--text-secondary);">${format} ELO:</span>
+                    <span class="badge badge-success" style="margin-left: 0.5rem;">${Math.round(team1[eloKey])}</span>
+                </div>
+            </div>
+            <div>
+                <h4 style="color: var(--accent-warning); margin-bottom: 1rem;">${team2.name}</h4>
+                <div style="margin-bottom: 0.5rem;">
+                    <span style="color: var(--text-secondary);">${format} ELO:</span>
+                    <span class="badge badge-warning" style="margin-left: 0.5rem;">${Math.round(team2[eloKey])}</span>
+                </div>
+            </div>
+        `;
+        
+        document.getElementById('team-info-card').style.display = 'block';
+    }
+    
+    // Add event listeners for team selection
+    document.getElementById('team1-select').addEventListener('change', updateTeamInfo);
+    document.getElementById('team2-select').addEventListener('change', updateTeamInfo);
+    document.getElementById('format-select').addEventListener('change', updateTeamInfo);
+    
+    // Prediction form submission
+    document.getElementById('predict-form').addEventListener('submit', async (e) => {
+        e.preventDefault();
+        
+        const btn = document.getElementById('predict-btn');
+        const originalText = btn.textContent;
+        btn.textContent = 'Running simulation...';
+        btn.disabled = true;
+        
+        const team1Id = document.getElementById('team1-select').value;
+        const team2Id = document.getElementById('team2-select').value;
+        const format = document.getElementById('format-select').value;
+        const nSim = document.getElementById('simulations-select').value;
+        
+        const result = await fetchAPI('/api/predict', {
+            method: 'POST',
+            body: JSON.stringify({
+                team1_id: parseInt(team1Id),
+                team2_id: parseInt(team2Id),
+                format: format,
+                n_simulations: parseInt(nSim)
+            })
+        });
+        
+        btn.textContent = originalText;
+        btn.disabled = false;
+        
+        const resultsCard = document.getElementById('results-card');
+        const resultsContent = document.getElementById('results-content');
+        
+        if (result.success) {
+            const p = result.prediction;
+            
+            resultsContent.innerHTML = `
+                <div style="text-align: center; margin-bottom: 2rem;">
+                    <div style="font-size: 0.875rem; color: var(--text-secondary); margin-bottom: 0.5rem;">
+                        Win Probability
+                    </div>
+                    <div style="display: flex; justify-content: center; gap: 2rem;">
+                        <div>
+                            <div class="stat-value" style="color: var(--accent-primary);">
+                                ${formatPercent(p.team1.win_probability)}
+                            </div>
+                            <div style="color: var(--text-secondary);">${p.team1.name}</div>
+                        </div>
+                        <div style="font-size: 2rem; color: var(--text-muted);">vs</div>
+                        <div>
+                            <div class="stat-value" style="color: var(--accent-warning);">
+                                ${formatPercent(p.team2.win_probability)}
+                            </div>
+                            <div style="color: var(--text-secondary);">${p.team2.name}</div>
+                        </div>
+                    </div>
+                </div>
+                
+                <div style="margin-bottom: 1.5rem;">
+                    <div style="display: flex; height: 24px; border-radius: 12px; overflow: hidden;">
+                        <div style="width: ${p.team1.win_probability * 100}%; background: var(--gradient-1);"></div>
+                        <div style="width: ${p.team2.win_probability * 100}%; background: var(--gradient-2);"></div>
+                    </div>
+                </div>
+                
+                <div class="grid grid-2" style="margin-bottom: 1.5rem;">
+                    <div>
+                        <div style="color: var(--text-secondary); font-size: 0.875rem;">Expected Score</div>
+                        <div style="font-family: 'JetBrains Mono', monospace; font-size: 1.25rem;">
+                            ${Math.round(p.team1.expected_score)} <span style="color: var(--text-muted);">± ${Math.round(p.team1.score_std)}</span>
+                        </div>
+                    </div>
+                    <div>
+                        <div style="color: var(--text-secondary); font-size: 0.875rem;">Expected Score</div>
+                        <div style="font-family: 'JetBrains Mono', monospace; font-size: 1.25rem;">
+                            ${Math.round(p.team2.expected_score)} <span style="color: var(--text-muted);">± ${Math.round(p.team2.score_std)}</span>
+                        </div>
+                    </div>
+                </div>
+                
+                <div style="color: var(--text-secondary); font-size: 0.875rem; text-align: center;">
+                    95% Confidence Interval: ${formatPercent(p.confidence_interval[0])} - ${formatPercent(p.confidence_interval[1])}
+                    <br>
+                    Based on ${p.n_simulations.toLocaleString()} simulations
+                </div>
+            `;
+            
+            resultsCard.style.display = 'block';
+        } else {
+            resultsContent.innerHTML = `<p style="color: #ef4444;">Error: ${result.error}</p>`;
+            resultsCard.style.display = 'block';
+        }
+    });
+    
+    // Initialize
+    loadTeams();
+</script>
+{% endblock %}
+
