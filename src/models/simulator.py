@@ -1,603 +1,787 @@
 """
-Monte Carlo Ball-by-Ball Match Simulator.
+Monte Carlo Ball-by-Ball Match Simulation Engine.
 
-Simulates cricket matches ball-by-ball using probability distributions
-derived from historical data and player ELO ratings.
-
-This approach is inspired by the article:
-"Predicting T20 Cricket Matches with a Ball Simulation Model"
+Simulates cricket matches delivery by delivery using:
+- HYBRID outcome probabilities: H2H data (≥25 balls) or ELO-based fallback
+- Smart captain bowling selection with 4-over max enforcement
+- Phase-specific adjustments (powerplay, middle, death)
+- Match situation context (wickets, required rate)
 """
 
 import logging
-import sys
-from pathlib import Path
-from typing import Optional, Dict, List, Tuple, Any
-from dataclasses import dataclass, field
-from datetime import datetime
+from typing import Dict, List, Tuple, Optional
+from dataclasses import dataclass
+import random
 import numpy as np
 from collections import defaultdict
 
+import sys
+from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 
-from config import SIMULATION_CONFIG, ELO_CONFIG
-from src.data.database import get_db_connection
-from src.elo.calculator import EloCalculator
+from config import SIMULATION_CONFIG
+from src.models.matchups import get_matchup_db, MatchupDatabase, MatchupStats
+from src.models.bowling_captain import (
+    SmartCaptain, BowlingTracker, Bowler, MatchState,
+    InningsPhase, get_innings_phase
+)
 
 logger = logging.getLogger(__name__)
 
 
 @dataclass
-class BallOutcome:
-    """Represents the outcome of a single delivery."""
-    runs_batter: int = 0
-    runs_extras: int = 0
-    is_wicket: bool = False
-    is_wide: bool = False
-    is_noball: bool = False
-    wicket_type: Optional[str] = None
-
-
-@dataclass
-class BatterState:
-    """State of a batter during simulation."""
+class Player:
+    """Represents a player with ELO ratings."""
     player_id: int
     name: str
-    batting_elo: float
-    runs: int = 0
-    balls: int = 0
-    fours: int = 0
-    sixes: int = 0
-    is_out: bool = False
-
-
-@dataclass 
-class BowlerState:
-    """State of a bowler during simulation."""
-    player_id: int
-    name: str
-    bowling_elo: float
-    overs: float = 0
-    runs: int = 0
-    wickets: int = 0
-    balls_bowled: int = 0
+    batting_elo: float = 1500.0
+    bowling_elo: float = 1500.0
 
 
 @dataclass
 class InningsState:
-    """State of an innings during simulation."""
-    batting_team: str
-    bowling_team: str
-    total_runs: int = 0
+    """Current state of an innings."""
+    score: int = 0
     wickets: int = 0
-    overs: float = 0
-    balls_in_over: int = 0
+    balls: int = 0
     target: Optional[int] = None
-    batters: List[BatterState] = field(default_factory=list)
-    bowlers: List[BowlerState] = field(default_factory=list)
-    current_batter_idx: int = 0
-    current_bowler_idx: int = 0
     
+    @property
+    def overs(self) -> float:
+        """Current over in decimal format."""
+        return self.balls // 6 + (self.balls % 6) / 10
+    
+    @property
+    def overs_completed(self) -> int:
+        """Number of completed overs."""
+        return self.balls // 6
+    
+    @property
+    def run_rate(self) -> float:
+        """Current run rate."""
+        overs = self.balls / 6
+        return self.score / overs if overs > 0 else 0
+    
+    @property
+    def required_rate(self) -> Optional[float]:
+        """Required run rate if chasing."""
+        if self.target is None:
+            return None
+        runs_needed = self.target - self.score
+        balls_remaining = 120 - self.balls  # T20
+        if balls_remaining <= 0:
+            return float('inf')
+        return runs_needed * 6 / balls_remaining
 
-class BallProbabilityModel:
+
+class OutcomeDistribution:
     """
-    Model for calculating ball outcome probabilities.
+    Stores and samples from outcome probability distributions.
     
-    Uses historical data and player ELO ratings to determine
-    probability distributions for each delivery.
+    Supports:
+    - Head-to-head historical data (when ≥25 balls faced)
+    - ELO-based fallback distributions (keyed by phase and elo_bucket)
     """
     
-    def __init__(self):
-        self.elo_calc = EloCalculator()
-        
-        # Base probability distributions (can be refined with data)
-        # These are approximate distributions for T20 cricket
-        self.base_run_probs = {
-            'T20': {
-                'powerplay': [0.32, 0.28, 0.05, 0.01, 0.18, 0.00, 0.08, 0.08],  # 0,1,2,3,4,5,6,wicket
-                'middle': [0.38, 0.30, 0.06, 0.01, 0.12, 0.00, 0.06, 0.07],
-                'death': [0.30, 0.25, 0.08, 0.02, 0.15, 0.00, 0.12, 0.08]
-            },
-            'ODI': {
-                'powerplay': [0.35, 0.32, 0.08, 0.02, 0.12, 0.00, 0.04, 0.07],
-                'middle': [0.42, 0.30, 0.08, 0.02, 0.08, 0.00, 0.03, 0.07],
-                'death': [0.32, 0.28, 0.08, 0.02, 0.14, 0.00, 0.08, 0.08]
-            }
+    # Default distributions based on T20 cricket averages
+    DEFAULT_DISTRIBUTIONS = {
+        'powerplay': {
+            'very_low':  {'0': 0.38, '1': 0.30, '2': 0.06, '3': 0.01, '4': 0.12, '6': 0.06, 'W': 0.07},
+            'low':       {'0': 0.36, '1': 0.31, '2': 0.06, '3': 0.01, '4': 0.13, '6': 0.07, 'W': 0.06},
+            'even':      {'0': 0.34, '1': 0.32, '2': 0.07, '3': 0.01, '4': 0.14, '6': 0.07, 'W': 0.05},
+            'high':      {'0': 0.32, '1': 0.32, '2': 0.07, '3': 0.01, '4': 0.15, '6': 0.08, 'W': 0.05},
+            'very_high': {'0': 0.30, '1': 0.32, '2': 0.07, '3': 0.01, '4': 0.16, '6': 0.10, 'W': 0.04},
+        },
+        'middle': {
+            'very_low':  {'0': 0.42, '1': 0.30, '2': 0.07, '3': 0.01, '4': 0.09, '6': 0.05, 'W': 0.06},
+            'low':       {'0': 0.40, '1': 0.31, '2': 0.07, '3': 0.01, '4': 0.10, '6': 0.06, 'W': 0.05},
+            'even':      {'0': 0.38, '1': 0.32, '2': 0.08, '3': 0.01, '4': 0.11, '6': 0.06, 'W': 0.04},
+            'high':      {'0': 0.36, '1': 0.32, '2': 0.08, '3': 0.01, '4': 0.12, '6': 0.07, 'W': 0.04},
+            'very_high': {'0': 0.34, '1': 0.32, '2': 0.08, '3': 0.01, '4': 0.13, '6': 0.09, 'W': 0.03},
+        },
+        'death': {
+            'very_low':  {'0': 0.32, '1': 0.26, '2': 0.06, '3': 0.01, '4': 0.14, '6': 0.12, 'W': 0.09},
+            'low':       {'0': 0.30, '1': 0.27, '2': 0.06, '3': 0.01, '4': 0.15, '6': 0.13, 'W': 0.08},
+            'even':      {'0': 0.28, '1': 0.28, '2': 0.07, '3': 0.01, '4': 0.16, '6': 0.13, 'W': 0.07},
+            'high':      {'0': 0.26, '1': 0.28, '2': 0.07, '3': 0.01, '4': 0.17, '6': 0.15, 'W': 0.06},
+            'very_high': {'0': 0.24, '1': 0.28, '2': 0.07, '3': 0.01, '4': 0.18, '6': 0.17, 'W': 0.05},
         }
-        
-        # Wide/Noball probabilities
-        self.extras_prob = {
-            'T20': {'wide': 0.03, 'noball': 0.01},
-            'ODI': {'wide': 0.02, 'noball': 0.01}
-        }
+    }
     
-    def get_phase(self, over: int, match_format: str) -> str:
-        """Determine the phase of the innings."""
-        if match_format == 'T20':
-            if over < 6:
-                return 'powerplay'
-            elif over < 15:
-                return 'middle'
-            else:
-                return 'death'
-        else:  # ODI
-            if over < 10:
-                return 'powerplay'
-            elif over < 40:
-                return 'middle'
-            else:
-                return 'death'
-    
-    def adjust_probabilities(
+    def __init__(
         self,
-        base_probs: List[float],
+        distributions: Optional[Dict] = None,
+        matchup_db: Optional[MatchupDatabase] = None
+    ):
+        """Initialize with custom or default distributions."""
+        self.distributions = distributions or self.DEFAULT_DISTRIBUTIONS
+        self.matchup_db = matchup_db
+        
+        # Track H2H usage for analysis
+        self.h2h_hits = 0
+        self.h2h_misses = 0
+    
+    def get_elo_bucket(self, elo_diff: float) -> str:
+        """Convert ELO difference to bucket."""
+        if elo_diff < -150:
+            return 'very_low'
+        elif elo_diff < -50:
+            return 'low'
+        elif elo_diff < 50:
+            return 'even'
+        elif elo_diff < 150:
+            return 'high'
+        else:
+            return 'very_high'
+    
+    def get_phase(self, over_number: int) -> str:
+        """Get innings phase from over number."""
+        if over_number < 6:
+            return 'powerplay'
+        elif over_number < 15:
+            return 'middle'
+        else:
+            return 'death'
+    
+    def get_h2h_distribution(
+        self,
+        batter_id: int,
+        bowler_id: int
+    ) -> Optional[Dict[str, float]]:
+        """
+        Get H2H outcome distribution if sufficient data exists.
+        
+        Returns None if:
+        - No matchup database configured
+        - Less than 25 balls faced between batter and bowler
+        """
+        if self.matchup_db is None:
+            return None
+        
+        return self.matchup_db.get_h2h_distribution(batter_id, bowler_id)
+    
+    def get_elo_distribution(
+        self,
         batter_elo: float,
         bowler_elo: float,
-        match_situation: Dict[str, Any]
-    ) -> List[float]:
-        """
-        Adjust base probabilities based on player ELOs and situation.
-        
-        Args:
-            base_probs: Base probability distribution [0,1,2,3,4,5,6,wicket]
-            batter_elo: Batter's ELO rating
-            bowler_elo: Bowler's ELO rating
-            match_situation: Current match state
-            
-        Returns:
-            Adjusted probability distribution
-        """
-        probs = list(base_probs)
-        initial_elo = ELO_CONFIG['initial_rating']
-        
-        # ELO differential effect
+        over_number: int
+    ) -> Dict[str, float]:
+        """Get ELO-based outcome distribution (fallback)."""
         elo_diff = batter_elo - bowler_elo
-        adjustment_factor = 1 + (elo_diff / 800)  # ~+/-25% at 200 ELO diff
+        bucket = self.get_elo_bucket(elo_diff)
+        phase = self.get_phase(over_number)
         
-        # Adjust scoring probabilities (indices 1-6)
-        for i in range(1, 7):
-            probs[i] *= adjustment_factor
-        
-        # Adjust wicket probability (inverse effect)
-        probs[7] /= adjustment_factor
-        
-        # Situation-based adjustments
-        if 'required_rate' in match_situation:
-            req_rate = match_situation['required_rate']
-            if req_rate > 12:  # High pressure chase
-                # More aggressive = more boundaries but also more wickets
-                probs[4] *= 1.2  # More 4s
-                probs[6] *= 1.3  # More 6s
-                probs[7] *= 1.15  # More wickets
-        
-        # Normalize
-        total = sum(probs)
-        return [p / total for p in probs]
+        return self.distributions[phase][bucket].copy()
     
-    def simulate_ball(
+    def sample_outcome(
         self,
-        batter_elo: float,
-        bowler_elo: float,
-        match_format: str,
-        over: int,
-        match_situation: Dict[str, Any]
-    ) -> BallOutcome:
+        batter: Player,
+        bowler: 'Bowler',
+        over_number: int,
+        pressure_adjustment: float = 0.0,
+        use_h2h: bool = True
+    ) -> str:
         """
-        Simulate a single ball delivery.
+        Sample an outcome from the HYBRID distribution.
+        
+        Strategy:
+        1. If H2H data exists (≥25 balls), use historical distribution
+        2. Otherwise, fall back to ELO-based distribution
         
         Args:
-            batter_elo: Batter's ELO rating
-            bowler_elo: Bowler's ELO rating
-            match_format: 'T20' or 'ODI'
-            over: Current over number
-            match_situation: Current match state
-            
+            batter: Batter player object
+            bowler: Bowler object (from bowling_captain)
+            over_number: Current over (0-19 for T20)
+            pressure_adjustment: Adjustment factor for pressure situations
+            use_h2h: Whether to attempt H2H lookup (can disable for testing)
+        
         Returns:
-            BallOutcome for this delivery
+            Outcome string: '0', '1', '2', '3', '4', '6', or 'W'
         """
-        # Check for extras first
-        if np.random.random() < self.extras_prob[match_format]['wide']:
-            return BallOutcome(runs_extras=1, is_wide=True)
+        probs = None
         
-        if np.random.random() < self.extras_prob[match_format]['noball']:
-            # Noball - still need to determine runs
-            pass
+        # TRY H2H FIRST
+        if use_h2h:
+            h2h_dist = self.get_h2h_distribution(batter.player_id, bowler.player_id)
+            if h2h_dist is not None:
+                probs = h2h_dist.copy()
+                self.h2h_hits += 1
         
-        # Get phase-based probabilities
-        phase = self.get_phase(over, match_format)
-        base_probs = self.base_run_probs[match_format][phase]
+        # FALLBACK TO ELO
+        if probs is None:
+            probs = self.get_elo_distribution(
+                batter.batting_elo,
+                bowler.bowling_elo,
+                over_number
+            )
+            self.h2h_misses += 1
         
-        # Adjust for player quality and situation
-        probs = self.adjust_probabilities(
-            base_probs, batter_elo, bowler_elo, match_situation
-        )
+        # Apply pressure adjustment (increases wicket probability under pressure)
+        if pressure_adjustment > 0:
+            wicket_boost = pressure_adjustment * 0.02  # Up to 2% more wickets
+            probs['W'] = min(0.15, probs['W'] + wicket_boost)
+            
+            # Reduce other probabilities proportionally
+            total_other = 1 - probs['W']
+            other_keys = [k for k in probs if k != 'W']
+            original_other = sum(probs[k] for k in other_keys)
+            for k in other_keys:
+                probs[k] = probs[k] * total_other / original_other
         
-        # Sample outcome
-        outcomes = [0, 1, 2, 3, 4, 5, 6, 'wicket']
-        outcome = np.random.choice(range(len(outcomes)), p=probs)
+        # Sample
+        outcomes = list(probs.keys())
+        probabilities = list(probs.values())
         
-        if outcome == 7:  # Wicket
-            return BallOutcome(is_wicket=True, wicket_type='caught')
-        
-        runs = outcomes[outcome]
-        return BallOutcome(runs_batter=runs)
+        return np.random.choice(outcomes, p=probabilities)
+    
+    def get_h2h_stats(self) -> Dict[str, int]:
+        """Get statistics on H2H vs ELO usage."""
+        total = self.h2h_hits + self.h2h_misses
+        return {
+            'h2h_hits': self.h2h_hits,
+            'h2h_misses': self.h2h_misses,
+            'h2h_rate': self.h2h_hits / total if total > 0 else 0
+        }
+
+
+def player_to_bowler(player: Player) -> Bowler:
+    """Convert Player to Bowler for captain selection."""
+    return Bowler(
+        player_id=player.player_id,
+        name=player.name,
+        bowling_elo=player.bowling_elo
+    )
 
 
 class MatchSimulator:
     """
-    Monte Carlo match simulator.
+    Monte Carlo match simulation engine with H2H and T20 bowling rules.
     
-    Runs multiple simulations to estimate match outcome probabilities.
+    Features:
+    - Hybrid outcome distributions (H2H when ≥25 balls, else ELO)
+    - Smart captain bowler selection
+    - T20 4-over max per bowler enforcement
+    - Phase-aware bowling (powerplay, middle, death)
     """
     
-    def __init__(self):
-        self.prob_model = BallProbabilityModel()
-        self.elo_calc = EloCalculator()
-        self.num_simulations = SIMULATION_CONFIG['num_simulations']
+    def __init__(
+        self,
+        outcome_distribution: Optional[OutcomeDistribution] = None,
+        num_simulations: int = SIMULATION_CONFIG['num_simulations'],
+        format_type: str = 'T20',
+        gender: str = 'male',
+        use_smart_captain: bool = True,
+        use_h2h: bool = True
+    ):
+        # Load matchup database if H2H is enabled
+        matchup_db = None
+        if use_h2h:
+            matchup_db = get_matchup_db(format_type, gender)
+            matchup_db.load_from_database()
+        
+        self.outcome_dist = outcome_distribution or OutcomeDistribution(matchup_db=matchup_db)
+        self.num_simulations = num_simulations
+        self.format_type = format_type
+        self.gender = gender
+        self.use_smart_captain = use_smart_captain
+        self.use_h2h = use_h2h
+    
+    def simulate_delivery(
+        self,
+        batter: Player,
+        bowler: Bowler,
+        state: InningsState,
+        over_number: int
+    ) -> Tuple[int, bool]:
+        """
+        Simulate a single delivery.
+        
+        Uses HYBRID distribution:
+        - H2H stats if batter has faced this bowler ≥25 times
+        - ELO-based distribution otherwise
+        
+        Returns:
+            Tuple of (runs_scored, is_wicket)
+        """
+        # Calculate pressure
+        pressure = 0.0
+        if state.target is not None:
+            req_rate = state.required_rate
+            if req_rate and req_rate > 10:
+                pressure = min(1.0, (req_rate - 10) / 6)
+        
+        # Sample outcome (HYBRID: H2H or ELO)
+        outcome = self.outcome_dist.sample_outcome(
+            batter,
+            bowler,
+            over_number,
+            pressure,
+            use_h2h=self.use_h2h
+        )
+        
+        if outcome == 'W':
+            return 0, True
+        else:
+            return int(outcome), False
     
     def simulate_innings(
         self,
-        batting_team_elos: List[float],
-        bowling_team_elos: List[float],
-        match_format: str,
-        target: Optional[int] = None
-    ) -> Dict[str, Any]:
+        batting_xi: List[Player],
+        bowling_attack: List[Player],
+        target: Optional[int] = None,
+        max_overs: int = 20
+    ) -> InningsState:
         """
-        Simulate a complete innings.
+        Simulate a complete innings with T20 bowling rules.
+        
+        Features:
+        - Smart captain bowler selection
+        - 4-over max per bowler enforcement
+        - H2H matchup-aware bowling choices
         
         Args:
-            batting_team_elos: List of batting ELOs for each batter
-            bowling_team_elos: List of bowling ELOs for bowlers
-            match_format: 'T20' or 'ODI'
-            target: Target score (for second innings)
-            
+            batting_xi: List of 11 batters in order
+            bowling_attack: List of available bowlers (need at least 5)
+            target: Target score if chasing (None for first innings)
+            max_overs: Maximum overs in innings (20 for T20)
+        
         Returns:
-            Innings result dictionary
+            Final innings state
         """
-        max_overs = 20 if match_format == 'T20' else 50
-        max_wickets = 10
+        state = InningsState(target=target)
         
-        total_runs = 0
-        wickets = 0
-        balls = 0
-        batter_idx = 0
+        current_batter_idx = 0
+        non_striker_idx = 1
+        max_balls = max_overs * 6
         
-        # Cycle through bowlers
-        bowler_elos = bowling_team_elos[:5]  # Top 5 bowlers
-        bowler_idx = 0
+        # Convert players to bowlers and create smart captain
+        bowlers = [player_to_bowler(p) for p in bowling_attack[:5]]
         
-        while balls < max_overs * 6 and wickets < max_wickets:
-            over = balls // 6
-            
-            # Current batter and bowler
-            batter_elo = batting_team_elos[min(batter_idx, len(batting_team_elos) - 1)]
-            bowler_elo = bowler_elos[bowler_idx % len(bowler_elos)]
-            
-            # Match situation
-            overs_remaining = max_overs - over
-            situation = {
-                'overs_remaining': overs_remaining,
-                'wickets_remaining': max_wickets - wickets,
-                'current_score': total_runs
-            }
-            
-            if target:
-                runs_needed = target - total_runs
-                balls_remaining = (max_overs * 6) - balls
-                situation['required_rate'] = (runs_needed / balls_remaining) * 6 if balls_remaining > 0 else 99
-            
-            # Simulate ball
-            outcome = self.prob_model.simulate_ball(
-                batter_elo, bowler_elo, match_format, over, situation
+        if self.use_smart_captain:
+            captain = SmartCaptain(
+                bowling_attack=bowlers,
+                format_type=self.format_type,
+                gender=self.gender
             )
-            
-            # Process outcome
-            if outcome.is_wide:
-                total_runs += 1
-                # Wide doesn't count as a ball
-            else:
-                balls += 1
-                total_runs += outcome.runs_batter + outcome.runs_extras
-                
-                if outcome.is_wicket:
-                    wickets += 1
-                    batter_idx += 1
-            
-            # Change bowler at end of over
-            if balls % 6 == 0 and balls > 0:
-                bowler_idx += 1
-            
-            # Check if target reached
-            if target and total_runs >= target:
-                break
+        else:
+            captain = None
         
-        return {
-            'runs': total_runs,
-            'wickets': wickets,
-            'balls': balls,
-            'overs': balls / 6,
-            'won_chase': total_runs >= target if target else None
-        }
+        for over in range(max_overs):
+            # Select bowler
+            if self.use_smart_captain and captain:
+                # Get current batters at crease
+                current_batter_ids = [
+                    batting_xi[current_batter_idx].player_id,
+                    batting_xi[non_striker_idx].player_id
+                ]
+                
+                match_state = MatchState(
+                    total_runs=state.score,
+                    wickets=state.wickets,
+                    overs_completed=over,
+                    balls_in_over=0,
+                    target=target,
+                    run_rate=state.run_rate,
+                    required_rate=state.required_rate
+                )
+                
+                # Smart bowler selection
+                bowler = captain.select_bowler(
+                    current_batter_ids,
+                    match_state,
+                    over + 1  # 1-indexed
+                )
+            else:
+                # Simple rotation fallback
+                bowler = bowlers[over % len(bowlers)]
+            
+            # Bowl the over
+            for ball in range(6):
+                if state.wickets >= 10:
+                    # Record partial over
+                    if self.use_smart_captain and captain:
+                        # Only record if bowled at least some balls
+                        if ball > 0:
+                            captain.tracker.balls_in_current_over[bowler.player_id] = ball
+                    return state
+                
+                if target is not None and state.score >= target:
+                    if self.use_smart_captain and captain:
+                        if ball > 0:
+                            captain.tracker.balls_in_current_over[bowler.player_id] = ball
+                    return state
+                
+                # Get current batter
+                batter = batting_xi[current_batter_idx]
+                
+                # Simulate delivery (HYBRID distribution)
+                runs, is_wicket = self.simulate_delivery(
+                    batter, bowler, state, over
+                )
+                
+                state.score += runs
+                state.balls += 1
+                
+                if is_wicket:
+                    state.wickets += 1
+                    if state.wickets < 10:
+                        # Next batter comes in
+                        current_batter_idx = min(10, state.wickets + 1)
+                
+                # Rotate strike for odd runs
+                if runs % 2 == 1:
+                    current_batter_idx, non_striker_idx = non_striker_idx, current_batter_idx
+            
+            # End of over: record and rotate strike
+            if self.use_smart_captain and captain:
+                captain.record_over_complete(bowler.player_id)
+            
+            current_batter_idx, non_striker_idx = non_striker_idx, current_batter_idx
+        
+        return state
     
     def simulate_match(
         self,
-        team1_batting_elos: List[float],
-        team1_bowling_elos: List[float],
-        team2_batting_elos: List[float],
-        team2_bowling_elos: List[float],
-        match_format: str,
+        team1_batting: List[Player],
+        team1_bowling: List[Player],
+        team2_batting: List[Player],
+        team2_bowling: List[Player],
         team1_bats_first: bool = True
-    ) -> Dict[str, Any]:
+    ) -> Dict:
         """
-        Simulate a complete match.
+        Simulate a single match.
         
-        Args:
-            team1_batting_elos: Team 1 batting ELOs
-            team1_bowling_elos: Team 1 bowling ELOs
-            team2_batting_elos: Team 2 batting ELOs
-            team2_bowling_elos: Team 2 bowling ELOs
-            match_format: 'T20' or 'ODI'
-            team1_bats_first: Whether team 1 bats first
-            
         Returns:
-            Match result dictionary
+            Dict with match result details
         """
         if team1_bats_first:
-            first_bat = team1_batting_elos
-            first_bowl = team2_bowling_elos
-            second_bat = team2_batting_elos
-            second_bowl = team1_bowling_elos
-            first_team = 'team1'
+            first_batting = team1_batting
+            first_bowling = team2_bowling
+            second_batting = team2_batting
+            second_bowling = team1_bowling
         else:
-            first_bat = team2_batting_elos
-            first_bowl = team1_bowling_elos
-            second_bat = team1_batting_elos
-            second_bowl = team2_bowling_elos
-            first_team = 'team2'
+            first_batting = team2_batting
+            first_bowling = team1_bowling
+            second_batting = team1_batting
+            second_bowling = team2_bowling
         
         # First innings
-        innings1 = self.simulate_innings(first_bat, first_bowl, match_format)
-        target = innings1['runs'] + 1
+        first_innings = self.simulate_innings(first_batting, first_bowling)
         
-        # Second innings
-        innings2 = self.simulate_innings(second_bat, second_bowl, match_format, target)
+        # Second innings (chasing)
+        target = first_innings.score + 1
+        second_innings = self.simulate_innings(second_batting, second_bowling, target=target)
         
         # Determine winner
-        if innings2['runs'] >= target:
-            winner = 'team2' if first_team == 'team1' else 'team1'
-            win_type = 'wickets'
-            margin = 10 - innings2['wickets']
+        if second_innings.score >= target:
+            # Chasing team won
+            winner = 2 if team1_bats_first else 1
+            margin = 10 - second_innings.wickets
+            margin_type = 'wickets'
         else:
-            winner = first_team
-            win_type = 'runs'
-            margin = innings1['runs'] - innings2['runs']
+            # Setting team won
+            winner = 1 if team1_bats_first else 2
+            margin = first_innings.score - second_innings.score
+            margin_type = 'runs'
         
         return {
+            'team1_score': first_innings.score if team1_bats_first else second_innings.score,
+            'team2_score': second_innings.score if team1_bats_first else first_innings.score,
+            'team1_wickets': first_innings.wickets if team1_bats_first else second_innings.wickets,
+            'team2_wickets': second_innings.wickets if team1_bats_first else first_innings.wickets,
             'winner': winner,
-            'win_type': win_type,
             'margin': margin,
-            'innings1': innings1,
-            'innings2': innings2,
-            'team1_bats_first': team1_bats_first
+            'margin_type': margin_type
         }
     
-    def run_monte_carlo(
+    def run_simulations(
         self,
-        team1_batting_elos: List[float],
-        team1_bowling_elos: List[float],
-        team2_batting_elos: List[float],
-        team2_bowling_elos: List[float],
-        match_format: str,
+        team1_batting: List[Player],
+        team1_bowling: List[Player],
+        team2_batting: List[Player],
+        team2_bowling: List[Player],
+        team1_bats_first: bool = True,
         n_simulations: Optional[int] = None
-    ) -> Dict[str, Any]:
+    ) -> Dict:
         """
-        Run Monte Carlo simulation for match prediction.
+        Run Monte Carlo simulations.
         
-        Args:
-            team1_batting_elos: Team 1 batting ELOs
-            team1_bowling_elos: Team 1 bowling ELOs
-            team2_batting_elos: Team 2 batting ELOs
-            team2_bowling_elos: Team 2 bowling ELOs
-            match_format: 'T20' or 'ODI'
-            n_simulations: Number of simulations (default from config)
-            
         Returns:
-            Simulation results with win probabilities
+            Dict with aggregated predictions:
+            - team1_win_prob: P(team1 wins)
+            - avg_team1_score, avg_team2_score
+            - score_ranges: Confidence intervals
+            - h2h_usage: Stats on H2H vs ELO distribution usage
         """
-        if n_simulations is None:
-            n_simulations = self.num_simulations
+        n = n_simulations or self.num_simulations
         
-        results = {
-            'team1_wins': 0,
-            'team2_wins': 0,
-            'team1_scores': [],
-            'team2_scores': [],
-            'margins': []
-        }
+        # Reset H2H stats
+        self.outcome_dist.h2h_hits = 0
+        self.outcome_dist.h2h_misses = 0
         
-        for i in range(n_simulations):
-            # Randomly determine who bats first (50/50 for now)
-            team1_bats_first = np.random.random() < 0.5
+        results = []
+        for i in range(n):
+            if i % 1000 == 0 and i > 0:
+                logger.debug(f"Simulation {i+1}/{n}")
             
-            match_result = self.simulate_match(
-                team1_batting_elos, team1_bowling_elos,
-                team2_batting_elos, team2_bowling_elos,
-                match_format, team1_bats_first
+            result = self.simulate_match(
+                team1_batting, team1_bowling,
+                team2_batting, team2_bowling,
+                team1_bats_first
             )
-            
-            if match_result['winner'] == 'team1':
-                results['team1_wins'] += 1
-            else:
-                results['team2_wins'] += 1
-            
-            # Track scores
-            if team1_bats_first:
-                results['team1_scores'].append(match_result['innings1']['runs'])
-                results['team2_scores'].append(match_result['innings2']['runs'])
-            else:
-                results['team1_scores'].append(match_result['innings2']['runs'])
-                results['team2_scores'].append(match_result['innings1']['runs'])
-            
-            results['margins'].append(match_result['margin'])
+            results.append(result)
         
-        # Calculate probabilities and statistics
-        team1_prob = results['team1_wins'] / n_simulations
-        team2_prob = results['team2_wins'] / n_simulations
+        # Aggregate results
+        team1_wins = sum(1 for r in results if r['winner'] == 1)
+        team1_scores = [r['team1_score'] for r in results]
+        team2_scores = [r['team2_score'] for r in results]
         
         return {
-            'team1_win_probability': team1_prob,
-            'team2_win_probability': team2_prob,
-            'team1_expected_score': np.mean(results['team1_scores']),
-            'team2_expected_score': np.mean(results['team2_scores']),
-            'team1_score_std': np.std(results['team1_scores']),
-            'team2_score_std': np.std(results['team2_scores']),
-            'average_margin': np.mean(results['margins']),
-            'n_simulations': n_simulations,
-            'confidence_interval': self._calculate_ci(team1_prob, n_simulations)
+            'team1_win_prob': team1_wins / n,
+            'team2_win_prob': 1 - team1_wins / n,
+            'n_simulations': n,
+            'avg_team1_score': np.mean(team1_scores),
+            'avg_team2_score': np.mean(team2_scores),
+            'team1_score_std': np.std(team1_scores),
+            'team2_score_std': np.std(team2_scores),
+            'team1_score_range': (np.percentile(team1_scores, 5), np.percentile(team1_scores, 95)),
+            'team2_score_range': (np.percentile(team2_scores, 5), np.percentile(team2_scores, 95)),
+            'h2h_usage': self.outcome_dist.get_h2h_stats()
         }
-    
-    def _calculate_ci(self, p: float, n: int, confidence: float = 0.95) -> Tuple[float, float]:
-        """Calculate confidence interval for probability."""
-        from scipy import stats
-        z = stats.norm.ppf((1 + confidence) / 2)
-        margin = z * np.sqrt(p * (1 - p) / n)
-        return (max(0, p - margin), min(1, p + margin))
-    
-    def predict_match(
-        self,
-        conn,
-        team1_id: int,
-        team2_id: int,
-        match_format: str,
-        match_date: datetime,
-        team1_players: Optional[List[int]] = None,
-        team2_players: Optional[List[int]] = None,
-        n_simulations: Optional[int] = None
-    ) -> Dict[str, Any]:
-        """
-        Predict match outcome using Monte Carlo simulation.
-        
-        Args:
-            conn: Database connection
-            team1_id: Team 1 ID
-            team2_id: Team 2 ID
-            match_format: 'T20' or 'ODI'
-            match_date: Date for ELO lookup
-            team1_players: Optional player IDs for team 1
-            team2_players: Optional player IDs for team 2
-            n_simulations: Number of simulations
-            
-        Returns:
-            Prediction results
-        """
-        # Get player ELOs (or use team average if players not specified)
-        if team1_players:
-            team1_batting = [
-                self.elo_calc.get_player_rating(conn, pid, match_format, 'batting', match_date)
-                for pid in team1_players
-            ]
-            team1_bowling = [
-                self.elo_calc.get_player_rating(conn, pid, match_format, 'bowling', match_date)
-                for pid in team1_players
-            ]
-        else:
-            # Use team ELO as proxy
-            team_elo = self.elo_calc.get_team_rating(conn, team1_id, match_format, match_date)
-            team1_batting = [team_elo] * 11
-            team1_bowling = [team_elo] * 11
-        
-        if team2_players:
-            team2_batting = [
-                self.elo_calc.get_player_rating(conn, pid, match_format, 'batting', match_date)
-                for pid in team2_players
-            ]
-            team2_bowling = [
-                self.elo_calc.get_player_rating(conn, pid, match_format, 'bowling', match_date)
-                for pid in team2_players
-            ]
-        else:
-            team_elo = self.elo_calc.get_team_rating(conn, team2_id, match_format, match_date)
-            team2_batting = [team_elo] * 11
-            team2_bowling = [team_elo] * 11
-        
-        # Run simulation
-        return self.run_monte_carlo(
-            team1_batting, team1_bowling,
-            team2_batting, team2_bowling,
-            match_format, n_simulations
+
+
+def create_dummy_players(
+    batting_elo_avg: float,
+    bowling_elo_avg: float,
+    n_batters: int = 11,
+    n_bowlers: int = 5,
+    variation: float = 50
+) -> Tuple[List[Player], List[Player]]:
+    """Create dummy players with given average ELOs."""
+    batters = [
+        Player(
+            player_id=i,
+            name=f"Batter{i}",
+            batting_elo=batting_elo_avg + random.uniform(-variation, variation)
         )
-
-
-def simulate_match_cli(
-    team1_name: str,
-    team2_name: str,
-    match_format: str = 'T20',
-    n_simulations: int = 1000
-):
-    """
-    Command-line interface for match simulation.
-    """
-    simulator = MatchSimulator()
+        for i in range(n_batters)
+    ]
     
-    with get_db_connection() as conn:
-        cursor = conn.cursor()
-        
-        # Find teams
-        cursor.execute("SELECT team_id FROM teams WHERE name = ?", (team1_name,))
-        row = cursor.fetchone()
-        if not row:
-            print(f"Team not found: {team1_name}")
-            return
-        team1_id = row['team_id']
-        
-        cursor.execute("SELECT team_id FROM teams WHERE name = ?", (team2_name,))
-        row = cursor.fetchone()
-        if not row:
-            print(f"Team not found: {team2_name}")
-            return
-        team2_id = row['team_id']
-        
-        # Run simulation
-        print(f"\nSimulating {team1_name} vs {team2_name} ({match_format})")
-        print(f"Running {n_simulations:,} simulations...")
-        
-        results = simulator.predict_match(
-            conn, team1_id, team2_id, match_format,
-            datetime.now(), n_simulations=n_simulations
+    bowlers = [
+        Player(
+            player_id=i + 100,
+            name=f"Bowler{i}",
+            bowling_elo=bowling_elo_avg + random.uniform(-variation, variation)
         )
-        
-        print("\n" + "=" * 50)
-        print("MATCH PREDICTION RESULTS")
-        print("=" * 50)
-        print(f"\n{team1_name}: {results['team1_win_probability']*100:.1f}% win probability")
-        print(f"{team2_name}: {results['team2_win_probability']*100:.1f}% win probability")
-        print(f"\nExpected scores:")
-        print(f"  {team1_name}: {results['team1_expected_score']:.0f} "
-              f"(±{results['team1_score_std']:.0f})")
-        print(f"  {team2_name}: {results['team2_expected_score']:.0f} "
-              f"(±{results['team2_score_std']:.0f})")
-        
-        ci = results['confidence_interval']
-        print(f"\n95% confidence interval: {ci[0]*100:.1f}% - {ci[1]*100:.1f}%")
-        print("=" * 50)
+        for i in range(n_bowlers)
+    ]
+    
+    return batters, bowlers
 
 
-def main():
-    """Run match simulation."""
-    logging.basicConfig(level=logging.INFO)
+def quick_simulation(
+    team1_batting_elo: float,
+    team1_bowling_elo: float,
+    team2_batting_elo: float,
+    team2_bowling_elo: float,
+    n_simulations: int = 1000,
+    use_h2h: bool = False,  # Default off for dummy players
+    use_smart_captain: bool = True
+) -> Dict:
+    """
+    Quick match simulation with average team ELOs.
     
-    import argparse
-    parser = argparse.ArgumentParser(description='Monte Carlo match simulation')
-    parser.add_argument('--team1', required=True, help='Team 1 name')
-    parser.add_argument('--team2', required=True, help='Team 2 name')
-    parser.add_argument('--format', default='T20', choices=['T20', 'ODI'])
-    parser.add_argument('--simulations', type=int, default=1000)
-    args = parser.parse_args()
+    Useful for testing without full player data.
+    Note: H2H is disabled by default since dummy players won't have matchup data.
+    """
+    team1_batters, team1_bowlers = create_dummy_players(
+        team1_batting_elo, team1_bowling_elo
+    )
+    team2_batters, team2_bowlers = create_dummy_players(
+        team2_batting_elo, team2_bowling_elo
+    )
     
-    simulate_match_cli(args.team1, args.team2, args.format, args.simulations)
+    simulator = MatchSimulator(
+        num_simulations=n_simulations,
+        use_h2h=use_h2h,
+        use_smart_captain=use_smart_captain
+    )
     
-    return 0
+    return simulator.run_simulations(
+        team1_batters, team1_bowlers,
+        team2_batters, team2_bowlers
+    )
+
+
+def load_team_from_db(
+    team_name: str,
+    format_type: str = 'T20',
+    gender: str = 'male',
+    n_batters: int = 11,
+    n_bowlers: int = 5
+) -> Tuple[List[Player], List[Player]]:
+    """
+    Load real team players from database.
+    
+    Returns batting XI and bowling attack with their ELO ratings.
+    """
+    from src.data.database import get_connection
+    
+    conn = get_connection()
+    cursor = conn.cursor()
+    
+    # Get team ID
+    cursor.execute("SELECT team_id FROM teams WHERE name = ?", (team_name,))
+    row = cursor.fetchone()
+    if not row:
+        raise ValueError(f"Team '{team_name}' not found in database")
+    team_id = row['team_id']
+    
+    # Get ELO column names
+    batting_col = f'batting_elo_{format_type.lower()}_{gender}'
+    bowling_col = f'bowling_elo_{format_type.lower()}_{gender}'
+    
+    # Get top batters by batting ELO
+    cursor.execute(f"""
+        SELECT DISTINCT p.player_id, p.name, 
+               COALESCE(e.{batting_col}, 1500) as batting_elo,
+               COALESCE(e.{bowling_col}, 1500) as bowling_elo
+        FROM players p
+        JOIN player_match_stats pms ON p.player_id = pms.player_id
+        JOIN matches m ON pms.match_id = m.match_id
+        LEFT JOIN player_current_elo e ON p.player_id = e.player_id
+        WHERE m.match_type = ? AND m.gender = ?
+        AND (m.team1_id = ? OR m.team2_id = ?)
+        AND pms.runs_scored > 0
+        GROUP BY p.player_id
+        ORDER BY COALESCE(e.{batting_col}, 1500) DESC
+        LIMIT ?
+    """, (format_type, gender, team_id, team_id, n_batters))
+    
+    batters = [
+        Player(
+            player_id=row['player_id'],
+            name=row['name'],
+            batting_elo=row['batting_elo'],
+            bowling_elo=row['bowling_elo']
+        )
+        for row in cursor.fetchall()
+    ]
+    
+    # Get top bowlers by bowling ELO
+    cursor.execute(f"""
+        SELECT DISTINCT p.player_id, p.name,
+               COALESCE(e.{batting_col}, 1500) as batting_elo,
+               COALESCE(e.{bowling_col}, 1500) as bowling_elo
+        FROM players p
+        JOIN player_match_stats pms ON p.player_id = pms.player_id
+        JOIN matches m ON pms.match_id = m.match_id
+        LEFT JOIN player_current_elo e ON p.player_id = e.player_id
+        WHERE m.match_type = ? AND m.gender = ?
+        AND (m.team1_id = ? OR m.team2_id = ?)
+        AND pms.overs_bowled > 0
+        GROUP BY p.player_id
+        ORDER BY COALESCE(e.{bowling_col}, 1500) DESC
+        LIMIT ?
+    """, (format_type, gender, team_id, team_id, n_bowlers))
+    
+    bowlers = [
+        Player(
+            player_id=row['player_id'],
+            name=row['name'],
+            batting_elo=row['batting_elo'],
+            bowling_elo=row['bowling_elo']
+        )
+        for row in cursor.fetchall()
+    ]
+    
+    conn.close()
+    
+    # Pad if needed
+    while len(batters) < n_batters:
+        batters.append(Player(-len(batters), f"Batter{len(batters)+1}", 1450, 1400))
+    while len(bowlers) < n_bowlers:
+        bowlers.append(Player(-len(bowlers)-100, f"Bowler{len(bowlers)+1}", 1400, 1450))
+    
+    return batters, bowlers
 
 
 if __name__ == "__main__":
-    sys.exit(main())
-
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+    
+    print("=" * 70)
+    print("MONTE CARLO MATCH SIMULATION WITH H2H & SMART CAPTAIN")
+    print("=" * 70)
+    
+    # Test 1: Quick simulation with dummy players (no H2H)
+    print("\n" + "=" * 70)
+    print("TEST 1: Dummy Players (Strong vs Weaker team)")
+    print("=" * 70)
+    
+    result = quick_simulation(
+        team1_batting_elo=1600,
+        team1_bowling_elo=1580,
+        team2_batting_elo=1500,
+        team2_bowling_elo=1500,
+        n_simulations=5000,
+        use_h2h=False,  # Dummy players have no H2H data
+        use_smart_captain=True
+    )
+    
+    print(f"\nTeam 1 Win Probability: {result['team1_win_prob']:.1%}")
+    print(f"Team 2 Win Probability: {result['team2_win_prob']:.1%}")
+    print(f"\nAverage Scores:")
+    print(f"  Team 1: {result['avg_team1_score']:.1f} (+/- {result['team1_score_std']:.1f})")
+    print(f"  Team 2: {result['avg_team2_score']:.1f} (+/- {result['team2_score_std']:.1f})")
+    print(f"\n90% Score Ranges:")
+    print(f"  Team 1: {result['team1_score_range'][0]:.0f} - {result['team1_score_range'][1]:.0f}")
+    print(f"  Team 2: {result['team2_score_range'][0]:.0f} - {result['team2_score_range'][1]:.0f}")
+    
+    # Test 2: Try loading real teams (with H2H)
+    print("\n" + "=" * 70)
+    print("TEST 2: Real Teams - India vs Australia (with H2H)")
+    print("=" * 70)
+    
+    try:
+        india_batting, india_bowling = load_team_from_db("India", "T20", "male")
+        australia_batting, australia_bowling = load_team_from_db("Australia", "T20", "male")
+        
+        print(f"\nIndia Top 5 Batters:")
+        for p in india_batting[:5]:
+            print(f"  {p.name}: Bat ELO={p.batting_elo:.0f}")
+        
+        print(f"\nAustralia Top 5 Bowlers:")
+        for p in australia_bowling[:5]:
+            print(f"  {p.name}: Bowl ELO={p.bowling_elo:.0f}")
+        
+        # Run simulation with H2H enabled
+        simulator = MatchSimulator(
+            num_simulations=5000,
+            use_h2h=True,
+            use_smart_captain=True
+        )
+        
+        result2 = simulator.run_simulations(
+            india_batting, india_bowling,
+            australia_batting, australia_bowling
+        )
+        
+        print(f"\n{'='*70}")
+        print("INDIA vs AUSTRALIA SIMULATION RESULTS")
+        print("=" * 70)
+        print(f"\nIndia Win Probability:     {result2['team1_win_prob']:.1%}")
+        print(f"Australia Win Probability: {result2['team2_win_prob']:.1%}")
+        print(f"\nAverage Scores:")
+        print(f"  India:     {result2['avg_team1_score']:.1f} (+/- {result2['team1_score_std']:.1f})")
+        print(f"  Australia: {result2['avg_team2_score']:.1f} (+/- {result2['team2_score_std']:.1f})")
+        
+        # H2H usage stats
+        h2h = result2['h2h_usage']
+        print(f"\nH2H Matchup Usage:")
+        print(f"  Deliveries with H2H data: {h2h['h2h_hits']:,}")
+        print(f"  Deliveries using ELO fallback: {h2h['h2h_misses']:,}")
+        print(f"  H2H usage rate: {h2h['h2h_rate']:.1%}")
+        
+    except Exception as e:
+        print(f"\nCould not load real teams: {e}")
+        print("(This is expected if database doesn't have India/Australia)")

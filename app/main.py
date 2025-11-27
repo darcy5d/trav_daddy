@@ -2,10 +2,14 @@
 Flask Web Application for Cricket Match Predictor.
 
 Provides a web interface and API for:
-- Match predictions
+- Match predictions using fast lookup or NN simulators
 - Team and player ELO rankings
 - Match simulation
+- Venue selection and toss simulation
 """
+
+import os
+os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
 
 import logging
 import sys
@@ -18,15 +22,13 @@ from flask_cors import CORS
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from config import FlaskConfig, DATABASE_PATH
-from src.data.database import get_db_connection
-from src.elo.calculator import EloCalculator
-from src.features.engineer import FeatureEngineer
-from src.models.simulator import MatchSimulator
+from config import DATABASE_PATH
+from src.data.database import get_connection
+from src.features.toss_stats import TossSimulator
 
 # Initialize Flask app
 app = Flask(__name__)
-app.config.from_object(FlaskConfig)
+app.secret_key = 'cricket-predictor-secret-key'
 CORS(app)
 
 # Configure logging
@@ -36,10 +38,40 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Initialize components
-elo_calculator = EloCalculator()
-feature_engineer = FeatureEngineer()
-simulator = MatchSimulator()
+# Lazy load simulators (they take time to initialize)
+# Cache per gender to avoid re-initializing
+_fast_simulators = {}  # {'male': simulator, 'female': simulator}
+_nn_simulators = {}
+_toss_simulator = None
+
+
+def get_fast_simulator(gender: str = 'male'):
+    """Get or initialize the fast lookup simulator for specified gender."""
+    global _fast_simulators
+    if gender not in _fast_simulators:
+        from src.models.fast_lookup_sim import FastLookupSimulator
+        _fast_simulators[gender] = FastLookupSimulator(use_h2h=True, gender=gender)
+        logger.info(f"Fast lookup simulator initialized for {gender}")
+    return _fast_simulators[gender]
+
+
+def get_nn_simulator(gender: str = 'male'):
+    """Get or initialize the NN simulator for specified gender."""
+    global _nn_simulators
+    if gender not in _nn_simulators:
+        from src.models.vectorized_nn_sim import VectorizedNNSimulator
+        _nn_simulators[gender] = VectorizedNNSimulator(gender=gender)
+        logger.info(f"NN simulator initialized for {gender}")
+    return _nn_simulators[gender]
+
+
+def get_toss_simulator():
+    """Get or initialize the toss simulator."""
+    global _toss_simulator
+    if _toss_simulator is None:
+        _toss_simulator = TossSimulator()
+        logger.info("Toss simulator initialized")
+    return _toss_simulator
 
 
 # ============================================================================
@@ -48,14 +80,62 @@ simulator = MatchSimulator()
 
 @app.route('/')
 def index():
-    """Home page."""
-    return render_template('index.html')
+    """Home page with quick stats."""
+    try:
+        conn = get_connection()
+        cursor = conn.cursor()
+        
+        # Get stats
+        cursor.execute("SELECT COUNT(*) FROM matches WHERE match_type = 'T20'")
+        t20_matches = cursor.fetchone()[0]
+        
+        cursor.execute("SELECT COUNT(DISTINCT player_id) FROM player_match_stats")
+        total_players = cursor.fetchone()[0]
+        
+        cursor.execute("SELECT COUNT(DISTINCT team_id) FROM teams")
+        total_teams = cursor.fetchone()[0]
+        
+        cursor.execute("SELECT COUNT(*) FROM deliveries")
+        total_deliveries = cursor.fetchone()[0]
+        
+        conn.close()
+        
+        stats = {
+            't20_matches': t20_matches,
+            'total_players': total_players,
+            'total_teams': total_teams,
+            'total_deliveries': total_deliveries
+        }
+        
+        return render_template('index.html', stats=stats)
+    except Exception as e:
+        logger.error(f"Error loading index: {e}")
+        return render_template('index.html', stats={})
 
 
 @app.route('/predict')
 def predict_page():
     """Match prediction page."""
-    return render_template('predict.html')
+    try:
+        conn = get_connection()
+        cursor = conn.cursor()
+        
+        # Get teams
+        cursor.execute("""
+            SELECT DISTINCT t.team_id, t.name
+            FROM teams t
+            JOIN matches m ON t.team_id IN (m.team1_id, m.team2_id)
+            WHERE m.match_type = 'T20' AND m.gender = 'male'
+            ORDER BY t.name
+        """)
+        teams = [dict(row) for row in cursor.fetchall()]
+        
+        conn.close()
+        
+        return render_template('predict.html', teams=teams)
+    except Exception as e:
+        logger.error(f"Error loading predict page: {e}")
+        return render_template('predict.html', teams=[])
 
 
 @app.route('/rankings')
@@ -64,438 +144,405 @@ def rankings_page():
     return render_template('rankings.html')
 
 
-@app.route('/history')
-def history_page():
-    """Match history page."""
-    return render_template('history.html')
-
-
 # ============================================================================
 # API Routes
 # ============================================================================
 
 @app.route('/api/teams', methods=['GET'])
 def get_teams():
-    """Get list of all teams with current ELO ratings."""
+    """Get list of all teams for specified gender."""
     try:
-        with get_db_connection() as conn:
-            cursor = conn.cursor()
-            
-            cursor.execute("""
-                SELECT 
-                    t.team_id,
-                    t.name,
-                    COALESCE(e.elo_t20, 1500) as elo_t20,
-                    COALESCE(e.elo_odi, 1500) as elo_odi
-                FROM teams t
-                LEFT JOIN team_current_elo e ON t.team_id = e.team_id
-                ORDER BY COALESCE(e.elo_t20, 1500) DESC
-            """)
-            
-            teams = [dict(row) for row in cursor.fetchall()]
-            
-            return jsonify({'success': True, 'teams': teams})
+        gender = request.args.get('gender', 'male')
+        
+        conn = get_connection()
+        cursor = conn.cursor()
+        
+        cursor.execute("""
+            SELECT DISTINCT t.team_id, t.name
+            FROM teams t
+            JOIN matches m ON t.team_id IN (m.team1_id, m.team2_id)
+            WHERE m.match_type = 'T20' AND m.gender = ?
+            ORDER BY t.name
+        """, (gender,))
+        
+        teams = [dict(row) for row in cursor.fetchall()]
+        conn.close()
+        
+        return jsonify({'success': True, 'teams': teams, 'gender': gender})
     
     except Exception as e:
         logger.error(f"Error fetching teams: {e}")
         return jsonify({'success': False, 'error': str(e)}), 500
 
 
-@app.route('/api/players', methods=['GET'])
-def get_players():
-    """Get list of players, optionally filtered by team."""
-    team_id = request.args.get('team_id', type=int)
-    
+@app.route('/api/venues', methods=['GET'])
+def get_venues():
+    """Get list of venues with match counts for specified gender."""
     try:
-        with get_db_connection() as conn:
-            cursor = conn.cursor()
-            
-            if team_id:
-                # Get players who have played for this team
-                cursor.execute("""
-                    SELECT DISTINCT 
-                        p.player_id,
-                        p.name,
-                        p.country,
-                        COALESCE(e.batting_elo_t20, 1500) as batting_elo_t20,
-                        COALESCE(e.bowling_elo_t20, 1500) as bowling_elo_t20
-                    FROM players p
-                    JOIN player_match_stats pms ON p.player_id = pms.player_id
-                    LEFT JOIN player_current_elo e ON p.player_id = e.player_id
-                    WHERE pms.team_id = ?
-                    ORDER BY COALESCE(e.batting_elo_t20, 1500) DESC
-                    LIMIT 50
-                """, (team_id,))
-            else:
-                cursor.execute("""
-                    SELECT 
-                        p.player_id,
-                        p.name,
-                        p.country,
-                        COALESCE(e.batting_elo_t20, 1500) as batting_elo_t20,
-                        COALESCE(e.bowling_elo_t20, 1500) as bowling_elo_t20
-                    FROM players p
-                    LEFT JOIN player_current_elo e ON p.player_id = e.player_id
-                    ORDER BY COALESCE(e.batting_elo_t20, 1500) DESC
-                    LIMIT 100
-                """)
-            
-            players = [dict(row) for row in cursor.fetchall()]
-            
-            return jsonify({'success': True, 'players': players})
+        gender = request.args.get('gender', 'male')
+        
+        conn = get_connection()
+        cursor = conn.cursor()
+        
+        cursor.execute("""
+            SELECT v.venue_id, v.name, v.city, v.country,
+                   COUNT(m.match_id) as match_count
+            FROM venues v
+            JOIN matches m ON m.venue_id = v.venue_id
+            WHERE m.match_type = 'T20' AND m.gender = ?
+            GROUP BY v.venue_id
+            HAVING match_count >= 5
+            ORDER BY match_count DESC
+            LIMIT 100
+        """, (gender,))
+        
+        venues = [dict(row) for row in cursor.fetchall()]
+        conn.close()
+        
+        return jsonify({'success': True, 'venues': venues, 'gender': gender})
+    
+    except Exception as e:
+        logger.error(f"Error fetching venues: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/players/<int:team_id>', methods=['GET'])
+def get_team_players(team_id):
+    """Get players for a specific team."""
+    try:
+        gender = request.args.get('gender', 'male')
+        
+        conn = get_connection()
+        cursor = conn.cursor()
+        
+        # Get batters (by runs scored)
+        cursor.execute("""
+            SELECT DISTINCT p.player_id, p.name, 'batter' as role,
+                   SUM(pms.runs_scored) as total_runs
+            FROM players p
+            JOIN player_match_stats pms ON p.player_id = pms.player_id
+            JOIN matches m ON pms.match_id = m.match_id
+            WHERE pms.team_id = ? AND m.match_type = 'T20' AND m.gender = ?
+            AND pms.runs_scored > 0
+            GROUP BY p.player_id
+            ORDER BY total_runs DESC
+            LIMIT 15
+        """, (team_id, gender))
+        batters = [dict(row) for row in cursor.fetchall()]
+        
+        # Get bowlers (by wickets taken)
+        cursor.execute("""
+            SELECT DISTINCT p.player_id, p.name, 'bowler' as role,
+                   SUM(pms.wickets_taken) as total_wickets
+            FROM players p
+            JOIN player_match_stats pms ON p.player_id = pms.player_id
+            JOIN matches m ON pms.match_id = m.match_id
+            WHERE pms.team_id = ? AND m.match_type = 'T20' AND m.gender = ?
+            AND pms.overs_bowled > 0
+            GROUP BY p.player_id
+            ORDER BY total_wickets DESC
+            LIMIT 10
+        """, (team_id, gender))
+        bowlers = [dict(row) for row in cursor.fetchall()]
+        
+        conn.close()
+        
+        return jsonify({
+            'success': True,
+            'batters': batters,
+            'bowlers': bowlers,
+            'gender': gender
+        })
     
     except Exception as e:
         logger.error(f"Error fetching players: {e}")
         return jsonify({'success': False, 'error': str(e)}), 500
 
 
-@app.route('/api/rankings/teams', methods=['GET'])
-def get_team_rankings():
-    """Get team ELO rankings."""
-    format_type = request.args.get('format', 'T20')
-    limit = request.args.get('limit', 20, type=int)
-    
-    try:
-        with get_db_connection() as conn:
-            cursor = conn.cursor()
-            
-            elo_col = 'elo_t20' if format_type == 'T20' else 'elo_odi'
-            
-            cursor.execute(f"""
-                SELECT 
-                    t.team_id,
-                    t.name,
-                    e.{elo_col} as elo
-                FROM team_current_elo e
-                JOIN teams t ON e.team_id = t.team_id
-                ORDER BY e.{elo_col} DESC
-                LIMIT ?
-            """, (limit,))
-            
-            rankings = [dict(row) for row in cursor.fetchall()]
-            
-            return jsonify({
-                'success': True,
-                'format': format_type,
-                'rankings': rankings
-            })
-    
-    except Exception as e:
-        logger.error(f"Error fetching team rankings: {e}")
-        return jsonify({'success': False, 'error': str(e)}), 500
-
-
-@app.route('/api/rankings/players/batting', methods=['GET'])
-def get_batting_rankings():
-    """Get player batting ELO rankings."""
-    format_type = request.args.get('format', 'T20')
-    limit = request.args.get('limit', 20, type=int)
-    
-    try:
-        with get_db_connection() as conn:
-            cursor = conn.cursor()
-            
-            suffix = '_t20' if format_type == 'T20' else '_odi'
-            
-            cursor.execute(f"""
-                SELECT 
-                    p.player_id,
-                    p.name,
-                    p.country,
-                    e.batting_elo{suffix} as elo
-                FROM player_current_elo e
-                JOIN players p ON e.player_id = p.player_id
-                WHERE e.batting_elo{suffix} != 1500
-                ORDER BY e.batting_elo{suffix} DESC
-                LIMIT ?
-            """, (limit,))
-            
-            rankings = [dict(row) for row in cursor.fetchall()]
-            
-            return jsonify({
-                'success': True,
-                'format': format_type,
-                'rankings': rankings
-            })
-    
-    except Exception as e:
-        logger.error(f"Error fetching batting rankings: {e}")
-        return jsonify({'success': False, 'error': str(e)}), 500
-
-
-@app.route('/api/rankings/players/bowling', methods=['GET'])
-def get_bowling_rankings():
-    """Get player bowling ELO rankings."""
-    format_type = request.args.get('format', 'T20')
-    limit = request.args.get('limit', 20, type=int)
-    
-    try:
-        with get_db_connection() as conn:
-            cursor = conn.cursor()
-            
-            suffix = '_t20' if format_type == 'T20' else '_odi'
-            
-            cursor.execute(f"""
-                SELECT 
-                    p.player_id,
-                    p.name,
-                    p.country,
-                    e.bowling_elo{suffix} as elo
-                FROM player_current_elo e
-                JOIN players p ON e.player_id = p.player_id
-                WHERE e.bowling_elo{suffix} != 1500
-                ORDER BY e.bowling_elo{suffix} DESC
-                LIMIT ?
-            """, (limit,))
-            
-            rankings = [dict(row) for row in cursor.fetchall()]
-            
-            return jsonify({
-                'success': True,
-                'format': format_type,
-                'rankings': rankings
-            })
-    
-    except Exception as e:
-        logger.error(f"Error fetching bowling rankings: {e}")
-        return jsonify({'success': False, 'error': str(e)}), 500
-
-
-@app.route('/api/elo/team/<int:team_id>', methods=['GET'])
-def get_team_elo_history(team_id):
-    """Get ELO history for a team."""
-    format_type = request.args.get('format', 'T20')
-    
-    try:
-        with get_db_connection() as conn:
-            cursor = conn.cursor()
-            
-            elo_col = 'elo_t20' if format_type == 'T20' else 'elo_odi'
-            
-            cursor.execute(f"""
-                SELECT date, {elo_col} as elo
-                FROM team_elo_history
-                WHERE team_id = ?
-                ORDER BY date
-            """, (team_id,))
-            
-            history = [{'date': row['date'], 'elo': row['elo']} 
-                      for row in cursor.fetchall()]
-            
-            return jsonify({
-                'success': True,
-                'team_id': team_id,
-                'format': format_type,
-                'history': history
-            })
-    
-    except Exception as e:
-        logger.error(f"Error fetching team ELO history: {e}")
-        return jsonify({'success': False, 'error': str(e)}), 500
-
-
-@app.route('/api/elo/player/<int:player_id>', methods=['GET'])
-def get_player_elo_history(player_id):
-    """Get ELO history for a player."""
-    format_type = request.args.get('format', 'T20')
-    
-    try:
-        with get_db_connection() as conn:
-            cursor = conn.cursor()
-            
-            cursor.execute("""
-                SELECT date, batting_elo, bowling_elo, overall_elo
-                FROM player_elo_history
-                WHERE player_id = ? AND format = ?
-                ORDER BY date
-            """, (player_id, format_type))
-            
-            history = [dict(row) for row in cursor.fetchall()]
-            
-            return jsonify({
-                'success': True,
-                'player_id': player_id,
-                'format': format_type,
-                'history': history
-            })
-    
-    except Exception as e:
-        logger.error(f"Error fetching player ELO history: {e}")
-        return jsonify({'success': False, 'error': str(e)}), 500
-
-
-@app.route('/api/predict', methods=['POST'])
-def predict_match():
+@app.route('/api/simulate', methods=['POST'])
+def simulate_match():
     """
-    Predict match outcome.
+    Run match simulation.
     
-    Expected JSON body:
+    Expected JSON:
     {
-        "team1_id": int,
-        "team2_id": int,
-        "format": "T20" or "ODI",
+        "team1_batters": [player_ids],
+        "team1_bowlers": [player_ids],
+        "team2_batters": [player_ids],
+        "team2_bowlers": [player_ids],
+        "simulator": "fast" or "nn",
+        "n_simulations": int,
         "venue_id": int (optional),
-        "team1_players": [int] (optional),
-        "team2_players": [int] (optional)
+        "use_toss": bool (optional, default false),
+        "gender": "male" or "female" (optional, default "male")
     }
     """
     try:
         data = request.get_json()
         
-        team1_id = data.get('team1_id')
-        team2_id = data.get('team2_id')
-        match_format = data.get('format', 'T20')
+        team1_batters = data.get('team1_batters', [])
+        team1_bowlers = data.get('team1_bowlers', [])
+        team2_batters = data.get('team2_batters', [])
+        team2_bowlers = data.get('team2_bowlers', [])
+        simulator_type = data.get('simulator', 'fast')
+        n_simulations = min(data.get('n_simulations', 1000), 10000)
         venue_id = data.get('venue_id')
-        team1_players = data.get('team1_players')
-        team2_players = data.get('team2_players')
+        use_toss = data.get('use_toss', False)
+        gender = data.get('gender', 'male')
         
-        if not team1_id or not team2_id:
-            return jsonify({
-                'success': False,
-                'error': 'team1_id and team2_id are required'
-            }), 400
+        # Validate
+        if len(team1_batters) < 11:
+            team1_batters.extend([team1_batters[0]] * (11 - len(team1_batters)))
+        if len(team2_batters) < 11:
+            team2_batters.extend([team2_batters[0]] * (11 - len(team2_batters)))
+        if len(team1_bowlers) < 5:
+            team1_bowlers.extend([team1_bowlers[0]] * (5 - len(team1_bowlers)))
+        if len(team2_bowlers) < 5:
+            team2_bowlers.extend([team2_bowlers[0]] * (5 - len(team2_bowlers)))
         
-        with get_db_connection() as conn:
-            cursor = conn.cursor()
-            
-            # Get team names
-            cursor.execute("SELECT name FROM teams WHERE team_id = ?", (team1_id,))
-            team1_name = cursor.fetchone()['name']
-            
-            cursor.execute("SELECT name FROM teams WHERE team_id = ?", (team2_id,))
-            team2_name = cursor.fetchone()['name']
-            
-            # Run simulation
-            results = simulator.predict_match(
-                conn, team1_id, team2_id, match_format,
-                datetime.now(),
-                team1_players, team2_players,
-                n_simulations=1000
+        # Simulate toss if requested
+        toss_info = None
+        if use_toss:
+            toss_simulator = get_toss_simulator()
+            # For each simulation, we'd simulate toss
+            # But for simplicity, we'll simulate one toss for the prediction display
+            toss_winner, toss_decision, batting_first = toss_simulator.simulate_toss(
+                team1_id=1, team2_id=2, format_type='T20', gender=gender
             )
+            toss_info = {
+                'winner': 'Team 1' if toss_winner == 1 else 'Team 2',
+                'decision': toss_decision,
+                'batting_first': 'Team 1' if batting_first == 1 else 'Team 2'
+            }
             
-            return jsonify({
-                'success': True,
-                'prediction': {
-                    'team1': {
-                        'id': team1_id,
-                        'name': team1_name,
-                        'win_probability': results['team1_win_probability'],
-                        'expected_score': results['team1_expected_score'],
-                        'score_std': results['team1_score_std']
-                    },
-                    'team2': {
-                        'id': team2_id,
-                        'name': team2_name,
-                        'win_probability': results['team2_win_probability'],
-                        'expected_score': results['team2_expected_score'],
-                        'score_std': results['team2_score_std']
-                    },
-                    'confidence_interval': results['confidence_interval'],
-                    'format': match_format,
-                    'n_simulations': results['n_simulations']
-                }
-            })
-    
-    except Exception as e:
-        logger.error(f"Error predicting match: {e}")
-        return jsonify({'success': False, 'error': str(e)}), 500
-
-
-@app.route('/api/simulate', methods=['POST'])
-def simulate_match():
-    """
-    Run detailed match simulation.
-    
-    Returns ball-by-ball simulation results.
-    """
-    try:
-        data = request.get_json()
+            # If team 2 bats first, swap the order
+            if batting_first == 2:
+                team1_batters, team2_batters = team2_batters, team1_batters
+                team1_bowlers, team2_bowlers = team2_bowlers, team1_bowlers
         
-        team1_id = data.get('team1_id')
-        team2_id = data.get('team2_id')
-        match_format = data.get('format', 'T20')
-        n_simulations = data.get('n_simulations', 100)
+        # Select simulator for specified gender
+        if simulator_type == 'nn':
+            simulator = get_nn_simulator(gender)
+        else:
+            simulator = get_fast_simulator(gender)
         
-        with get_db_connection() as conn:
-            results = simulator.predict_match(
-                conn, team1_id, team2_id, match_format,
-                datetime.now(), n_simulations=n_simulations
-            )
-            
-            return jsonify({
-                'success': True,
-                'simulation': results
-            })
+        # Run simulation
+        import time
+        start = time.time()
+        
+        results = simulator.simulate_matches(
+            n_simulations,
+            team1_batters[:11],
+            team1_bowlers[:5],
+            team2_batters[:11],
+            team2_bowlers[:5],
+            venue_id=venue_id
+        )
+        
+        elapsed = time.time() - start
+        
+        # Format response
+        response = {
+            'success': True,
+            'team1_win_prob': round(results['team1_win_prob'] * 100, 1),
+            'team2_win_prob': round(results['team2_win_prob'] * 100, 1),
+            'avg_team1_score': round(results['avg_team1_score'], 1),
+            'avg_team2_score': round(results['avg_team2_score'], 1),
+            'team1_score_range': [round(results['team1_score_range'][0]), round(results['team1_score_range'][1])],
+            'team2_score_range': [round(results['team2_score_range'][0]), round(results['team2_score_range'][1])],
+            'n_simulations': n_simulations,
+            'simulator': simulator_type,
+            'elapsed_ms': round(elapsed * 1000, 1),
+            'h2h_rate': round(results.get('h2h_rate', 0) * 100, 1) if 'h2h_rate' in results else None,
+            'venue_id': venue_id,
+            'toss_info': toss_info,
+            'gender': gender
+        }
+        
+        return jsonify(response)
     
     except Exception as e:
         logger.error(f"Error simulating match: {e}")
+        import traceback
+        traceback.print_exc()
         return jsonify({'success': False, 'error': str(e)}), 500
 
 
-@app.route('/api/search/players', methods=['GET'])
-def search_players():
-    """Search players by name."""
-    query = request.args.get('q', '')
-    
-    if len(query) < 2:
-        return jsonify({'success': True, 'players': []})
-    
+@app.route('/api/rankings/teams', methods=['GET'])
+def get_team_rankings():
+    """Get team ELO rankings."""
     try:
-        with get_db_connection() as conn:
-            cursor = conn.cursor()
-            
-            cursor.execute("""
-                SELECT 
-                    p.player_id,
-                    p.name,
-                    p.country,
-                    COALESCE(e.batting_elo_t20, 1500) as batting_elo,
-                    COALESCE(e.bowling_elo_t20, 1500) as bowling_elo
-                FROM players p
-                LEFT JOIN player_current_elo e ON p.player_id = e.player_id
-                WHERE p.name LIKE ?
-                ORDER BY COALESCE(e.batting_elo_t20, 1500) DESC
-                LIMIT 20
-            """, (f'%{query}%',))
-            
-            players = [dict(row) for row in cursor.fetchall()]
-            
-            return jsonify({'success': True, 'players': players})
+        conn = get_connection()
+        cursor = conn.cursor()
+        
+        cursor.execute("""
+            SELECT t.name, e.elo_t20_male as elo
+            FROM team_current_elo e
+            JOIN teams t ON e.team_id = t.team_id
+            WHERE e.elo_t20_male != 1500
+            ORDER BY e.elo_t20_male DESC
+            LIMIT 20
+        """)
+        
+        rankings = [dict(row) for row in cursor.fetchall()]
+        conn.close()
+        
+        return jsonify({'success': True, 'rankings': rankings})
     
     except Exception as e:
-        logger.error(f"Error searching players: {e}")
+        logger.error(f"Error fetching rankings: {e}")
         return jsonify({'success': False, 'error': str(e)}), 500
 
 
-@app.route('/api/stats', methods=['GET'])
-def get_database_stats():
-    """Get database statistics."""
+@app.route('/api/rankings/batting', methods=['GET'])
+def get_batting_rankings():
+    """Get player batting ELO rankings."""
     try:
-        with get_db_connection() as conn:
-            cursor = conn.cursor()
-            
-            stats = {}
-            
-            cursor.execute("SELECT COUNT(*) FROM matches")
-            stats['total_matches'] = cursor.fetchone()[0]
-            
-            cursor.execute("SELECT COUNT(*) FROM teams")
-            stats['total_teams'] = cursor.fetchone()[0]
-            
-            cursor.execute("SELECT COUNT(*) FROM players")
-            stats['total_players'] = cursor.fetchone()[0]
-            
-            cursor.execute("SELECT COUNT(*) FROM deliveries")
-            stats['total_deliveries'] = cursor.fetchone()[0]
-            
-            cursor.execute("SELECT MIN(date), MAX(date) FROM matches")
-            row = cursor.fetchone()
-            stats['date_range'] = {'min': row[0], 'max': row[1]}
-            
-            return jsonify({'success': True, 'stats': stats})
+        conn = get_connection()
+        cursor = conn.cursor()
+        
+        cursor.execute("""
+            SELECT p.name, p.country, e.batting_elo_t20_male as elo
+            FROM player_current_elo e
+            JOIN players p ON e.player_id = p.player_id
+            WHERE e.batting_elo_t20_male != 1500
+            ORDER BY e.batting_elo_t20_male DESC
+            LIMIT 20
+        """)
+        
+        rankings = [dict(row) for row in cursor.fetchall()]
+        conn.close()
+        
+        return jsonify({'success': True, 'rankings': rankings})
     
     except Exception as e:
-        logger.error(f"Error fetching stats: {e}")
+        logger.error(f"Error fetching rankings: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/rankings/bowling', methods=['GET'])
+def get_bowling_rankings():
+    """Get player bowling ELO rankings."""
+    try:
+        conn = get_connection()
+        cursor = conn.cursor()
+        
+        cursor.execute("""
+            SELECT p.name, p.country, e.bowling_elo_t20_male as elo
+            FROM player_current_elo e
+            JOIN players p ON e.player_id = p.player_id
+            WHERE e.bowling_elo_t20_male != 1500
+            ORDER BY e.bowling_elo_t20_male DESC
+            LIMIT 20
+        """)
+        
+        rankings = [dict(row) for row in cursor.fetchall()]
+        conn.close()
+        
+        return jsonify({'success': True, 'rankings': rankings})
+    
+    except Exception as e:
+        logger.error(f"Error fetching rankings: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+# ============================================================================
+# WBBL Fixture Endpoints
+# ============================================================================
+
+_lineup_service = None
+
+def get_lineup_service():
+    """Get or initialize the lineup service."""
+    global _lineup_service
+    if _lineup_service is None:
+        from src.features.lineup_service import LineupService
+        _lineup_service = LineupService()
+        logger.info("Lineup service initialized")
+    return _lineup_service
+
+
+@app.route('/api/wbbl/fixtures', methods=['GET'])
+def get_wbbl_fixtures():
+    """Get upcoming WBBL match fixtures."""
+    try:
+        service = get_lineup_service()
+        fixtures = service.get_upcoming_fixtures(limit=10)
+        
+        return jsonify({
+            'success': True,
+            'fixtures': [
+                {
+                    'id': f.id,
+                    'name': f.name,
+                    'date': f.date,
+                    'team1': f.team1,
+                    'team2': f.team2,
+                    'status': f.status,
+                    'has_squad': f.has_squad
+                }
+                for f in fixtures
+            ]
+        })
+    
+    except Exception as e:
+        logger.error(f"Error fetching WBBL fixtures: {e}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/wbbl/match/<match_id>', methods=['GET'])
+def get_wbbl_match(match_id):
+    """Get full match data with squads."""
+    try:
+        service = get_lineup_service()
+        match = service.get_match_with_squads(match_id)
+        
+        if not match:
+            return jsonify({'success': False, 'error': 'Match not found'}), 404
+        
+        def player_to_dict(p):
+            return {
+                'player_id': p.player_id,
+                'api_name': p.api_name,
+                'db_name': p.db_name,
+                'role': p.role,
+                'batting_style': p.batting_style,
+                'bowling_style': p.bowling_style,
+                'matched': p.matched,
+                'elo_batting': p.elo_batting,
+                'elo_bowling': p.elo_bowling,
+                'recent_form': p.recent_form
+            }
+        
+        return jsonify({
+            'success': True,
+            'match': {
+                'match_id': match.match_id,
+                'date': match.date,
+                'team1_name': match.team1_name,
+                'team2_name': match.team2_name,
+                'team1_db_name': match.team1_db_name,
+                'team2_db_name': match.team2_db_name,
+                'venue': match.venue,
+                'venue_db_id': match.venue_db_id,
+                'venue_db_name': match.venue_db_name,
+                'status': match.status,
+                'is_upcoming': match.is_upcoming,
+                'team1_squad': [player_to_dict(p) for p in match.team1_squad],
+                'team2_squad': [player_to_dict(p) for p in match.team2_squad],
+                'team1_recent_xi': match.team1_recent_xi,
+                'team2_recent_xi': match.team2_recent_xi,
+                'team1_suggested_xi': service.suggest_lineup(match.team1_squad, match.team1_recent_xi),
+                'team2_suggested_xi': service.suggest_lineup(match.team2_squad, match.team2_recent_xi)
+            }
+        })
+    
+    except Exception as e:
+        logger.error(f"Error fetching WBBL match: {e}")
+        import traceback
+        traceback.print_exc()
         return jsonify({'success': False, 'error': str(e)}), 500
 
 
@@ -505,7 +552,6 @@ def get_database_stats():
 
 @app.errorhandler(404)
 def not_found(e):
-    """Handle 404 errors."""
     if request.path.startswith('/api/'):
         return jsonify({'success': False, 'error': 'Not found'}), 404
     return render_template('404.html'), 404
@@ -513,7 +559,6 @@ def not_found(e):
 
 @app.errorhandler(500)
 def server_error(e):
-    """Handle 500 errors."""
     logger.error(f"Server error: {e}")
     if request.path.startswith('/api/'):
         return jsonify({'success': False, 'error': 'Internal server error'}), 500
@@ -524,15 +569,5 @@ def server_error(e):
 # Main
 # ============================================================================
 
-def main():
-    """Run the Flask application."""
-    app.run(
-        host=FlaskConfig.HOST,
-        port=FlaskConfig.PORT,
-        debug=FlaskConfig.DEBUG
-    )
-
-
 if __name__ == '__main__':
-    main()
-
+    app.run(host='0.0.0.0', port=5001, debug=True)

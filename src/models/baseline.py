@@ -1,82 +1,149 @@
 """
 Baseline Machine Learning Models for Cricket Match Prediction.
 
-Implements traditional ML models:
-- Logistic Regression
-- Random Forest
-- XGBoost
+Models:
+- Logistic Regression (interpretable baseline)
+- Random Forest (feature importance)
+- XGBoost (strong gradient boosting baseline)
 
-These serve as baselines before moving to deep learning approaches.
+All models predict P(team1 wins) from match features.
 """
 
 import logging
-import sys
+from typing import Dict, Tuple, Optional, List, Union
 import pickle
-import json
 from pathlib import Path
-from typing import Optional, Dict, List, Tuple, Any
-from datetime import datetime
 
+import pandas as pd
 import numpy as np
 from sklearn.linear_model import LogisticRegression
 from sklearn.ensemble import RandomForestClassifier
-from sklearn.preprocessing import StandardScaler
-from sklearn.model_selection import train_test_split, cross_val_score, TimeSeriesSplit
+from sklearn.model_selection import cross_val_score, TimeSeriesSplit
 from sklearn.metrics import (
-    accuracy_score, precision_score, recall_score, f1_score,
-    roc_auc_score, classification_report, confusion_matrix
+    accuracy_score, log_loss, roc_auc_score, brier_score_loss,
+    classification_report, confusion_matrix
 )
+from sklearn.preprocessing import StandardScaler
 
+import sys
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
+
+from config import MODEL_CONFIG
+
+logger = logging.getLogger(__name__)
+
+# Try to import XGBoost
 try:
     import xgboost as xgb
     HAS_XGBOOST = True
 except ImportError:
     HAS_XGBOOST = False
-    print("XGBoost not installed. Install with: pip install xgboost")
-
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
-
-from config import MODEL_CONFIG, BASE_DIR
-from src.features.engineer import create_training_dataset
-
-logger = logging.getLogger(__name__)
-
-# Model save directory
-MODEL_DIR = BASE_DIR / "models" / "saved"
-MODEL_DIR.mkdir(parents=True, exist_ok=True)
+    logger.warning("XGBoost not installed. Install with: pip install xgboost")
 
 
-class BaselineModels:
-    """
-    Collection of baseline ML models for match prediction.
-    """
+# Feature columns to use for prediction
+FEATURE_COLUMNS = [
+    # Team ELO features
+    'team1_elo', 'team2_elo', 'elo_diff',
+    'team1_momentum', 'team2_momentum', 'momentum_diff',
+    
+    # Head to head and form
+    'h2h_team1_win_rate', 'h2h_total',
+    'team1_recent_form', 'team2_recent_form', 'form_diff',
+    
+    # Team venue performance
+    'team1_venue_win_rate', 'team2_venue_win_rate',
+    
+    # Team composition
+    'team1_batting_elo_avg', 'team2_batting_elo_avg',
+    'team1_bowling_elo_avg', 'team2_bowling_elo_avg',
+    
+    # Venue characteristics (NEW)
+    'venue_avg_score', 'venue_avg_wickets', 'venue_chase_win_rate',
+    'venue_is_high_scoring', 'venue_is_low_scoring',
+    
+    # Home advantage (NEW)
+    'is_team1_home', 'is_team2_home',
+    'home_advantage_team1', 'home_advantage_team2',
+    'is_neutral_venue',
+    
+    # Toss
+    'toss_winner_is_team1', 'chose_to_bat'
+]
+
+
+class BaselinePredictor:
+    """Baseline ML models for match outcome prediction."""
     
     def __init__(self):
         self.models = {}
         self.scaler = StandardScaler()
-        self.feature_names = None
+        self.feature_columns = FEATURE_COLUMNS
         self.is_fitted = False
     
-    def _create_models(self) -> Dict[str, Any]:
-        """Create model instances."""
-        models = {
-            'logistic_regression': LogisticRegression(
-                max_iter=1000,
-                random_state=MODEL_CONFIG['random_state'],
-                class_weight='balanced'
-            ),
-            'random_forest': RandomForestClassifier(
-                n_estimators=100,
-                max_depth=10,
-                min_samples_split=10,
-                random_state=MODEL_CONFIG['random_state'],
-                class_weight='balanced',
-                n_jobs=-1
-            )
-        }
+    def prepare_features(self, df: pd.DataFrame, include_target: bool = True) -> Tuple[np.ndarray, Optional[np.ndarray]]:
+        """Extract feature matrix and optionally target from dataframe."""
+        # Select only feature columns that exist
+        available_features = [c for c in self.feature_columns if c in df.columns]
         
+        X = df[available_features].copy()
+        
+        # Fill missing values
+        X = X.fillna(X.mean())
+        
+        if include_target and 'team1_won' in df.columns:
+            y = df['team1_won'].values
+        else:
+            y = None
+        
+        return X.values, y
+    
+    def train_test_split_chronological(
+        self,
+        df: pd.DataFrame,
+        test_ratio: float = 0.2
+    ) -> Tuple[pd.DataFrame, pd.DataFrame]:
+        """Split data chronologically (most recent for test)."""
+        df = df.sort_values('date')
+        split_idx = int(len(df) * (1 - test_ratio))
+        
+        train_df = df.iloc[:split_idx]
+        test_df = df.iloc[split_idx:]
+        
+        logger.info(f"Train set: {len(train_df)} matches ({train_df['date'].min()} to {train_df['date'].max()})")
+        logger.info(f"Test set: {len(test_df)} matches ({test_df['date'].min()} to {test_df['date'].max()})")
+        
+        return train_df, test_df
+    
+    def fit(self, df: pd.DataFrame):
+        """Train all baseline models."""
+        X, y = self.prepare_features(df)
+        
+        # Scale features
+        X_scaled = self.scaler.fit_transform(X)
+        
+        # 1. Logistic Regression
+        logger.info("Training Logistic Regression...")
+        self.models['logistic'] = LogisticRegression(
+            random_state=MODEL_CONFIG['random_state'],
+            max_iter=1000
+        )
+        self.models['logistic'].fit(X_scaled, y)
+        
+        # 2. Random Forest
+        logger.info("Training Random Forest...")
+        self.models['random_forest'] = RandomForestClassifier(
+            n_estimators=100,
+            max_depth=10,
+            random_state=MODEL_CONFIG['random_state'],
+            n_jobs=-1
+        )
+        self.models['random_forest'].fit(X, y)  # RF doesn't need scaling
+        
+        # 3. XGBoost
         if HAS_XGBOOST:
-            models['xgboost'] = xgb.XGBClassifier(
+            logger.info("Training XGBoost...")
+            self.models['xgboost'] = xgb.XGBClassifier(
                 n_estimators=100,
                 max_depth=6,
                 learning_rate=0.1,
@@ -84,338 +151,188 @@ class BaselineModels:
                 use_label_encoder=False,
                 eval_metric='logloss'
             )
+            self.models['xgboost'].fit(X, y)
         
-        return models
+        self.is_fitted = True
+        logger.info("All models trained successfully!")
     
-    def train(
-        self,
-        X: np.ndarray,
-        y: np.ndarray,
-        feature_names: List[str],
-        test_size: float = 0.2,
-        use_time_split: bool = True
-    ) -> Dict[str, Dict[str, float]]:
-        """
-        Train all baseline models.
+    def predict_proba(self, df: pd.DataFrame, model_name: str = 'xgboost') -> np.ndarray:
+        """Get probability predictions from specified model."""
+        if not self.is_fitted:
+            raise ValueError("Models not fitted. Call fit() first.")
         
-        Args:
-            X: Feature matrix
-            y: Target labels
-            feature_names: List of feature names
-            test_size: Fraction of data for testing
-            use_time_split: If True, use chronological split (recommended)
-            
-        Returns:
-            Dictionary of metrics for each model
-        """
-        self.feature_names = feature_names
-        self.models = self._create_models()
+        X, _ = self.prepare_features(df, include_target=False)
         
-        # Handle NaN values
-        X = np.nan_to_num(X, nan=0.0, posinf=0.0, neginf=0.0)
+        if model_name == 'logistic':
+            X = self.scaler.transform(X)
         
-        # Split data (chronological for time series)
-        if use_time_split:
-            split_idx = int(len(X) * (1 - test_size))
-            X_train, X_test = X[:split_idx], X[split_idx:]
-            y_train, y_test = y[:split_idx], y[split_idx:]
-        else:
-            X_train, X_test, y_train, y_test = train_test_split(
-                X, y, test_size=test_size, random_state=MODEL_CONFIG['random_state']
-            )
+        model = self.models.get(model_name)
+        if model is None:
+            raise ValueError(f"Model '{model_name}' not available")
         
-        logger.info(f"Training set size: {len(X_train)}")
-        logger.info(f"Test set size: {len(X_test)}")
-        
-        # Scale features
-        X_train_scaled = self.scaler.fit_transform(X_train)
-        X_test_scaled = self.scaler.transform(X_test)
+        return model.predict_proba(X)[:, 1]
+    
+    def predict(self, df: pd.DataFrame, model_name: str = 'xgboost') -> np.ndarray:
+        """Get binary predictions from specified model."""
+        probs = self.predict_proba(df, model_name)
+        return (probs >= 0.5).astype(int)
+    
+    def evaluate(self, df: pd.DataFrame) -> Dict:
+        """Evaluate all models on dataset."""
+        X, y = self.prepare_features(df)
+        X_scaled = self.scaler.transform(X)
         
         results = {}
         
         for name, model in self.models.items():
-            logger.info(f"Training {name}...")
+            X_eval = X_scaled if name == 'logistic' else X
             
-            # Train
-            if name == 'logistic_regression':
-                model.fit(X_train_scaled, y_train)
-                y_pred = model.predict(X_test_scaled)
-                y_prob = model.predict_proba(X_test_scaled)[:, 1]
-            else:
-                model.fit(X_train, y_train)
-                y_pred = model.predict(X_test)
-                y_prob = model.predict_proba(X_test)[:, 1]
+            y_pred = model.predict(X_eval)
+            y_proba = model.predict_proba(X_eval)[:, 1]
             
-            # Evaluate
-            metrics = {
-                'accuracy': accuracy_score(y_test, y_pred),
-                'precision': precision_score(y_test, y_pred, zero_division=0),
-                'recall': recall_score(y_test, y_pred, zero_division=0),
-                'f1': f1_score(y_test, y_pred, zero_division=0),
-                'roc_auc': roc_auc_score(y_test, y_prob)
+            results[name] = {
+                'accuracy': accuracy_score(y, y_pred),
+                'log_loss': log_loss(y, y_proba),
+                'roc_auc': roc_auc_score(y, y_proba),
+                'brier_score': brier_score_loss(y, y_proba)
             }
-            
-            results[name] = metrics
-            
-            logger.info(f"{name} - Accuracy: {metrics['accuracy']:.4f}, "
-                       f"ROC-AUC: {metrics['roc_auc']:.4f}")
-        
-        self.is_fitted = True
-        
-        # Print comparison
-        self._print_comparison(results)
-        
-        # Feature importance for tree-based models
-        self._print_feature_importance()
         
         return results
     
-    def cross_validate(
-        self,
-        X: np.ndarray,
-        y: np.ndarray,
-        n_splits: int = 5
-    ) -> Dict[str, Dict[str, float]]:
-        """
-        Perform time-series cross-validation.
+    def get_feature_importance(self, model_name: str = 'random_forest') -> pd.DataFrame:
+        """Get feature importance from tree-based model."""
+        if model_name not in ['random_forest', 'xgboost']:
+            raise ValueError("Feature importance only available for tree models")
         
-        Args:
-            X: Feature matrix
-            y: Target labels
-            n_splits: Number of CV splits
-            
-        Returns:
-            Dictionary of CV scores for each model
-        """
-        X = np.nan_to_num(X, nan=0.0, posinf=0.0, neginf=0.0)
+        model = self.models.get(model_name)
+        if model is None:
+            raise ValueError(f"Model '{model_name}' not available")
+        
+        importance = model.feature_importances_
+        
+        # Get available features
+        available_features = self.feature_columns[:len(importance)]
+        
+        df = pd.DataFrame({
+            'feature': available_features,
+            'importance': importance
+        }).sort_values('importance', ascending=False)
+        
+        return df
+    
+    def cross_validate(self, df: pd.DataFrame, n_splits: int = 5) -> Dict:
+        """Perform time-series cross-validation."""
+        df = df.sort_values('date')
+        X, y = self.prepare_features(df)
         
         tscv = TimeSeriesSplit(n_splits=n_splits)
         
         results = {}
         
-        for name, model in self.models.items():
-            logger.info(f"Cross-validating {name}...")
-            
-            if name == 'logistic_regression':
-                X_scaled = self.scaler.fit_transform(X)
-                scores = cross_val_score(model, X_scaled, y, cv=tscv, scoring='roc_auc')
+        for name in ['logistic', 'random_forest']:
+            if name == 'logistic':
+                X_cv = self.scaler.fit_transform(X)
+                model = LogisticRegression(random_state=42, max_iter=1000)
             else:
-                scores = cross_val_score(model, X, y, cv=tscv, scoring='roc_auc')
+                X_cv = X
+                model = RandomForestClassifier(
+                    n_estimators=100, max_depth=10, random_state=42, n_jobs=-1
+                )
             
+            scores = cross_val_score(model, X_cv, y, cv=tscv, scoring='accuracy')
             results[name] = {
-                'mean_roc_auc': scores.mean(),
-                'std_roc_auc': scores.std(),
+                'mean_accuracy': scores.mean(),
+                'std_accuracy': scores.std(),
                 'scores': scores.tolist()
             }
-            
-            logger.info(f"{name} - Mean ROC-AUC: {scores.mean():.4f} (+/- {scores.std():.4f})")
         
         return results
     
-    def predict(
-        self,
-        X: np.ndarray,
-        model_name: str = 'xgboost'
-    ) -> Tuple[np.ndarray, np.ndarray]:
-        """
-        Make predictions using a specific model.
-        
-        Args:
-            X: Feature matrix
-            model_name: Which model to use
-            
-        Returns:
-            Tuple of (predictions, probabilities)
-        """
-        if not self.is_fitted:
-            raise ValueError("Models not trained. Call train() first.")
-        
-        if model_name not in self.models:
-            available = list(self.models.keys())
-            raise ValueError(f"Unknown model: {model_name}. Available: {available}")
-        
-        X = np.nan_to_num(X, nan=0.0, posinf=0.0, neginf=0.0)
-        
-        model = self.models[model_name]
-        
-        if model_name == 'logistic_regression':
-            X = self.scaler.transform(X)
-        
-        predictions = model.predict(X)
-        probabilities = model.predict_proba(X)[:, 1]
-        
-        return predictions, probabilities
-    
-    def predict_match(
-        self,
-        features: Dict[str, float],
-        model_name: str = 'xgboost'
-    ) -> Dict[str, Any]:
-        """
-        Predict outcome for a single match.
-        
-        Args:
-            features: Dictionary of feature values
-            model_name: Which model to use
-            
-        Returns:
-            Dictionary with prediction and probabilities
-        """
-        if self.feature_names is None:
-            raise ValueError("Model not trained - feature names unknown")
-        
-        # Create feature array in correct order
-        X = np.array([[features.get(name, 0) for name in self.feature_names]])
-        
-        pred, prob = self.predict(X, model_name)
-        
-        return {
-            'prediction': 'team1' if pred[0] == 1 else 'team2',
-            'team1_win_probability': float(prob[0]),
-            'team2_win_probability': float(1 - prob[0]),
-            'confidence': float(max(prob[0], 1 - prob[0]))
-        }
-    
-    def _print_comparison(self, results: Dict[str, Dict[str, float]]):
-        """Print comparison of model results."""
-        print("\n" + "=" * 60)
-        print("MODEL COMPARISON")
-        print("=" * 60)
-        print(f"{'Model':<25} {'Accuracy':>10} {'F1':>10} {'ROC-AUC':>10}")
-        print("-" * 60)
-        
-        for name, metrics in results.items():
-            print(f"{name:<25} {metrics['accuracy']:>10.4f} "
-                  f"{metrics['f1']:>10.4f} {metrics['roc_auc']:>10.4f}")
-        
-        print("=" * 60)
-    
-    def _print_feature_importance(self, top_n: int = 15):
-        """Print feature importance for tree-based models."""
-        if 'random_forest' not in self.models or self.feature_names is None:
-            return
-        
-        rf = self.models['random_forest']
-        importances = rf.feature_importances_
-        
-        # Sort by importance
-        indices = np.argsort(importances)[::-1][:top_n]
-        
-        print("\n" + "=" * 60)
-        print(f"TOP {top_n} FEATURE IMPORTANCES (Random Forest)")
-        print("=" * 60)
-        
-        for i, idx in enumerate(indices, 1):
-            print(f"{i:2}. {self.feature_names[idx]:<35} {importances[idx]:.4f}")
-        
-        print("=" * 60)
-    
-    def save(self, filepath: Optional[Path] = None):
+    def save(self, path: str):
         """Save trained models to disk."""
-        if filepath is None:
-            filepath = MODEL_DIR / "baseline_models.pkl"
-        
-        save_data = {
-            'models': self.models,
-            'scaler': self.scaler,
-            'feature_names': self.feature_names,
-            'is_fitted': self.is_fitted
-        }
-        
-        with open(filepath, 'wb') as f:
-            pickle.dump(save_data, f)
-        
-        logger.info(f"Models saved to {filepath}")
+        with open(path, 'wb') as f:
+            pickle.dump({
+                'models': self.models,
+                'scaler': self.scaler,
+                'feature_columns': self.feature_columns
+            }, f)
+        logger.info(f"Models saved to {path}")
     
-    def load(self, filepath: Optional[Path] = None):
+    def load(self, path: str):
         """Load trained models from disk."""
-        if filepath is None:
-            filepath = MODEL_DIR / "baseline_models.pkl"
+        with open(path, 'rb') as f:
+            data = pickle.load(f)
         
-        with open(filepath, 'rb') as f:
-            save_data = pickle.load(f)
-        
-        self.models = save_data['models']
-        self.scaler = save_data['scaler']
-        self.feature_names = save_data['feature_names']
-        self.is_fitted = save_data['is_fitted']
-        
-        logger.info(f"Models loaded from {filepath}")
+        self.models = data['models']
+        self.scaler = data['scaler']
+        self.feature_columns = data['feature_columns']
+        self.is_fitted = True
+        logger.info(f"Models loaded from {path}")
 
 
-def train_baseline_models(
-    match_format: str = 'T20',
-    min_date: Optional[str] = None,
-    save_models: bool = True
-) -> Dict[str, Any]:
+def train_and_evaluate(
+    feature_df: pd.DataFrame,
+    save_path: Optional[str] = None
+) -> Tuple[BaselinePredictor, Dict]:
     """
-    Train baseline models on cricket match data.
+    Train baseline models and evaluate performance.
     
-    Args:
-        match_format: 'T20' or 'ODI'
-        min_date: Minimum date for training data
-        save_models: Whether to save trained models
-        
-    Returns:
-        Dictionary with training results
+    Returns trained predictor and evaluation metrics.
     """
-    logger.info(f"Creating training dataset for {match_format}...")
+    predictor = BaselinePredictor()
     
-    X, y, feature_names = create_training_dataset(match_format, min_date)
+    # Split chronologically
+    train_df, test_df = predictor.train_test_split_chronological(feature_df)
     
-    if len(X) < 100:
-        logger.error(f"Insufficient data: only {len(X)} samples")
-        return {'error': 'Insufficient data'}
+    # Train
+    predictor.fit(train_df)
     
-    logger.info(f"Dataset: {len(X)} samples, {len(feature_names)} features")
+    # Evaluate on test set
+    results = predictor.evaluate(test_df)
     
-    # Train models
-    baseline = BaselineModels()
-    results = baseline.train(X, y, feature_names)
+    # Print results
+    print("\n" + "=" * 60)
+    print("MODEL EVALUATION RESULTS (Test Set)")
+    print("=" * 60)
     
-    # Cross-validation
-    cv_results = baseline.cross_validate(X, y)
+    for model_name, metrics in results.items():
+        print(f"\n{model_name.upper()}")
+        print("-" * 40)
+        print(f"  Accuracy:    {metrics['accuracy']:.3f}")
+        print(f"  Log Loss:    {metrics['log_loss']:.3f}")
+        print(f"  ROC AUC:     {metrics['roc_auc']:.3f}")
+        print(f"  Brier Score: {metrics['brier_score']:.3f}")
     
-    if save_models:
-        baseline.save()
+    # Feature importance
+    print("\n" + "=" * 60)
+    print("FEATURE IMPORTANCE (Random Forest)")
+    print("=" * 60)
+    importance_df = predictor.get_feature_importance('random_forest')
+    print(importance_df.head(10).to_string(index=False))
     
-    return {
-        'test_results': results,
-        'cv_results': cv_results,
-        'n_samples': len(X),
-        'n_features': len(feature_names),
-        'feature_names': feature_names
-    }
-
-
-def main():
-    """Train and evaluate baseline models."""
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s [%(levelname)s] %(message)s"
-    )
+    # Save if path provided
+    if save_path:
+        predictor.save(save_path)
     
-    import argparse
-    parser = argparse.ArgumentParser(description='Train baseline models')
-    parser.add_argument('--format', default='T20', choices=['T20', 'ODI'])
-    parser.add_argument('--min-date', default=None, help='Min date (YYYY-MM-DD)')
-    parser.add_argument('--no-save', action='store_true', help='Do not save models')
-    args = parser.parse_args()
-    
-    results = train_baseline_models(
-        match_format=args.format,
-        min_date=args.min_date,
-        save_models=not args.no_save
-    )
-    
-    if 'error' not in results:
-        print("\nTraining completed successfully!")
-        print(f"Samples: {results['n_samples']}")
-        print(f"Features: {results['n_features']}")
-    
-    return 0
+    return predictor, results
 
 
 if __name__ == "__main__":
-    sys.exit(main())
-
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+    
+    from src.features.match_features import build_training_dataset
+    
+    # Build feature dataset
+    print("Building feature dataset...")
+    df = build_training_dataset(format_type='T20', gender='male')
+    
+    # Train and evaluate
+    predictor, results = train_and_evaluate(df)
+    
+    # Cross-validation
+    print("\n" + "=" * 60)
+    print("CROSS-VALIDATION RESULTS")
+    print("=" * 60)
+    cv_results = predictor.cross_validate(df)
+    for name, cv in cv_results.items():
+        print(f"{name}: {cv['mean_accuracy']:.3f} (+/- {cv['std_accuracy']:.3f})")
