@@ -22,9 +22,10 @@ DATABASE_URL = f"sqlite:///{DATABASE_PATH}"
 # Data sources - Cricsheet URLs
 CRICSHEET_BASE_URL = "https://cricsheet.org/downloads/"
 DATA_SOURCES = {
-    "t20i": f"{CRICSHEET_BASE_URL}t20s_json.zip",           # All T20s (men + women)
+    "t20i": f"{CRICSHEET_BASE_URL}t20s_json.zip",           # All T20s (men + women internationals)
     "t20s_female": f"{CRICSHEET_BASE_URL}t20s_female_json.zip",  # Women's T20 internationals
     "all_female": f"{CRICSHEET_BASE_URL}all_female_json.zip",    # ALL women's cricket (T20+ODI+franchise)
+    "all_male": f"{CRICSHEET_BASE_URL}all_male_json.zip",        # ALL men's cricket (T20+ODI+franchise - IPL, BBL, PSL, etc.)
     "wpl": f"{CRICSHEET_BASE_URL}wpl_json.zip",             # Women's Premier League (India)
     "odi": f"{CRICSHEET_BASE_URL}odis_json.zip",
 }

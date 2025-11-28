@@ -300,25 +300,15 @@ def simulate_match():
         if len(team2_bowlers) < 5:
             team2_bowlers.extend([team2_bowlers[0]] * (5 - len(team2_bowlers)))
         
-        # Simulate toss if requested
-        toss_info = None
+        # Get toss field probability from historical data
+        toss_field_prob = 0.65  # Default T20 field preference
         if use_toss:
-            toss_simulator = get_toss_simulator()
-            # For each simulation, we'd simulate toss
-            # But for simplicity, we'll simulate one toss for the prediction display
-            toss_winner, toss_decision, batting_first = toss_simulator.simulate_toss(
-                team1_id=1, team2_id=2, format_type='T20', gender=gender
-            )
-            toss_info = {
-                'winner': 'Team 1' if toss_winner == 1 else 'Team 2',
-                'decision': toss_decision,
-                'batting_first': 'Team 1' if batting_first == 1 else 'Team 2'
-            }
-            
-            # If team 2 bats first, swap the order
-            if batting_first == 2:
-                team1_batters, team2_batters = team2_batters, team1_batters
-                team1_bowlers, team2_bowlers = team2_bowlers, team1_bowlers
+            try:
+                toss_simulator = get_toss_simulator()
+                rates = toss_simulator.stats.get_decision_rates('T20', gender)
+                toss_field_prob = rates.get('field', 0.65)
+            except:
+                pass  # Use default
         
         # Select simulator for specified gender
         if simulator_type == 'nn':
@@ -326,7 +316,7 @@ def simulate_match():
         else:
             simulator = get_fast_simulator(gender)
         
-        # Run simulation
+        # Run simulation - toss is now simulated WITHIN each Monte Carlo iteration
         import time
         start = time.time()
         
@@ -336,10 +326,23 @@ def simulate_match():
             team1_bowlers[:5],
             team2_batters[:11],
             team2_bowlers[:5],
-            venue_id=venue_id
+            venue_id=venue_id,
+            use_toss=use_toss,
+            toss_field_prob=toss_field_prob
         )
         
         elapsed = time.time() - start
+        
+        # Extract toss statistics from results if toss was simulated
+        toss_info = None
+        if use_toss and 'toss_stats' in results:
+            ts = results['toss_stats']
+            toss_info = {
+                'team1_won_toss_pct': round(ts['team1_won_toss_pct'] * 100, 1),
+                'chose_field_pct': round(ts['chose_field_pct'] * 100, 1),
+                'team1_batted_first_pct': round(ts['team1_batted_first_pct'] * 100, 1),
+                'note': 'Toss simulated independently for each of the {} matches'.format(n_simulations)
+            }
         
         # Format response
         response = {
@@ -368,81 +371,166 @@ def simulate_match():
         return jsonify({'success': False, 'error': str(e)}), 500
 
 
-@app.route('/api/rankings/teams', methods=['GET'])
-def get_team_rankings():
-    """Get team ELO rankings."""
+@app.route('/api/rankings/months', methods=['GET'])
+def get_available_months():
+    """Get list of available months for historical ELO data."""
     try:
         conn = get_connection()
         cursor = conn.cursor()
         
         cursor.execute("""
-            SELECT t.name, e.elo_t20_male as elo
-            FROM team_current_elo e
-            JOIN teams t ON e.team_id = t.team_id
-            WHERE e.elo_t20_male != 1500
-            ORDER BY e.elo_t20_male DESC
-            LIMIT 20
+            SELECT DISTINCT strftime('%Y-%m', date) as month
+            FROM team_elo_history
+            ORDER BY month DESC
+            LIMIT 36
         """)
         
-        rankings = [dict(row) for row in cursor.fetchall()]
+        months = [row[0] for row in cursor.fetchall()]
+        conn.close()
+        
+        return jsonify({'success': True, 'months': months})
+    
+    except Exception as e:
+        logger.error(f"Error fetching months: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/rankings/teams', methods=['GET'])
+def get_team_rankings():
+    """Get team ELO rankings with filters."""
+    try:
+        # Get parameters
+        format_type = request.args.get('format', 'T20')
+        gender = request.args.get('gender', 'male')
+        min_matches = int(request.args.get('min_matches', 10))
+        month = request.args.get('month')  # YYYY-MM or None for current
+        
+        conn = get_connection()
+        cursor = conn.cursor()
+        
+        if month:
+            # Get historical data for specific month (end of month snapshot)
+            cursor.execute("""
+                SELECT t.name, h.elo, 
+                       (SELECT COUNT(*) FROM matches m 
+                        WHERE (m.team1_id = t.team_id OR m.team2_id = t.team_id)
+                          AND m.match_type = ? AND m.gender = ?
+                          AND m.match_date <= date(? || '-01', '+1 month', '-1 day')) as match_count
+                FROM team_elo_history h
+                JOIN teams t ON h.team_id = t.team_id
+                WHERE h.format = ? AND h.gender = ?
+                  AND strftime('%Y-%m', h.date) = ?
+                GROUP BY t.team_id
+                HAVING match_count >= ?
+                ORDER BY h.elo DESC
+                LIMIT 30
+            """, (format_type, gender, month, format_type, gender, month, min_matches))
+        else:
+            # Get current ELO
+            elo_col = f"elo_{format_type.lower()}_{gender}"
+            cursor.execute(f"""
+                SELECT t.name, e.{elo_col} as elo,
+                       (SELECT COUNT(*) FROM matches m 
+                        WHERE (m.team1_id = t.team_id OR m.team2_id = t.team_id)
+                          AND m.match_type = ? AND m.gender = ?) as match_count
+                FROM team_current_elo e
+                JOIN teams t ON e.team_id = t.team_id
+                WHERE e.{elo_col} IS NOT NULL AND e.{elo_col} != 1500
+                GROUP BY t.team_id
+                HAVING match_count >= ?
+                ORDER BY e.{elo_col} DESC
+                LIMIT 30
+            """, (format_type, gender, min_matches))
+        
+        rankings = [{'name': r[0], 'elo': round(r[1], 1), 'matches': r[2]} for r in cursor.fetchall()]
         conn.close()
         
         return jsonify({'success': True, 'rankings': rankings})
     
     except Exception as e:
-        logger.error(f"Error fetching rankings: {e}")
+        logger.error(f"Error fetching team rankings: {e}")
+        import traceback
+        traceback.print_exc()
         return jsonify({'success': False, 'error': str(e)}), 500
 
 
 @app.route('/api/rankings/batting', methods=['GET'])
 def get_batting_rankings():
-    """Get player batting ELO rankings."""
+    """Get player batting ELO rankings with filters."""
     try:
+        format_type = request.args.get('format', 'T20')
+        gender = request.args.get('gender', 'male')
+        min_matches = int(request.args.get('min_matches', 5))
+        
+        elo_col = f"batting_elo_{format_type.lower()}_{gender}"
+        
         conn = get_connection()
         cursor = conn.cursor()
         
-        cursor.execute("""
-            SELECT p.name, p.country, e.batting_elo_t20_male as elo
+        cursor.execute(f"""
+            SELECT p.name, p.country as team, e.{elo_col} as elo,
+                   (SELECT COUNT(DISTINCT pms.match_id) FROM player_match_stats pms
+                    JOIN matches m ON pms.match_id = m.match_id
+                    WHERE pms.player_id = p.player_id 
+                      AND m.match_type = ? AND m.gender = ?) as match_count
             FROM player_current_elo e
             JOIN players p ON e.player_id = p.player_id
-            WHERE e.batting_elo_t20_male != 1500
-            ORDER BY e.batting_elo_t20_male DESC
-            LIMIT 20
-        """)
+            WHERE e.{elo_col} IS NOT NULL AND e.{elo_col} != 1500
+            GROUP BY p.player_id
+            HAVING match_count >= ?
+            ORDER BY e.{elo_col} DESC
+            LIMIT 30
+        """, (format_type, gender, min_matches))
         
-        rankings = [dict(row) for row in cursor.fetchall()]
+        rankings = [{'name': r[0], 'team': r[1] or '', 'elo': round(r[2], 1), 'matches': r[3]} for r in cursor.fetchall()]
         conn.close()
         
         return jsonify({'success': True, 'rankings': rankings})
     
     except Exception as e:
-        logger.error(f"Error fetching rankings: {e}")
+        logger.error(f"Error fetching batting rankings: {e}")
+        import traceback
+        traceback.print_exc()
         return jsonify({'success': False, 'error': str(e)}), 500
 
 
 @app.route('/api/rankings/bowling', methods=['GET'])
 def get_bowling_rankings():
-    """Get player bowling ELO rankings."""
+    """Get player bowling ELO rankings with filters."""
     try:
+        format_type = request.args.get('format', 'T20')
+        gender = request.args.get('gender', 'male')
+        min_matches = int(request.args.get('min_matches', 5))
+        
+        elo_col = f"bowling_elo_{format_type.lower()}_{gender}"
+        
         conn = get_connection()
         cursor = conn.cursor()
         
-        cursor.execute("""
-            SELECT p.name, p.country, e.bowling_elo_t20_male as elo
+        cursor.execute(f"""
+            SELECT p.name, p.country as team, e.{elo_col} as elo,
+                   (SELECT COUNT(DISTINCT pms.match_id) FROM player_match_stats pms
+                    JOIN matches m ON pms.match_id = m.match_id
+                    WHERE pms.player_id = p.player_id 
+                      AND m.match_type = ? AND m.gender = ?) as match_count
             FROM player_current_elo e
             JOIN players p ON e.player_id = p.player_id
-            WHERE e.bowling_elo_t20_male != 1500
-            ORDER BY e.bowling_elo_t20_male DESC
-            LIMIT 20
-        """)
+            WHERE e.{elo_col} IS NOT NULL AND e.{elo_col} != 1500
+            GROUP BY p.player_id
+            HAVING match_count >= ?
+            ORDER BY e.{elo_col} DESC
+            LIMIT 30
+        """, (format_type, gender, min_matches))
         
-        rankings = [dict(row) for row in cursor.fetchall()]
+        rankings = [{'name': r[0], 'team': r[1] or '', 'elo': round(r[2], 1), 'matches': r[3]} for r in cursor.fetchall()]
         conn.close()
         
         return jsonify({'success': True, 'rankings': rankings})
     
     except Exception as e:
-        logger.error(f"Error fetching rankings: {e}")
+        logger.error(f"Error fetching bowling rankings: {e}")
+        import traceback
+        traceback.print_exc()
         return jsonify({'success': False, 'error': str(e)}), 500
 
 

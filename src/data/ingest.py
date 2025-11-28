@@ -73,9 +73,10 @@ class CricsheetParser:
         """Determine match type (T20 or ODI)."""
         match_type = info.get('match_type', '').upper()
         
-        if match_type in ['T20', 'T20I']:
+        # T20 formats: T20 (franchise), T20I (international), IT20 (alternate international)
+        if match_type in ['T20', 'T20I', 'IT20']:
             return 'T20'
-        elif match_type in ['ODI', 'OD']:
+        elif match_type in ['ODI', 'OD', 'ODM']:
             return 'ODI'
         
         # Check overs per innings
@@ -595,7 +596,7 @@ def ingest_matches(
     Ingest cricket matches from downloaded JSON files.
     
     Args:
-        formats: List of formats to ingest (e.g., ["t20i", "odi"])
+        formats: List of formats to ingest (e.g., ["t20i", "odi", "all_male", "all_female"])
         limit: Maximum number of matches to ingest (for testing)
         force_reingest: If True, reingest all matches
         
@@ -603,7 +604,8 @@ def ingest_matches(
         Dictionary with ingestion statistics
     """
     if formats is None:
-        formats = ["t20i", "odi"]
+        # Include all franchise data: IPL, BBL, PSL, WBBL, WPL, etc.
+        formats = ["all_male", "all_female"]
     
     # Initialize database
     init_database()
@@ -629,6 +631,7 @@ def ingest_matches(
             json_files = json_files[:limit]
         
         with get_db_connection() as conn:
+            batch_count = 0
             for file_path in tqdm(json_files, desc=f"{format_name.upper()}"):
                 try:
                     match_data = parser.parse_match_file(file_path)
@@ -639,13 +642,18 @@ def ingest_matches(
                     
                     if ingestor.ingest_match(conn, match_data):
                         total_processed += 1
+                        batch_count += 1
+                        # Commit every 500 matches to avoid losing all progress on failure
+                        if batch_count >= 500:
+                            conn.commit()
+                            batch_count = 0
                     else:
                         total_skipped += 1
                         
                 except Exception as e:
                     logger.error(f"Failed to ingest {file_path.name}: {e}")
                     total_failed += 1
-                    conn.rollback()
+                    # Don't rollback everything - just skip this file
     
     stats = {
         'matches_processed': total_processed,
@@ -672,14 +680,17 @@ def main():
     
     logger.info("Starting data ingestion...")
     
-    # Check if data has been downloaded
-    t20_files = get_json_files("t20i")
-    odi_files = get_json_files("odi")
+    # Check if data has been downloaded (all_male includes IPL, BBL, etc.)
+    male_files = get_json_files("all_male")
+    female_files = get_json_files("all_female")
     
-    if not t20_files and not odi_files:
-        logger.error("No data files found. Please run the downloader first:")
-        logger.error("  python -m src.data.downloader")
+    if not male_files and not female_files:
+        logger.error("No data files found. Please download first:")
+        logger.error("  - all_male_json.zip (for men's franchise cricket)")
+        logger.error("  - all_female_json.zip (for women's franchise cricket)")
         return 1
+    
+    logger.info(f"Found {len(male_files)} male match files, {len(female_files)} female match files")
     
     # Run ingestion
     stats = ingest_matches()

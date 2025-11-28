@@ -208,12 +208,18 @@ class FastLookupSimulator:
         team2_batter_ids: List[int],
         team2_bowler_ids: List[int],
         max_overs: int = 20,
-        venue_id: Optional[int] = None
+        venue_id: Optional[int] = None,
+        use_toss: bool = False,
+        toss_field_prob: float = 0.65
     ) -> Dict:
         """
         Simulate N matches in parallel using vectorized operations.
         Ultra-fast: No neural network, pure numpy.
-        Now with H2H matchup blending and venue effects!
+        Now with H2H matchup blending, venue effects, and optional toss simulation!
+        
+        Args:
+            use_toss: If True, simulate toss for each match (50/50 winner, then choose bat/field)
+            toss_field_prob: Probability winner chooses to field (default 0.65 for T20)
         """
         max_balls = max_overs * 6
         
@@ -241,16 +247,15 @@ class FastLookupSimulator:
         ])
         
         # Pre-compute H2H matrices (also apply venue adjustments)
-        # First innings: Team1 batters vs Team2 bowlers
+        # Team1 batters vs Team2 bowlers
         h2h_1v2, h2h_1v2_avail = self.build_h2h_matrix(team1_batter_ids, team2_bowler_ids)
-        # Apply venue adjustment to H2H distributions
         if venue_id is not None:
             for i in range(h2h_1v2.shape[0]):
                 for j in range(h2h_1v2.shape[1]):
                     if h2h_1v2_avail[i, j]:
                         h2h_1v2[i, j] = self.adjust_distribution_for_venue(h2h_1v2[i, j], venue_id)
         
-        # Second innings: Team2 batters vs Team1 bowlers
+        # Team2 batters vs Team1 bowlers
         h2h_2v1, h2h_2v1_avail = self.build_h2h_matrix(team2_batter_ids, team1_bowler_ids)
         if venue_id is not None:
             for i in range(h2h_2v1.shape[0]):
@@ -258,58 +263,144 @@ class FastLookupSimulator:
                     if h2h_2v1_avail[i, j]:
                         h2h_2v1[i, j] = self.adjust_distribution_for_venue(h2h_2v1[i, j], venue_id)
         
-        # First innings
-        first_runs, first_wickets = self._simulate_innings_vectorized(
-            n_matches=n_matches,
-            batting_dists=team1_bat_dists,
-            bowling_dists=team2_bowl_dists,
-            h2h_dists=h2h_1v2,
-            h2h_available=h2h_1v2_avail,
-            target=None,
-            max_balls=max_balls
-        )
-        
-        # Second innings
-        # Apply first innings bonus to balance win rates
-        adjusted_first_runs = (first_runs * FIRST_INNINGS_SCORE_BONUS).astype(np.int32)
-        targets = adjusted_first_runs + 1
-        
-        second_runs, second_wickets = self._simulate_innings_vectorized(
-            n_matches=n_matches,
-            batting_dists=team2_bat_dists,
-            bowling_dists=team1_bowl_dists,
-            h2h_dists=h2h_2v1,
-            h2h_available=h2h_2v1_avail,
-            target=targets,
-            max_balls=max_balls
-        )
-        
-        # Determine winners
-        team2_wins = second_runs >= targets
-        team1_wins = ~team2_wins
+        if use_toss:
+            # ========== TOSS SIMULATION (per-match) ==========
+            # Step 1: 50/50 who wins toss
+            team1_wins_toss = np.random.random(n_matches) < 0.5
+            
+            # Step 2: Winner chooses bat (1-toss_field_prob) or field (toss_field_prob)
+            winner_chooses_field = np.random.random(n_matches) < toss_field_prob
+            
+            # Step 3: Determine who bats first
+            team1_bats_first = (team1_wins_toss & ~winner_chooses_field) | (~team1_wins_toss & winner_chooses_field)
+            
+            # Split into two groups
+            team1_first_mask = team1_bats_first
+            team2_first_mask = ~team1_bats_first
+            n_team1_first = team1_first_mask.sum()
+            n_team2_first = team2_first_mask.sum()
+            
+            # Initialize result arrays
+            team1_scores = np.zeros(n_matches, dtype=np.int32)
+            team2_scores = np.zeros(n_matches, dtype=np.int32)
+            team1_wins = np.zeros(n_matches, dtype=bool)
+            
+            # ========== Simulate matches where Team 1 bats first ==========
+            if n_team1_first > 0:
+                first_runs_t1, _ = self._simulate_innings_vectorized(
+                    n_matches=n_team1_first,
+                    batting_dists=team1_bat_dists,
+                    bowling_dists=team2_bowl_dists,
+                    h2h_dists=h2h_1v2,
+                    h2h_available=h2h_1v2_avail,
+                    target=None,
+                    max_balls=max_balls
+                )
+                adjusted_first_runs_t1 = (first_runs_t1 * FIRST_INNINGS_SCORE_BONUS).astype(np.int32)
+                targets_t1 = adjusted_first_runs_t1 + 1
+                
+                second_runs_t1, _ = self._simulate_innings_vectorized(
+                    n_matches=n_team1_first,
+                    batting_dists=team2_bat_dists,
+                    bowling_dists=team1_bowl_dists,
+                    h2h_dists=h2h_2v1,
+                    h2h_available=h2h_2v1_avail,
+                    target=targets_t1,
+                    max_balls=max_balls
+                )
+                
+                team1_scores[team1_first_mask] = first_runs_t1
+                team2_scores[team1_first_mask] = second_runs_t1
+                team1_wins[team1_first_mask] = second_runs_t1 < targets_t1
+            
+            # ========== Simulate matches where Team 2 bats first ==========
+            if n_team2_first > 0:
+                first_runs_t2, _ = self._simulate_innings_vectorized(
+                    n_matches=n_team2_first,
+                    batting_dists=team2_bat_dists,
+                    bowling_dists=team1_bowl_dists,
+                    h2h_dists=h2h_2v1,
+                    h2h_available=h2h_2v1_avail,
+                    target=None,
+                    max_balls=max_balls
+                )
+                adjusted_first_runs_t2 = (first_runs_t2 * FIRST_INNINGS_SCORE_BONUS).astype(np.int32)
+                targets_t2 = adjusted_first_runs_t2 + 1
+                
+                second_runs_t2, _ = self._simulate_innings_vectorized(
+                    n_matches=n_team2_first,
+                    batting_dists=team1_bat_dists,
+                    bowling_dists=team2_bowl_dists,
+                    h2h_dists=h2h_1v2,
+                    h2h_available=h2h_1v2_avail,
+                    target=targets_t2,
+                    max_balls=max_balls
+                )
+                
+                team2_scores[team2_first_mask] = first_runs_t2
+                team1_scores[team2_first_mask] = second_runs_t2
+                team1_wins[team2_first_mask] = second_runs_t2 >= targets_t2
+            
+            toss_stats = {
+                'team1_won_toss_pct': team1_wins_toss.mean(),
+                'chose_field_pct': winner_chooses_field.mean(),
+                'team1_batted_first_pct': team1_bats_first.mean()
+            }
+        else:
+            # No toss - Team 1 always bats first
+            first_runs, first_wickets = self._simulate_innings_vectorized(
+                n_matches=n_matches,
+                batting_dists=team1_bat_dists,
+                bowling_dists=team2_bowl_dists,
+                h2h_dists=h2h_1v2,
+                h2h_available=h2h_1v2_avail,
+                target=None,
+                max_balls=max_balls
+            )
+            
+            adjusted_first_runs = (first_runs * FIRST_INNINGS_SCORE_BONUS).astype(np.int32)
+            targets = adjusted_first_runs + 1
+            
+            second_runs, second_wickets = self._simulate_innings_vectorized(
+                n_matches=n_matches,
+                batting_dists=team2_bat_dists,
+                bowling_dists=team1_bowl_dists,
+                h2h_dists=h2h_2v1,
+                h2h_available=h2h_2v1_avail,
+                target=targets,
+                max_balls=max_balls
+            )
+            
+            team1_scores = first_runs
+            team2_scores = second_runs
+            team1_wins = second_runs < targets
+            toss_stats = None
         
         # H2H usage stats
         total_h2h = self.h2h_hits + self.h2h_misses
         h2h_rate = self.h2h_hits / total_h2h if total_h2h > 0 else 0
         
-        return {
+        results = {
             'n_matches': n_matches,
             'team1_win_prob': team1_wins.mean(),
-            'team2_win_prob': team2_wins.mean(),
-            'avg_team1_score': first_runs.mean(),
-            'avg_team2_score': second_runs.mean(),
-            'std_team1_score': first_runs.std(),
-            'std_team2_score': second_runs.std(),
-            'avg_team1_wickets': first_wickets.mean(),
-            'avg_team2_wickets': second_wickets.mean(),
-            'team1_score_range': (np.percentile(first_runs, 5), np.percentile(first_runs, 95)),
-            'team2_score_range': (np.percentile(second_runs, 5), np.percentile(second_runs, 95)),
-            'team1_scores': first_runs,
-            'team2_scores': second_runs,
+            'team2_win_prob': (~team1_wins).mean(),
+            'avg_team1_score': team1_scores.mean(),
+            'avg_team2_score': team2_scores.mean(),
+            'std_team1_score': team1_scores.std(),
+            'std_team2_score': team2_scores.std(),
+            'team1_score_range': (np.percentile(team1_scores, 5), np.percentile(team1_scores, 95)),
+            'team2_score_range': (np.percentile(team2_scores, 5), np.percentile(team2_scores, 95)),
+            'team1_scores': team1_scores,
+            'team2_scores': team2_scores,
             'h2h_hits': self.h2h_hits,
             'h2h_misses': self.h2h_misses,
             'h2h_rate': h2h_rate,
         }
+        
+        if toss_stats:
+            results['toss_stats'] = toss_stats
+        
+        return results
     
     def _simulate_innings_vectorized(
         self,
