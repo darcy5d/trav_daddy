@@ -138,7 +138,7 @@
             <label>Simulator Engine</label>
             <select id="simulator-type">
                 <option value="fast">Fast Lookup (0.1ms/match)</option>
-                <option value="nn">Neural Network (5ms/match)</option>
+                <option value="nn" selected>Neural Network (5ms/match) + Scorecard</option>
             </select>
         </div>
         <div class="form-group">
@@ -196,7 +196,7 @@
     
     <div id="toss-result" style="text-align: center; margin-bottom: 1rem; display: none;">
         <div style="background: var(--bg-secondary); padding: 0.75rem 1rem; border-radius: 8px; display: inline-block;">
-            🎲 Toss: <span id="toss-winner-text"></span> won and elected to <span id="toss-decision-text"></span>
+            🎲 <span id="toss-stats-text">Toss simulated per match</span>
         </div>
     </div>
     
@@ -205,12 +205,164 @@
     </div>
 </div>
 
-<!-- Loading -->
-<div id="loading" class="card" style="display: none;">
-    <div class="loading">
-        <div class="spinner"></div>
+<!-- Scorecard Section (NN simulator only) - ESPN Cricinfo Style -->
+<div id="scorecard-section" class="card" style="display: none; margin-top: 1.5rem;">
+    <h2 class="card-title">Sample Scorecard</h2>
+    <p style="color: var(--text-secondary); margin-bottom: 1rem; font-size: 0.875rem;">
+        Representative match outcome based on simulation
+    </p>
+    
+    <!-- Match Result Banner -->
+    <div id="scorecard-result" style="text-align: center; padding: 1rem; margin-bottom: 1.5rem; background: linear-gradient(135deg, var(--accent-primary), var(--accent-secondary)); border-radius: 8px; color: white;">
+        <span style="font-size: 1.25rem; font-weight: 600;" id="scorecard-result-text"></span>
     </div>
-    <p style="text-align: center; color: var(--text-secondary);">Running simulations...</p>
+    
+    <!-- Innings Tabs -->
+    <div style="display: flex; gap: 0.5rem; margin-bottom: 1rem;">
+        <button class="btn btn-primary" id="tab-inn1" onclick="showInnings(1)">1st Innings</button>
+        <button class="btn" id="tab-inn2" onclick="showInnings(2)">2nd Innings</button>
+    </div>
+    
+    <!-- First Innings Scorecard (ESPN Style) -->
+    <div id="innings1-card">
+        <!-- Team Header -->
+        <div style="background: var(--accent-primary); color: white; padding: 0.75rem 1rem; border-radius: 8px 8px 0 0; display: flex; justify-content: space-between; align-items: center;">
+            <span style="font-weight: 700; font-size: 1.1rem;" id="innings1-team-name">Team 1</span>
+            <span style="font-weight: 700; font-size: 1.1rem;" id="innings1-total">0/0 (0 Ov)</span>
+        </div>
+        
+        <!-- Batting Table -->
+        <table class="espn-scorecard" style="width: 100%; border-collapse: collapse; margin-bottom: 0.5rem;">
+            <thead>
+                <tr style="background: var(--bg-tertiary); font-size: 0.75rem; text-transform: uppercase; color: var(--text-muted);">
+                    <th style="text-align: left; padding: 0.5rem; width: 40%;">Batter</th>
+                    <th style="text-align: center; padding: 0.5rem; width: 8%;">R</th>
+                    <th style="text-align: center; padding: 0.5rem; width: 8%;">B</th>
+                    <th style="text-align: center; padding: 0.5rem; width: 8%;">4s</th>
+                    <th style="text-align: center; padding: 0.5rem; width: 8%;">6s</th>
+                    <th style="text-align: center; padding: 0.5rem; width: 8%;">SR</th>
+                </tr>
+            </thead>
+            <tbody id="innings1-batting"></tbody>
+            <tfoot>
+                <tr style="background: var(--bg-tertiary); font-size: 0.85rem;">
+                    <td style="padding: 0.5rem; color: var(--text-muted);">Extras</td>
+                    <td colspan="5" style="padding: 0.5rem; text-align: left;" id="innings1-extras">(lb 0, w 0, nb 0) 0</td>
+                </tr>
+                <tr style="background: var(--bg-secondary); font-weight: 700;">
+                    <td style="padding: 0.75rem;">TOTAL</td>
+                    <td colspan="5" style="padding: 0.75rem; text-align: left;" id="innings1-total-row">0 (0 wkts, 0 Ov)</td>
+                </tr>
+            </tfoot>
+        </table>
+        
+        <!-- Bowling Header -->
+        <div style="background: var(--bg-tertiary); padding: 0.5rem 1rem; margin-top: 1rem; border-radius: 8px 8px 0 0;">
+            <span style="font-weight: 600; font-size: 0.9rem; color: var(--text-secondary);">BOWLING</span>
+        </div>
+        
+        <!-- Bowling Table -->
+        <table class="espn-scorecard" style="width: 100%; border-collapse: collapse;">
+            <thead>
+                <tr style="background: var(--bg-tertiary); font-size: 0.75rem; text-transform: uppercase; color: var(--text-muted);">
+                    <th style="text-align: left; padding: 0.5rem; width: 40%;">Bowler</th>
+                    <th style="text-align: center; padding: 0.5rem; width: 10%;">O</th>
+                    <th style="text-align: center; padding: 0.5rem; width: 10%;">M</th>
+                    <th style="text-align: center; padding: 0.5rem; width: 10%;">R</th>
+                    <th style="text-align: center; padding: 0.5rem; width: 10%;">W</th>
+                    <th style="text-align: center; padding: 0.5rem; width: 10%;">Econ</th>
+                </tr>
+            </thead>
+            <tbody id="innings1-bowling"></tbody>
+        </table>
+    </div>
+    
+    <!-- Second Innings Scorecard (ESPN Style) -->
+    <div id="innings2-card" style="display: none;">
+        <!-- Team Header -->
+        <div style="background: var(--accent-secondary); color: white; padding: 0.75rem 1rem; border-radius: 8px 8px 0 0; display: flex; justify-content: space-between; align-items: center;">
+            <span style="font-weight: 700; font-size: 1.1rem;" id="innings2-team-name">Team 2</span>
+            <span style="font-weight: 700; font-size: 1.1rem;" id="innings2-total">0/0 (0 Ov)</span>
+        </div>
+        <div style="background: var(--bg-secondary); padding: 0.5rem 1rem; font-size: 0.85rem; color: var(--text-muted);">
+            Target: <span id="innings2-target" style="font-weight: 600; color: var(--text-primary);">-</span>
+        </div>
+        
+        <!-- Batting Table -->
+        <table class="espn-scorecard" style="width: 100%; border-collapse: collapse; margin-bottom: 0.5rem;">
+            <thead>
+                <tr style="background: var(--bg-tertiary); font-size: 0.75rem; text-transform: uppercase; color: var(--text-muted);">
+                    <th style="text-align: left; padding: 0.5rem; width: 40%;">Batter</th>
+                    <th style="text-align: center; padding: 0.5rem; width: 8%;">R</th>
+                    <th style="text-align: center; padding: 0.5rem; width: 8%;">B</th>
+                    <th style="text-align: center; padding: 0.5rem; width: 8%;">4s</th>
+                    <th style="text-align: center; padding: 0.5rem; width: 8%;">6s</th>
+                    <th style="text-align: center; padding: 0.5rem; width: 8%;">SR</th>
+                </tr>
+            </thead>
+            <tbody id="innings2-batting"></tbody>
+            <tfoot>
+                <tr style="background: var(--bg-tertiary); font-size: 0.85rem;">
+                    <td style="padding: 0.5rem; color: var(--text-muted);">Extras</td>
+                    <td colspan="5" style="padding: 0.5rem; text-align: left;" id="innings2-extras">(lb 0, w 0, nb 0) 0</td>
+                </tr>
+                <tr style="background: var(--bg-secondary); font-weight: 700;">
+                    <td style="padding: 0.75rem;">TOTAL</td>
+                    <td colspan="5" style="padding: 0.75rem; text-align: left;" id="innings2-total-row">0 (0 wkts, 0 Ov)</td>
+                </tr>
+            </tfoot>
+        </table>
+        
+        <!-- Bowling Header -->
+        <div style="background: var(--bg-tertiary); padding: 0.5rem 1rem; margin-top: 1rem; border-radius: 8px 8px 0 0;">
+            <span style="font-weight: 600; font-size: 0.9rem; color: var(--text-secondary);">BOWLING</span>
+        </div>
+        
+        <!-- Bowling Table -->
+        <table class="espn-scorecard" style="width: 100%; border-collapse: collapse;">
+            <thead>
+                <tr style="background: var(--bg-tertiary); font-size: 0.75rem; text-transform: uppercase; color: var(--text-muted);">
+                    <th style="text-align: left; padding: 0.5rem; width: 40%;">Bowler</th>
+                    <th style="text-align: center; padding: 0.5rem; width: 10%;">O</th>
+                    <th style="text-align: center; padding: 0.5rem; width: 10%;">M</th>
+                    <th style="text-align: center; padding: 0.5rem; width: 10%;">R</th>
+                    <th style="text-align: center; padding: 0.5rem; width: 10%;">W</th>
+                    <th style="text-align: center; padding: 0.5rem; width: 10%;">Econ</th>
+                </tr>
+            </thead>
+            <tbody id="innings2-bowling"></tbody>
+        </table>
+    </div>
+</div>
+
+<!-- Loading with Progress -->
+<div id="loading" class="card" style="display: none;">
+    <h3 style="text-align: center; margin-bottom: 1rem;">Running Simulation...</h3>
+    
+    <!-- Progress Bar -->
+    <div style="background: var(--bg-tertiary); border-radius: 8px; height: 24px; overflow: hidden; margin-bottom: 1rem;">
+        <div id="progress-fill" style="height: 100%; background: linear-gradient(90deg, var(--accent-primary), var(--accent-secondary)); width: 0%; transition: width 0.3s ease;"></div>
+    </div>
+    
+    <!-- Progress Stats -->
+    <div style="display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 1rem; text-align: center;">
+        <div>
+            <div style="font-size: 1.5rem; font-weight: 700; color: var(--accent-primary);" id="progress-count">0</div>
+            <div style="color: var(--text-muted); font-size: 0.75rem;">COMPLETED</div>
+        </div>
+        <div>
+            <div style="font-size: 1.5rem; font-weight: 700; color: var(--text-primary);" id="progress-rate">--</div>
+            <div style="color: var(--text-muted); font-size: 0.75rem;">SIMS/SEC</div>
+        </div>
+        <div>
+            <div style="font-size: 1.5rem; font-weight: 700; color: var(--accent-secondary);" id="progress-eta">--</div>
+            <div style="color: var(--text-muted); font-size: 0.75rem;">ETA (SEC)</div>
+        </div>
+    </div>
+    
+    <p style="text-align: center; color: var(--text-muted); margin-top: 1rem; font-size: 0.875rem;" id="progress-status">
+        Initializing...
+    </p>
 </div>
 {% endblock %}
 
@@ -490,85 +642,330 @@
             return;
         }
         
+        // Deduplicate batters (each player can only bat once!)
+        const uniqueTeam1Batters = [...new Set(team1Batters)];
+        const uniqueTeam2Batters = [...new Set(team2Batters)];
+        
+        if (uniqueTeam1Batters.length < team1Batters.length) {
+            console.warn(`Removed ${team1Batters.length - uniqueTeam1Batters.length} duplicate Team 1 batters`);
+        }
+        if (uniqueTeam2Batters.length < team2Batters.length) {
+            console.warn(`Removed ${team2Batters.length - uniqueTeam2Batters.length} duplicate Team 2 batters`);
+        }
+        
         // Get venue and toss options
         const venueSelect = document.getElementById('venue-select');
         const venueId = venueSelect.value ? parseInt(venueSelect.value) : null;
         const useToss = document.getElementById('use-toss').checked;
+        const nSimulations = parseInt(document.getElementById('n-simulations').value);
         
-        // Show loading
+        // Show loading with progress
         document.getElementById('loading').style.display = 'block';
         document.getElementById('results').style.display = 'none';
+        document.getElementById('scorecard-section').style.display = 'none';
+        
+        // Reset progress UI
+        document.getElementById('progress-fill').style.width = '0%';
+        document.getElementById('progress-count').textContent = '0';
+        document.getElementById('progress-rate').textContent = '--';
+        document.getElementById('progress-eta').textContent = '--';
+        document.getElementById('progress-status').textContent = `Starting ${nSimulations.toLocaleString()} simulations...`;
+        
+        // Smooth animation state
+        let displayedCount = 0;
+        let targetCount = 0;
+        let currentRate = 100; // Default estimate: 100 sims/sec
+        let animationInterval = null;
+        let simulationComplete = false;
+        
+        // Start smooth animation loop (updates every 50ms)
+        animationInterval = setInterval(() => {
+            if (simulationComplete) {
+                clearInterval(animationInterval);
+                return;
+            }
+            
+            // Smoothly increment towards target
+            if (displayedCount < targetCount) {
+                // Increment based on estimated rate
+                const increment = currentRate / 20; // 50ms = 1/20 second
+                displayedCount = Math.min(displayedCount + increment, targetCount);
+                
+                const pct = (displayedCount / nSimulations) * 100;
+                const eta = currentRate > 0 ? (nSimulations - displayedCount) / currentRate : 0;
+                
+                document.getElementById('progress-fill').style.width = pct.toFixed(1) + '%';
+                document.getElementById('progress-count').textContent = Math.round(displayedCount).toLocaleString();
+                document.getElementById('progress-rate').textContent = Math.round(currentRate).toLocaleString();
+                document.getElementById('progress-eta').textContent = eta.toFixed(1);
+                document.getElementById('progress-status').textContent = 
+                    `${Math.round(displayedCount).toLocaleString()} / ${nSimulations.toLocaleString()} simulations (${pct.toFixed(1)}%)`;
+            }
+        }, 50);
         
         const payload = {
-            team1_batters: team1Batters,
+            team1_batters: uniqueTeam1Batters,
             team1_bowlers: team1Bowlers,
-            team2_batters: team2Batters,
+            team2_batters: uniqueTeam2Batters,
             team2_bowlers: team2Bowlers,
             simulator: document.getElementById('simulator-type').value,
-            n_simulations: parseInt(document.getElementById('n-simulations').value),
+            n_simulations: nSimulations,
             venue_id: venueId,
             use_toss: useToss,
             gender: currentGender
         };
         
         try {
-            const response = await fetch('/api/simulate', {
+            // Use streaming endpoint for progress updates
+            const response = await fetch('/api/simulate-stream', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify(payload)
             });
             
-            const data = await response.json();
+            const reader = response.body.getReader();
+            const decoder = new TextDecoder();
+            let buffer = '';
             
-            document.getElementById('loading').style.display = 'none';
-            
-            if (data.success) {
-                // Update results
-                document.getElementById('result-team1-name').textContent = team1Name;
-                document.getElementById('result-team2-name').textContent = team2Name;
+            while (true) {
+                const { done, value } = await reader.read();
+                if (done) break;
                 
-                document.getElementById('result-team1-prob').textContent = data.team1_win_prob + '%';
-                document.getElementById('result-team2-prob').textContent = data.team2_win_prob + '%';
+                buffer += decoder.decode(value, { stream: true });
                 
-                document.getElementById('result-team1-bar').style.width = data.team1_win_prob + '%';
-                document.getElementById('result-team2-bar').style.width = data.team2_win_prob + '%';
+                // Process complete SSE messages
+                const lines = buffer.split('\n');
+                buffer = lines.pop(); // Keep incomplete line in buffer
                 
-                document.getElementById('result-team1-score').textContent = data.avg_team1_score;
-                document.getElementById('result-team2-score').textContent = data.avg_team2_score;
-                
-                document.getElementById('result-team1-range').textContent = 
-                    `${data.team1_score_range[0]} - ${data.team1_score_range[1]}`;
-                document.getElementById('result-team2-range').textContent = 
-                    `${data.team2_score_range[0]} - ${data.team2_score_range[1]}`;
-                
-                // Show toss info if available
-                const tossResult = document.getElementById('toss-result');
-                if (data.toss_info) {
-                    document.getElementById('toss-winner-text').textContent = data.toss_info.winner;
-                    document.getElementById('toss-decision-text').textContent = data.toss_info.decision;
-                    tossResult.style.display = 'block';
-                } else {
-                    tossResult.style.display = 'none';
+                for (const line of lines) {
+                    if (line.startsWith('data: ')) {
+                        try {
+                            const data = JSON.parse(line.slice(6));
+                            
+                            if (data.type === 'progress') {
+                                // Update targets for smooth animation
+                                targetCount = data.completed;
+                                currentRate = data.rate;
+                                // Animation loop will smoothly update the UI
+                            }
+                            else if (data.type === 'result') {
+                                // Stop animation and show final results
+                                simulationComplete = true;
+                                clearInterval(animationInterval);
+                                
+                                // Ensure progress shows 100%
+                                document.getElementById('progress-fill').style.width = '100%';
+                                document.getElementById('progress-count').textContent = nSimulations.toLocaleString();
+                                
+                                // Small delay to show 100% before hiding
+                                setTimeout(() => {
+                                    document.getElementById('loading').style.display = 'none';
+                                    displayResults(data, team1Name, team2Name);
+                                }, 300);
+                            }
+                            else if (data.type === 'error') {
+                                simulationComplete = true;
+                                clearInterval(animationInterval);
+                                document.getElementById('loading').style.display = 'none';
+                                alert('Error: ' + data.error);
+                            }
+                        } catch (e) {
+                            console.error('Error parsing SSE data:', e);
+                        }
+                    }
                 }
-                
-                // Build meta string
-                let meta = `${data.n_simulations.toLocaleString()} simulations using ${data.simulator === 'nn' ? 'Neural Network' : 'Fast Lookup'} engine in ${data.elapsed_ms}ms`;
-                if (data.h2h_rate !== null) {
-                    meta += ` | H2H data used: ${data.h2h_rate}%`;
-                }
-                if (data.venue_id) {
-                    meta += ` | Venue #${data.venue_id}`;
-                }
-                document.getElementById('result-meta').textContent = meta;
-                
-                document.getElementById('results').style.display = 'block';
-            } else {
-                alert('Error: ' + data.error);
             }
         } catch (error) {
             document.getElementById('loading').style.display = 'none';
             alert('Error running simulation: ' + error.message);
         }
+    }
+    
+    function displayResults(data, team1Name, team2Name) {
+        // Update results
+        document.getElementById('result-team1-name').textContent = team1Name;
+        document.getElementById('result-team2-name').textContent = team2Name;
+        
+        document.getElementById('result-team1-prob').textContent = data.team1_win_prob + '%';
+        document.getElementById('result-team2-prob').textContent = data.team2_win_prob + '%';
+        
+        document.getElementById('result-team1-bar').style.width = data.team1_win_prob + '%';
+        document.getElementById('result-team2-bar').style.width = data.team2_win_prob + '%';
+        
+        document.getElementById('result-team1-score').textContent = data.avg_team1_score;
+        document.getElementById('result-team2-score').textContent = data.avg_team2_score;
+        
+        document.getElementById('result-team1-range').textContent = 
+            `${data.team1_score_range[0]} - ${data.team1_score_range[1]}`;
+        document.getElementById('result-team2-range').textContent = 
+            `${data.team2_score_range[0]} - ${data.team2_score_range[1]}`;
+        
+        // Show toss info if available (now shows per-simulation statistics)
+        const tossResult = document.getElementById('toss-result');
+        if (data.toss_info) {
+            const ti = data.toss_info;
+            document.getElementById('toss-stats-text').textContent = 
+                `Toss: Team 1 won ${ti.team1_won_toss_pct}% | Elected to field ${ti.chose_field_pct}% | Team 1 batted first ${ti.team1_batted_first_pct}%`;
+            tossResult.style.display = 'block';
+        } else {
+            tossResult.style.display = 'none';
+        }
+        
+        // Build meta string
+        let meta = `${data.n_simulations.toLocaleString()} simulations using ${data.simulator === 'nn' ? 'Neural Network' : 'Fast Lookup'} engine in ${data.elapsed_ms.toFixed(0)}ms`;
+        if (data.h2h_rate !== null && data.h2h_rate !== undefined) {
+            meta += ` | H2H data used: ${data.h2h_rate}%`;
+        }
+        if (data.venue_id) {
+            meta += ` | Venue #${data.venue_id}`;
+        }
+        document.getElementById('result-meta').textContent = meta;
+        
+        document.getElementById('results').style.display = 'block';
+        
+        // Display scorecard if available (NN simulator only)
+        const scorecardSection = document.getElementById('scorecard-section');
+        if (data.scorecard) {
+            displayScorecard(data.scorecard, team1Name, team2Name);
+            scorecardSection.style.display = 'block';
+        } else {
+            scorecardSection.style.display = 'none';
+        }
+    }
+    
+    function showInnings(inningsNum) {
+        // Update tabs
+        document.getElementById('tab-inn1').className = inningsNum === 1 ? 'btn btn-primary' : 'btn';
+        document.getElementById('tab-inn2').className = inningsNum === 2 ? 'btn btn-primary' : 'btn';
+        
+        // Show/hide innings cards
+        document.getElementById('innings1-card').style.display = inningsNum === 1 ? 'block' : 'none';
+        document.getElementById('innings2-card').style.display = inningsNum === 2 ? 'block' : 'none';
+    }
+    
+    function displayScorecard(scorecard, team1Name, team2Name) {
+        // Helper to format overs
+        const formatOvers = (overs) => {
+            const fullOvers = Math.floor(overs);
+            const balls = Math.round((overs % 1) * 10);
+            return balls > 0 ? `${fullOvers}.${balls}` : `${fullOvers}`;
+        };
+        
+        // Helper to format dismissal ESPN-style
+        const formatDismissal = (b, bowlers) => {
+            if (b.dismissal === 'not out') {
+                return '<span style="color: var(--accent-green); font-weight: 500;">not out</span>';
+            }
+            // Find bowler name
+            const bowlerName = bowlers.find(bl => bl.player_id === b.dismissed_by)?.name || 'Unknown';
+            const shortBowlerName = bowlerName.split(' ').pop(); // Last name only
+            return `<span style="color: var(--text-muted);">b ${shortBowlerName}</span>`;
+        };
+        
+        // Result banner
+        document.getElementById('scorecard-result-text').textContent = scorecard.result
+            .replace('Team 1', team1Name)
+            .replace('Team 2', team2Name);
+        
+        // ========== FIRST INNINGS ==========
+        document.getElementById('innings1-team-name').textContent = team1Name + ' Innings';
+        const overs1 = formatOvers(scorecard.team1_overs);
+        document.getElementById('innings1-total').textContent = 
+            `${scorecard.team1_total}/${scorecard.team1_wickets} (${overs1} Ov)`;
+        
+        // Calculate extras (estimate - total minus sum of individual runs)
+        const battingRuns1 = scorecard.team1_batting.reduce((sum, b) => sum + b.runs, 0);
+        const extras1 = Math.max(0, scorecard.team1_total - battingRuns1);
+        document.getElementById('innings1-extras').textContent = `(b 0, lb 0, w ${extras1}, nb 0) ${extras1}`;
+        document.getElementById('innings1-total-row').textContent = 
+            `${scorecard.team1_total} (${scorecard.team1_wickets} wkts, ${overs1} Ov)`;
+        
+        // First innings batting
+        const batting1 = document.getElementById('innings1-batting');
+        batting1.innerHTML = '';
+        scorecard.team1_batting.filter(b => b.balls > 0 || b.dismissal !== 'not out').forEach(b => {
+            batting1.innerHTML += `
+                <tr style="border-bottom: 1px solid var(--bg-tertiary);">
+                    <td style="text-align: left; padding: 0.5rem;">
+                        <div style="font-weight: 500;">${b.name || 'Player ' + b.player_id}</div>
+                        <div style="font-size: 0.75rem;">${formatDismissal(b, scorecard.team2_bowling)}</div>
+                    </td>
+                    <td style="text-align: center; padding: 0.5rem; font-weight: 700;">${b.runs}</td>
+                    <td style="text-align: center; padding: 0.5rem; color: var(--text-muted);">${b.balls}</td>
+                    <td style="text-align: center; padding: 0.5rem; color: var(--text-muted);">${b.fours}</td>
+                    <td style="text-align: center; padding: 0.5rem; color: var(--text-muted);">${b.sixes}</td>
+                    <td style="text-align: center; padding: 0.5rem; color: var(--text-muted);">${b.strike_rate}</td>
+                </tr>
+            `;
+        });
+        
+        // First innings bowling (Team 2's bowlers)
+        const bowling1 = document.getElementById('innings1-bowling');
+        bowling1.innerHTML = '';
+        scorecard.team2_bowling.filter(b => b.balls > 0).forEach(b => {
+            bowling1.innerHTML += `
+                <tr style="border-bottom: 1px solid var(--bg-tertiary);">
+                    <td style="text-align: left; padding: 0.5rem; font-weight: 500;">${b.name || 'Player ' + b.player_id}</td>
+                    <td style="text-align: center; padding: 0.5rem;">${b.overs}</td>
+                    <td style="text-align: center; padding: 0.5rem; color: var(--text-muted);">0</td>
+                    <td style="text-align: center; padding: 0.5rem;">${b.runs}</td>
+                    <td style="text-align: center; padding: 0.5rem; font-weight: 700; color: ${b.wickets > 0 ? 'var(--accent-green)' : 'inherit'};">${b.wickets}</td>
+                    <td style="text-align: center; padding: 0.5rem; color: var(--text-muted);">${b.economy}</td>
+                </tr>
+            `;
+        });
+        
+        // ========== SECOND INNINGS ==========
+        document.getElementById('innings2-team-name').textContent = team2Name + ' Innings';
+        const overs2 = formatOvers(scorecard.team2_overs);
+        document.getElementById('innings2-total').textContent = 
+            `${scorecard.team2_total}/${scorecard.team2_wickets} (${overs2} Ov)`;
+        document.getElementById('innings2-target').textContent = scorecard.target;
+        
+        // Calculate extras
+        const battingRuns2 = scorecard.team2_batting.reduce((sum, b) => sum + b.runs, 0);
+        const extras2 = Math.max(0, scorecard.team2_total - battingRuns2);
+        document.getElementById('innings2-extras').textContent = `(b 0, lb 0, w ${extras2}, nb 0) ${extras2}`;
+        document.getElementById('innings2-total-row').textContent = 
+            `${scorecard.team2_total} (${scorecard.team2_wickets} wkts, ${overs2} Ov)`;
+        
+        // Second innings batting
+        const batting2 = document.getElementById('innings2-batting');
+        batting2.innerHTML = '';
+        scorecard.team2_batting.filter(b => b.balls > 0 || b.dismissal !== 'not out').forEach(b => {
+            batting2.innerHTML += `
+                <tr style="border-bottom: 1px solid var(--bg-tertiary);">
+                    <td style="text-align: left; padding: 0.5rem;">
+                        <div style="font-weight: 500;">${b.name || 'Player ' + b.player_id}</div>
+                        <div style="font-size: 0.75rem;">${formatDismissal(b, scorecard.team1_bowling)}</div>
+                    </td>
+                    <td style="text-align: center; padding: 0.5rem; font-weight: 700;">${b.runs}</td>
+                    <td style="text-align: center; padding: 0.5rem; color: var(--text-muted);">${b.balls}</td>
+                    <td style="text-align: center; padding: 0.5rem; color: var(--text-muted);">${b.fours}</td>
+                    <td style="text-align: center; padding: 0.5rem; color: var(--text-muted);">${b.sixes}</td>
+                    <td style="text-align: center; padding: 0.5rem; color: var(--text-muted);">${b.strike_rate}</td>
+                </tr>
+            `;
+        });
+        
+        // Second innings bowling (Team 1's bowlers)
+        const bowling2 = document.getElementById('innings2-bowling');
+        bowling2.innerHTML = '';
+        scorecard.team1_bowling.filter(b => b.balls > 0).forEach(b => {
+            bowling2.innerHTML += `
+                <tr style="border-bottom: 1px solid var(--bg-tertiary);">
+                    <td style="text-align: left; padding: 0.5rem; font-weight: 500;">${b.name || 'Player ' + b.player_id}</td>
+                    <td style="text-align: center; padding: 0.5rem;">${b.overs}</td>
+                    <td style="text-align: center; padding: 0.5rem; color: var(--text-muted);">0</td>
+                    <td style="text-align: center; padding: 0.5rem;">${b.runs}</td>
+                    <td style="text-align: center; padding: 0.5rem; font-weight: 700; color: ${b.wickets > 0 ? 'var(--accent-green)' : 'inherit'};">${b.wickets}</td>
+                    <td style="text-align: center; padding: 0.5rem; color: var(--text-muted);">${b.economy}</td>
+                </tr>
+            `;
+        });
+        
+        // Show first innings by default
+        showInnings(1);
     }
 </script>
 {% endblock %}

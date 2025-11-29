@@ -280,25 +280,47 @@ def simulate_match():
     try:
         data = request.get_json()
         
-        team1_batters = data.get('team1_batters', [])
-        team1_bowlers = data.get('team1_bowlers', [])
-        team2_batters = data.get('team2_batters', [])
-        team2_bowlers = data.get('team2_bowlers', [])
-        simulator_type = data.get('simulator', 'fast')
+        team1_batters_raw = data.get('team1_batters', [])
+        team1_bowlers_raw = data.get('team1_bowlers', [])
+        team2_batters_raw = data.get('team2_batters', [])
+        team2_bowlers_raw = data.get('team2_bowlers', [])
+        simulator_type = data.get('simulator', 'nn')  # Default to NN for scorecard
         n_simulations = min(data.get('n_simulations', 1000), 10000)
         venue_id = data.get('venue_id')
         use_toss = data.get('use_toss', False)
         gender = data.get('gender', 'male')
         
-        # Validate
-        if len(team1_batters) < 11:
-            team1_batters.extend([team1_batters[0]] * (11 - len(team1_batters)))
-        if len(team2_batters) < 11:
-            team2_batters.extend([team2_batters[0]] * (11 - len(team2_batters)))
-        if len(team1_bowlers) < 5:
-            team1_bowlers.extend([team1_bowlers[0]] * (5 - len(team1_bowlers)))
-        if len(team2_bowlers) < 5:
-            team2_bowlers.extend([team2_bowlers[0]] * (5 - len(team2_bowlers)))
+        # CRICKET XI LOGIC: Batting order = top-order batters + bowlers at tail
+        def build_batting_order(batters, bowlers):
+            """Build proper batting order: batters[:6] + bowlers[:5] = 11 unique"""
+            top_order = batters[:6] if len(batters) >= 6 else batters[:]
+            tail = bowlers[:5] if len(bowlers) >= 5 else bowlers[:]
+            batting_order = list(top_order) + list(tail)
+            # Remove duplicates
+            seen = set()
+            unique_order = []
+            for pid in batting_order:
+                if pid not in seen:
+                    unique_order.append(pid)
+                    seen.add(pid)
+            # Pad from remaining batters if needed
+            if len(unique_order) < 11:
+                for pid in batters[6:]:
+                    if pid not in seen and len(unique_order) < 11:
+                        unique_order.append(pid)
+                        seen.add(pid)
+            return unique_order[:11]
+        
+        team1_batters = build_batting_order(team1_batters_raw, team1_bowlers_raw)
+        team2_batters = build_batting_order(team2_batters_raw, team2_bowlers_raw)
+        team1_bowlers = team1_bowlers_raw[:5]
+        team2_bowlers = team2_bowlers_raw[:5]
+        
+        # Ensure minimum bowlers
+        while len(team1_bowlers) < 5 and team1_bowlers:
+            team1_bowlers.append(team1_bowlers[-1])
+        while len(team2_bowlers) < 5 and team2_bowlers:
+            team2_bowlers.append(team2_bowlers[-1])
         
         # Get toss field probability from historical data
         toss_field_prob = 0.65  # Default T20 field preference
@@ -362,6 +384,37 @@ def simulate_match():
             'gender': gender
         }
         
+        # Generate detailed scorecard for NN simulator
+        if simulator_type == 'nn' and hasattr(simulator, 'simulate_detailed_match'):
+            try:
+                # Get player names for display
+                player_names = _get_player_names(team1_batters + team2_batters + team1_bowlers + team2_bowlers)
+                
+                # Simulate one detailed match (use 50/50 bat first for representative scorecard)
+                scorecard = simulator.simulate_detailed_match(
+                    team1_batters[:11],
+                    team1_bowlers[:5],
+                    team2_batters[:11],
+                    team2_bowlers[:5],
+                    venue_id=venue_id,
+                    team1_bats_first=True  # For scorecard, show Team 1 batting first
+                )
+                
+                # Add player names to scorecard entries
+                for b in scorecard['team1_batting']:
+                    b['name'] = player_names.get(b['player_id'], f"Player {b['player_id']}")
+                for b in scorecard['team2_batting']:
+                    b['name'] = player_names.get(b['player_id'], f"Player {b['player_id']}")
+                for b in scorecard['team1_bowling']:
+                    b['name'] = player_names.get(b['player_id'], f"Player {b['player_id']}")
+                for b in scorecard['team2_bowling']:
+                    b['name'] = player_names.get(b['player_id'], f"Player {b['player_id']}")
+                
+                response['scorecard'] = scorecard
+                
+            except Exception as e:
+                logger.warning(f"Could not generate detailed scorecard: {e}")
+        
         return jsonify(response)
     
     except Exception as e:
@@ -369,6 +422,230 @@ def simulate_match():
         import traceback
         traceback.print_exc()
         return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/simulate-stream', methods=['POST'])
+def simulate_match_stream():
+    """
+    Run match simulation with real-time progress updates via Server-Sent Events.
+    
+    Returns streaming response with progress updates and final results.
+    """
+    from flask import Response, stream_with_context
+    import json
+    import time
+    
+    data = request.get_json()
+    
+    team1_batters_raw = data.get('team1_batters', [])
+    team1_bowlers_raw = data.get('team1_bowlers', [])
+    team2_batters_raw = data.get('team2_batters', [])
+    team2_bowlers_raw = data.get('team2_bowlers', [])
+    simulator_type = data.get('simulator', 'nn')  # Default to NN for scorecard
+    n_simulations = min(data.get('n_simulations', 1000), 10000)
+    venue_id = data.get('venue_id')
+    use_toss = data.get('use_toss', False)
+    gender = data.get('gender', 'male')
+    
+    # CRICKET XI LOGIC: Batting order = top-order batters + bowlers at tail
+    # This ensures 11 UNIQUE players (no duplicates possible)
+    def build_batting_order(batters, bowlers):
+        """
+        Build proper cricket batting order:
+        - Positions 1-6: Specialist batters (from batters list)
+        - Positions 7-11: Bowlers who bat at tail (from bowlers list)
+        Total: 11 unique players
+        """
+        seen = set()
+        unique_order = []
+        
+        # 1. Add batters first (positions 1-6 typically)
+        for pid in batters:
+            if pid not in seen and len(unique_order) < 11:
+                unique_order.append(pid)
+                seen.add(pid)
+        
+        # 2. Add bowlers (they bat at tail, positions 7-11)
+        for pid in bowlers:
+            if pid not in seen and len(unique_order) < 11:
+                unique_order.append(pid)
+                seen.add(pid)
+        
+        # Log if we couldn't get 11 unique players
+        if len(unique_order) < 11:
+            logger.warning(f"Only {len(unique_order)} unique players for batting order! "
+                          f"batters={batters}, bowlers={bowlers}")
+        
+        return unique_order
+    
+    # Build proper batting orders (11 unique players each)
+    team1_batting_order = build_batting_order(team1_batters_raw, team1_bowlers_raw)
+    team2_batting_order = build_batting_order(team2_batters_raw, team2_bowlers_raw)
+    
+    # Bowlers are the ones who bowl (5 players)
+    team1_bowlers = team1_bowlers_raw[:5]
+    team2_bowlers = team2_bowlers_raw[:5]
+    
+    # Ensure minimum bowlers
+    while len(team1_bowlers) < 5 and team1_bowlers:
+        team1_bowlers.append(team1_bowlers[-1])
+    while len(team2_bowlers) < 5 and team2_bowlers:
+        team2_bowlers.append(team2_bowlers[-1])
+    
+    logger.info(f"Team 1 batting order: {len(team1_batting_order)} unique players")
+    logger.info(f"Team 2 batting order: {len(team2_batting_order)} unique players")
+    
+    def generate():
+        try:
+            # Get toss field probability
+            toss_field_prob = 0.65
+            if use_toss:
+                try:
+                    toss_simulator = get_toss_simulator()
+                    rates = toss_simulator.stats.get_decision_rates('T20', gender)
+                    toss_field_prob = rates.get('field', 0.65)
+                except:
+                    pass
+            
+            # Select simulator
+            if simulator_type == 'nn':
+                simulator = get_nn_simulator(gender)
+            else:
+                simulator = get_fast_simulator(gender)
+            
+            # Chunked simulation with progress updates
+            # Larger chunks = better GPU/CPU utilization (TF batches more efficiently)
+            chunk_size = 1000  # Increased from 500 for better throughput
+            all_team1_scores = []
+            all_team2_scores = []
+            all_team1_wins = []
+            completed = 0
+            start_time = time.time()
+            
+            toss_stats_accum = {'team1_won_toss': 0, 'chose_field': 0, 'team1_batted_first': 0, 'total': 0}
+            
+            for chunk_start in range(0, n_simulations, chunk_size):
+                chunk_n = min(chunk_size, n_simulations - chunk_start)
+                
+                # Run chunk with proper batting orders (11 unique players each)
+                chunk_results = simulator.simulate_matches(
+                    chunk_n,
+                    team1_batting_order,  # 11 unique: batters[:6] + bowlers[:5]
+                    team1_bowlers[:5],
+                    team2_batting_order,  # 11 unique: batters[:6] + bowlers[:5]
+                    team2_bowlers[:5],
+                    venue_id=venue_id,
+                    use_toss=use_toss,
+                    toss_field_prob=toss_field_prob
+                )
+                
+                # Accumulate results
+                all_team1_scores.extend(chunk_results['team1_scores'].tolist())
+                all_team2_scores.extend(chunk_results['team2_scores'].tolist())
+                all_team1_wins.extend((chunk_results['team1_scores'] > chunk_results['team2_scores']).tolist())
+                
+                # Accumulate toss stats
+                if use_toss and 'toss_stats' in chunk_results:
+                    ts = chunk_results['toss_stats']
+                    toss_stats_accum['team1_won_toss'] += ts['team1_won_toss_pct'] * chunk_n
+                    toss_stats_accum['chose_field'] += ts['chose_field_pct'] * chunk_n
+                    toss_stats_accum['team1_batted_first'] += ts['team1_batted_first_pct'] * chunk_n
+                    toss_stats_accum['total'] += chunk_n
+                
+                completed += chunk_n
+                elapsed = time.time() - start_time
+                rate = completed / elapsed if elapsed > 0 else 0
+                remaining = (n_simulations - completed) / rate if rate > 0 else 0
+                
+                # Send progress update
+                progress = {
+                    'type': 'progress',
+                    'completed': completed,
+                    'total': n_simulations,
+                    'elapsed_ms': int(elapsed * 1000),
+                    'rate': round(rate, 1),
+                    'eta_seconds': round(remaining, 1),
+                    'pct': round(completed * 100 / n_simulations, 1)
+                }
+                yield f"data: {json.dumps(progress)}\n\n"
+            
+            # Calculate final stats
+            import numpy as np
+            team1_scores = np.array(all_team1_scores)
+            team2_scores = np.array(all_team2_scores)
+            team1_wins = np.array(all_team1_wins)
+            
+            elapsed = time.time() - start_time
+            
+            # Build toss info
+            toss_info = None
+            if use_toss and toss_stats_accum['total'] > 0:
+                t = toss_stats_accum['total']
+                toss_info = {
+                    'team1_won_toss_pct': round(toss_stats_accum['team1_won_toss'] / t * 100, 1),
+                    'chose_field_pct': round(toss_stats_accum['chose_field'] / t * 100, 1),
+                    'team1_batted_first_pct': round(toss_stats_accum['team1_batted_first'] / t * 100, 1),
+                    'note': f'Toss simulated for each of {n_simulations} matches'
+                }
+            
+            # Build final result
+            result = {
+                'type': 'result',
+                'success': True,
+                'team1_win_prob': round(team1_wins.mean() * 100, 1),
+                'team2_win_prob': round((~team1_wins).mean() * 100, 1),
+                'avg_team1_score': round(team1_scores.mean(), 1),
+                'avg_team2_score': round(team2_scores.mean(), 1),
+                'team1_score_range': [int(np.percentile(team1_scores, 5)), int(np.percentile(team1_scores, 95))],
+                'team2_score_range': [int(np.percentile(team2_scores, 5)), int(np.percentile(team2_scores, 95))],
+                'n_simulations': n_simulations,
+                'simulator': simulator_type,
+                'elapsed_ms': round(elapsed * 1000, 1),
+                'venue_id': venue_id,
+                'toss_info': toss_info,
+                'gender': gender
+            }
+            
+            # Generate scorecard for NN simulator
+            if simulator_type == 'nn' and hasattr(simulator, 'simulate_detailed_match'):
+                try:
+                    player_names = _get_player_names(team1_batting_order + team2_batting_order + team1_bowlers + team2_bowlers)
+                    scorecard = simulator.simulate_detailed_match(
+                        team1_batting_order,  # 11 unique players in batting order
+                        team1_bowlers[:5],
+                        team2_batting_order,  # 11 unique players in batting order
+                        team2_bowlers[:5],
+                        venue_id=venue_id,
+                        team1_bats_first=True
+                    )
+                    for b in scorecard['team1_batting']:
+                        b['name'] = player_names.get(b['player_id'], f"Player {b['player_id']}")
+                    for b in scorecard['team2_batting']:
+                        b['name'] = player_names.get(b['player_id'], f"Player {b['player_id']}")
+                    for b in scorecard['team1_bowling']:
+                        b['name'] = player_names.get(b['player_id'], f"Player {b['player_id']}")
+                    for b in scorecard['team2_bowling']:
+                        b['name'] = player_names.get(b['player_id'], f"Player {b['player_id']}")
+                    result['scorecard'] = scorecard
+                except Exception as e:
+                    logger.warning(f"Could not generate scorecard: {e}")
+            
+            yield f"data: {json.dumps(result)}\n\n"
+            
+        except Exception as e:
+            logger.error(f"Error in streaming simulation: {e}")
+            import traceback
+            traceback.print_exc()
+            yield f"data: {json.dumps({'type': 'error', 'error': str(e)})}\n\n"
+    
+    return Response(
+        stream_with_context(generate()),
+        mimetype='text/event-stream',
+        headers={
+            'Cache-Control': 'no-cache',
+            'X-Accel-Buffering': 'no'
+        }
+    )
 
 
 @app.route('/api/rankings/months', methods=['GET'])
@@ -550,6 +827,24 @@ def get_lineup_service():
     return _lineup_service
 
 
+def _get_player_names(player_ids: list) -> dict:
+    """Get player names for a list of player IDs."""
+    if not player_ids:
+        return {}
+    
+    conn = get_connection()
+    cursor = conn.cursor()
+    
+    placeholders = ','.join('?' for _ in player_ids)
+    cursor.execute(f"""
+        SELECT player_id, name FROM players WHERE player_id IN ({placeholders})
+    """, player_ids)
+    
+    result = {row['player_id']: row['name'] for row in cursor.fetchall()}
+    conn.close()
+    return result
+
+
 @app.route('/api/wbbl/fixtures', methods=['GET'])
 def get_wbbl_fixtures():
     """Get upcoming WBBL match fixtures."""
@@ -582,7 +877,7 @@ def get_wbbl_fixtures():
 
 @app.route('/api/wbbl/match/<match_id>', methods=['GET'])
 def get_wbbl_match(match_id):
-    """Get full match data with squads."""
+    """Get full match data with squads, ensuring exactly 11 players per team."""
     try:
         service = get_lineup_service()
         match = service.get_match_with_squads(match_id)
@@ -604,6 +899,22 @@ def get_wbbl_match(match_id):
                 'recent_form': p.recent_form
             }
         
+        # Get suggested XI from squads
+        team1_suggested_ids = service.suggest_lineup(match.team1_squad, match.team1_recent_xi)
+        team2_suggested_ids = service.suggest_lineup(match.team2_squad, match.team2_recent_xi)
+        
+        # Filter squad to get suggested players as MatchedPlayer objects
+        team1_suggested_players = [p for p in match.team1_squad if p.player_id in team1_suggested_ids]
+        team2_suggested_players = [p for p in match.team2_squad if p.player_id in team2_suggested_ids]
+        
+        # Ensure we have exactly 11 players with proper role balance
+        team1_final, team1_fill_info = service.ensure_playing_xi(
+            team1_suggested_players, match.team1_db_name, gender='female'
+        )
+        team2_final, team2_fill_info = service.ensure_playing_xi(
+            team2_suggested_players, match.team2_db_name, gender='female'
+        )
+        
         return jsonify({
             'success': True,
             'match': {
@@ -622,8 +933,15 @@ def get_wbbl_match(match_id):
                 'team2_squad': [player_to_dict(p) for p in match.team2_squad],
                 'team1_recent_xi': match.team1_recent_xi,
                 'team2_recent_xi': match.team2_recent_xi,
-                'team1_suggested_xi': service.suggest_lineup(match.team1_squad, match.team1_recent_xi),
-                'team2_suggested_xi': service.suggest_lineup(match.team2_squad, match.team2_recent_xi)
+                # Final playing XI with exactly 11 players
+                'team1_suggested_xi': [p.player_id for p in team1_final],
+                'team2_suggested_xi': [p.player_id for p in team2_final],
+                # Full player info for suggested XI (for display)
+                'team1_xi_players': [player_to_dict(p) for p in team1_final],
+                'team2_xi_players': [player_to_dict(p) for p in team2_final],
+                # Fill info for UI display
+                'team1_fill_info': team1_fill_info,
+                'team2_fill_info': team2_fill_info
             }
         })
     

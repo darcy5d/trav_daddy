@@ -62,6 +62,17 @@ MODEL_CONFIG = {
 SIMULATION_CONFIG = {
     "num_simulations": 10000,  # Number of match simulations to run
     "confidence_level": 0.95,  # For confidence intervals
+    "chunk_size": 1000,  # Simulations per chunk for progress updates
+}
+
+# Performance / Parallelism Configuration (Apple M2 Pro optimization)
+import multiprocessing
+PARALLELISM_CONFIG = {
+    "n_cpu_cores": multiprocessing.cpu_count(),
+    "tf_inter_op_threads": max(4, multiprocessing.cpu_count() // 2),
+    "tf_intra_op_threads": max(4, multiprocessing.cpu_count() // 2),
+    "numpy_threads": 4,
+    "n_workers": max(2, multiprocessing.cpu_count() - 2),  # For ProcessPoolExecutor
 }
 
 # Flask Configuration

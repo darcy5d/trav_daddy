@@ -13,18 +13,40 @@ Now includes venue features (29 total input features).
 import os
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
 
+# NumPy BLAS threading for parallel matrix operations
+os.environ['OMP_NUM_THREADS'] = '4'
+os.environ['OPENBLAS_NUM_THREADS'] = '4'
+os.environ['MKL_NUM_THREADS'] = '4'
+
 import logging
 from typing import Dict, List, Tuple, Optional
 import numpy as np
 from pathlib import Path
 import pickle
 import time
+import multiprocessing
 
 import sys
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 
 import tensorflow as tf
 from tensorflow import keras
+
+# Configure TensorFlow threading for Apple M2 Pro
+# Use multiple threads for parallel operations
+N_CPU_CORES = multiprocessing.cpu_count()
+tf.config.threading.set_inter_op_parallelism_threads(max(4, N_CPU_CORES // 2))
+tf.config.threading.set_intra_op_parallelism_threads(max(4, N_CPU_CORES // 2))
+
+# Enable Metal GPU acceleration (Apple Silicon)
+try:
+    physical_devices = tf.config.list_physical_devices('GPU')
+    if physical_devices:
+        for device in physical_devices:
+            tf.config.experimental.set_memory_growth(device, True)
+        logging.info(f"Metal GPU enabled: {physical_devices}")
+except Exception as e:
+    logging.warning(f"Could not configure Metal GPU: {e}")
 
 from src.features.venue_stats import VenueStatsBuilder
 
@@ -329,8 +351,9 @@ class VectorizedNNSimulator:
         wickets = np.zeros(n_matches, dtype=np.int32)
         balls = np.zeros(n_matches, dtype=np.int32)
         
-        # Current batter index for each match (0-10)
+        # Current batter index for each match (clip to available batters)
         current_batter = np.zeros(n_matches, dtype=np.int32)
+        max_batter_idx = len(batting_dists) - 1  # Handle teams with <11 batters
         
         # Track which matches are still active
         active = np.ones(n_matches, dtype=bool)
@@ -362,8 +385,8 @@ class VectorizedNNSimulator:
                 required_rate = np.zeros(n_matches, dtype=np.float32)
             
             # Get batter distributions for current batters
-            # Clip to valid range (0-10)
-            safe_batter_idx = np.clip(current_batter, 0, 10)
+            # Clip to valid range (0 to num_batters-1)
+            safe_batter_idx = np.clip(current_batter, 0, max_batter_idx)
             batter_dist = batting_dists[safe_batter_idx]  # (n_matches, 8)
             
             # Get bowler distribution (simple rotation by over)
@@ -401,10 +424,10 @@ class VectorizedNNSimulator:
             wickets = np.where(active & is_wicket, wickets + 1, wickets)
             balls = np.where(active, balls + 1, balls)
             
-            # Move to next batter on wicket
+            # Move to next batter on wicket (clip to available batters)
             current_batter = np.where(
                 active & is_wicket & (wickets < 10),
-                np.minimum(wickets + 1, 10),
+                np.minimum(wickets + 1, max_batter_idx),
                 current_batter
             )
             
@@ -439,6 +462,593 @@ class VectorizedNNSimulator:
         
         # Clip to valid range
         return np.clip(outcomes, 0, NUM_CLASSES - 1)
+    
+    def simulate_detailed_match(
+        self,
+        team1_batter_ids: List[int],
+        team1_bowler_ids: List[int],
+        team2_batter_ids: List[int],
+        team2_bowler_ids: List[int],
+        max_overs: int = 20,
+        venue_id: Optional[int] = None,
+        team1_bats_first: bool = True
+    ) -> Dict:
+        """
+        Simulate ONE match with full ball-by-ball tracking for scorecard display.
+        
+        Returns detailed per-player batting and bowling stats.
+        """
+        max_balls = max_overs * 6
+        venue_features = self.get_venue_features(venue_id)
+        
+        if team1_bats_first:
+            # First innings: Team 1 bats
+            inn1_batting, inn1_bowling = self._simulate_innings_detailed(
+                batter_ids=team1_batter_ids,
+                bowler_ids=team2_bowler_ids,
+                innings_number=1,
+                target=None,
+                max_balls=max_balls,
+                venue_features=venue_features
+            )
+            team1_total = sum(b['runs'] for b in inn1_batting)
+            team1_wickets = sum(1 for b in inn1_batting if b['dismissal'] != 'not out')
+            
+            # Second innings: Team 2 chases
+            target = int(team1_total * FIRST_INNINGS_SCORE_BONUS) + 1
+            inn2_batting, inn2_bowling = self._simulate_innings_detailed(
+                batter_ids=team2_batter_ids,
+                bowler_ids=team1_bowler_ids,
+                innings_number=2,
+                target=target,
+                max_balls=max_balls,
+                venue_features=venue_features
+            )
+            team2_total = sum(b['runs'] for b in inn2_batting)
+            team2_wickets = sum(1 for b in inn2_batting if b['dismissal'] != 'not out')
+            
+            return {
+                'team1_batting': inn1_batting,
+                'team1_bowling': inn2_bowling,
+                'team2_batting': inn2_batting,
+                'team2_bowling': inn1_bowling,
+                'team1_total': team1_total,
+                'team1_wickets': team1_wickets,
+                'team1_overs': sum(b['balls'] for b in inn1_batting) / 6,
+                'team2_total': team2_total,
+                'team2_wickets': team2_wickets,
+                'team2_overs': sum(b['balls'] for b in inn2_batting) / 6,
+                'team1_won': team2_total < target,
+                'target': target,
+                'result': self._format_result(team1_total, team1_wickets, team2_total, team2_wickets, target, True)
+            }
+        else:
+            # Team 2 bats first
+            inn1_batting, inn1_bowling = self._simulate_innings_detailed(
+                batter_ids=team2_batter_ids,
+                bowler_ids=team1_bowler_ids,
+                innings_number=1,
+                target=None,
+                max_balls=max_balls,
+                venue_features=venue_features
+            )
+            team2_total = sum(b['runs'] for b in inn1_batting)
+            team2_wickets = sum(1 for b in inn1_batting if b['dismissal'] != 'not out')
+            
+            target = int(team2_total * FIRST_INNINGS_SCORE_BONUS) + 1
+            inn2_batting, inn2_bowling = self._simulate_innings_detailed(
+                batter_ids=team1_batter_ids,
+                bowler_ids=team2_bowler_ids,
+                innings_number=2,
+                target=target,
+                max_balls=max_balls,
+                venue_features=venue_features
+            )
+            team1_total = sum(b['runs'] for b in inn2_batting)
+            team1_wickets = sum(1 for b in inn2_batting if b['dismissal'] != 'not out')
+            
+            return {
+                'team1_batting': inn2_batting,
+                'team1_bowling': inn1_bowling,
+                'team2_batting': inn1_batting,
+                'team2_bowling': inn2_bowling,
+                'team1_total': team1_total,
+                'team1_wickets': team1_wickets,
+                'team1_overs': sum(b['balls'] for b in inn2_batting) / 6,
+                'team2_total': team2_total,
+                'team2_wickets': team2_wickets,
+                'team2_overs': sum(b['balls'] for b in inn1_batting) / 6,
+                'team1_won': team1_total >= target,
+                'target': target,
+                'result': self._format_result(team1_total, team1_wickets, team2_total, team2_wickets, target, False)
+            }
+    
+    def _format_result(self, t1_score, t1_wkts, t2_score, t2_wkts, target, t1_batted_first):
+        """Format the match result string."""
+        if t1_batted_first:
+            if t2_score >= target:
+                return f"Team 2 won by {10 - t2_wkts} wickets"
+            else:
+                return f"Team 1 won by {target - 1 - t2_score} runs"
+        else:
+            if t1_score >= target:
+                return f"Team 1 won by {10 - t1_wkts} wickets"
+            else:
+                return f"Team 2 won by {target - 1 - t1_score} runs"
+    
+    def _simulate_innings_detailed(
+        self,
+        batter_ids: List[int],
+        bowler_ids: List[int],
+        innings_number: int,
+        target: Optional[int],
+        max_balls: int = 120,
+        venue_features: Optional[np.ndarray] = None
+    ) -> Tuple[List[Dict], List[Dict]]:
+        """
+        Simulate one innings with detailed ball-by-ball tracking.
+        
+        CRICKET LAW: Each batter can only bat ONCE per innings.
+        
+        Returns:
+            (batting_cards, bowling_cards)
+        """
+        if venue_features is None:
+            venue_features = self.default_venue_features
+        
+        # VALIDATION: Check for duplicate batter IDs (cricket law violation)
+        unique_batter_ids = set(batter_ids)
+        if len(unique_batter_ids) != len(batter_ids):
+            # Find duplicates for logging
+            from collections import Counter
+            counts = Counter(batter_ids)
+            duplicates = {pid: count for pid, count in counts.items() if count > 1}
+            logger.warning(f"DUPLICATE BATTER IDS DETECTED: {duplicates}")
+            # Deduplicate, keeping order
+            seen = set()
+            deduped = []
+            for pid in batter_ids:
+                if pid not in seen:
+                    deduped.append(pid)
+                    seen.add(pid)
+            batter_ids = deduped
+            logger.info(f"Deduplicated to {len(batter_ids)} batters: {batter_ids}")
+        
+        # Handle fewer than 11 batters (shouldn't happen, but be resilient)
+        if len(batter_ids) < 11:
+            logger.warning(f"Only {len(batter_ids)} batters provided, expected 11")
+        
+        # Initialize batting stats for each UNIQUE batter
+        batting = [{
+            'player_id': pid,
+            'runs': 0,
+            'balls': 0,
+            'fours': 0,
+            'sixes': 0,
+            'dismissal': 'not out',
+            'dismissed_by': None,
+            'batting_position': i + 1  # 1-indexed batting position
+        } for i, pid in enumerate(batter_ids)]
+        
+        # Initialize bowling stats
+        bowling = [{
+            'player_id': pid,
+            'balls': 0,
+            'runs': 0,
+            'wickets': 0,
+            'dots': 0,
+            'fours': 0,
+            'sixes': 0
+        } for pid in bowler_ids]
+        
+        # Get distribution matrices
+        bat_dists = np.array([self.get_batter_dist(pid) for pid in batter_ids])
+        bowl_dists = np.array([self.get_bowler_dist(pid) for pid in bowler_ids])
+        
+        # State tracking (using INDICES into the batting array, not player_ids)
+        runs = 0
+        wickets = 0
+        current_batter_idx = 0  # Batter #1 (index 0) on strike
+        non_striker_idx = 1     # Batter #2 (index 1) at non-striker's end
+        next_batter_in = 2      # Batter #3 (index 2) is next to come in
+        
+        # Track which batters have been at the crease (can't bat again once out)
+        batters_used = {0, 1}  # Openers are at the crease
+        
+        for ball_idx in range(max_balls):
+            if wickets >= 10:
+                break
+            if target is not None and runs >= target:
+                break
+            
+            over = ball_idx // 6
+            ball_in_over = ball_idx % 6
+            
+            # Pick bowler (rotate each over)
+            bowler_idx = over % len(bowler_ids)
+            
+            # Calculate required rate
+            if target is not None:
+                balls_remaining = max_balls - ball_idx
+                runs_needed = target - runs
+                req_rate = max(0, runs_needed * 6 / balls_remaining) if balls_remaining > 0 else 0
+            else:
+                req_rate = 0
+            
+            # Phase
+            if over < 6:
+                phase = np.array([1, 0, 0], dtype=np.float32)
+            elif over < 15:
+                phase = np.array([0, 1, 0], dtype=np.float32)
+            else:
+                phase = np.array([0, 0, 1], dtype=np.float32)
+            
+            # Build features
+            batter_dist = bat_dists[current_batter_idx]
+            bowler_dist = bowl_dists[bowler_idx]
+            
+            features = np.array([[
+                innings_number,
+                over,
+                ball_idx,
+                runs,
+                wickets,
+                req_rate,
+                *phase,
+                *batter_dist,
+                *bowler_dist,
+                *venue_features
+            ]], dtype=np.float32)
+            
+            # Normalize and predict
+            features_norm = (features - self.mean) / self.std
+            proba = self.model.predict(features_norm, verbose=0)
+            outcome = self._vectorized_sample(proba)[0]
+            
+            # Update batting stats
+            batting[current_batter_idx]['balls'] += 1
+            bowling[bowler_idx]['balls'] += 1
+            
+            if outcome == 0:  # Dot
+                bowling[bowler_idx]['dots'] += 1
+            elif outcome == 1:  # Single
+                runs += 1
+                batting[current_batter_idx]['runs'] += 1
+                bowling[bowler_idx]['runs'] += 1
+                # Rotate strike
+                current_batter_idx, non_striker_idx = non_striker_idx, current_batter_idx
+            elif outcome == 2:  # Two
+                runs += 2
+                batting[current_batter_idx]['runs'] += 2
+                bowling[bowler_idx]['runs'] += 2
+            elif outcome == 3:  # Three
+                runs += 3
+                batting[current_batter_idx]['runs'] += 3
+                bowling[bowler_idx]['runs'] += 3
+                current_batter_idx, non_striker_idx = non_striker_idx, current_batter_idx
+            elif outcome == 4:  # Four
+                runs += 4
+                batting[current_batter_idx]['runs'] += 4
+                batting[current_batter_idx]['fours'] += 1
+                bowling[bowler_idx]['runs'] += 4
+                bowling[bowler_idx]['fours'] += 1
+            elif outcome == 5:  # Six
+                runs += 6
+                batting[current_batter_idx]['runs'] += 6
+                batting[current_batter_idx]['sixes'] += 1
+                bowling[bowler_idx]['runs'] += 6
+                bowling[bowler_idx]['sixes'] += 1
+            elif outcome == 6:  # Wicket
+                bowling[bowler_idx]['wickets'] += 1
+                batting[current_batter_idx]['dismissal'] = 'bowled'
+                batting[current_batter_idx]['dismissed_by'] = bowler_ids[bowler_idx]
+                wickets += 1
+                
+                # Bring in next batter from pavilion (non-striker stays at their end)
+                # Cricket law: each batter can only bat once
+                if wickets < 10 and next_batter_in < len(batter_ids):
+                    # Verify the next batter hasn't already batted
+                    if next_batter_in in batters_used:
+                        logger.error(f"BUG: Batter index {next_batter_in} already used! batters_used={batters_used}")
+                    
+                    current_batter_idx = next_batter_in
+                    batters_used.add(next_batter_in)
+                    next_batter_in += 1
+            
+            # Rotate strike at end of over
+            if ball_in_over == 5 and outcome not in [1, 3]:
+                current_batter_idx, non_striker_idx = non_striker_idx, current_batter_idx
+        
+        # Calculate derived stats
+        for b in batting:
+            b['strike_rate'] = round(b['runs'] * 100 / b['balls'], 1) if b['balls'] > 0 else 0
+        
+        for b in bowling:
+            overs_bowled = b['balls'] // 6 + (b['balls'] % 6) / 10  # 2.3 format
+            b['overs'] = round(overs_bowled, 1)
+            b['economy'] = round(b['runs'] * 6 / b['balls'], 2) if b['balls'] > 0 else 0
+        
+        return batting, bowling
+    
+    def calculate_expected_stats(
+        self,
+        team1_batter_ids: List[int],
+        team1_bowler_ids: List[int],
+        team2_batter_ids: List[int],
+        team2_bowler_ids: List[int],
+        n_simulations: int = 100,
+        venue_id: Optional[int] = None
+    ) -> Dict:
+        """
+        Calculate expected (average) player stats across multiple simulations.
+        
+        Runs n_simulations detailed matches and aggregates stats.
+        """
+        # Accumulators for Team 1 batting
+        t1_bat_stats = [{
+            'player_id': pid,
+            'total_runs': 0,
+            'total_balls': 0,
+            'total_fours': 0,
+            'total_sixes': 0,
+            'times_out': 0,
+            'simulations': 0
+        } for pid in team1_batter_ids]
+        
+        # Accumulators for Team 2 batting
+        t2_bat_stats = [{
+            'player_id': pid,
+            'total_runs': 0,
+            'total_balls': 0,
+            'total_fours': 0,
+            'total_sixes': 0,
+            'times_out': 0,
+            'simulations': 0
+        } for pid in team2_batter_ids]
+        
+        # Accumulators for bowling (team1 bowling = team2's bowlers facing team1)
+        t1_bowl_stats = [{
+            'player_id': pid,
+            'total_balls': 0,
+            'total_runs': 0,
+            'total_wickets': 0,
+            'total_dots': 0,
+            'simulations': 0
+        } for pid in team1_bowler_ids]
+        
+        t2_bowl_stats = [{
+            'player_id': pid,
+            'total_balls': 0,
+            'total_runs': 0,
+            'total_wickets': 0,
+            'total_dots': 0,
+            'simulations': 0
+        } for pid in team2_bowler_ids]
+        
+        for _ in range(n_simulations):
+            # 50% chance each team bats first
+            t1_bats_first = np.random.random() < 0.5
+            
+            result = self.simulate_detailed_match(
+                team1_batter_ids, team1_bowler_ids,
+                team2_batter_ids, team2_bowler_ids,
+                venue_id=venue_id,
+                team1_bats_first=t1_bats_first
+            )
+            
+            # Aggregate batting stats
+            for i, b in enumerate(result['team1_batting']):
+                t1_bat_stats[i]['total_runs'] += b['runs']
+                t1_bat_stats[i]['total_balls'] += b['balls']
+                t1_bat_stats[i]['total_fours'] += b['fours']
+                t1_bat_stats[i]['total_sixes'] += b['sixes']
+                if b['dismissal'] != 'not out':
+                    t1_bat_stats[i]['times_out'] += 1
+                t1_bat_stats[i]['simulations'] += 1
+            
+            for i, b in enumerate(result['team2_batting']):
+                t2_bat_stats[i]['total_runs'] += b['runs']
+                t2_bat_stats[i]['total_balls'] += b['balls']
+                t2_bat_stats[i]['total_fours'] += b['fours']
+                t2_bat_stats[i]['total_sixes'] += b['sixes']
+                if b['dismissal'] != 'not out':
+                    t2_bat_stats[i]['times_out'] += 1
+                t2_bat_stats[i]['simulations'] += 1
+            
+            # Aggregate bowling stats (team1_bowling is the bowlers from team1 facing team2)
+            for i, b in enumerate(result['team1_bowling']):
+                t1_bowl_stats[i]['total_balls'] += b['balls']
+                t1_bowl_stats[i]['total_runs'] += b['runs']
+                t1_bowl_stats[i]['total_wickets'] += b['wickets']
+                t1_bowl_stats[i]['total_dots'] += b['dots']
+                t1_bowl_stats[i]['simulations'] += 1
+            
+            for i, b in enumerate(result['team2_bowling']):
+                t2_bowl_stats[i]['total_balls'] += b['balls']
+                t2_bowl_stats[i]['total_runs'] += b['runs']
+                t2_bowl_stats[i]['total_wickets'] += b['wickets']
+                t2_bowl_stats[i]['total_dots'] += b['dots']
+                t2_bowl_stats[i]['simulations'] += 1
+        
+        # Calculate averages
+        def avg_batting(stats):
+            n = stats['simulations']
+            if n == 0:
+                return None
+            return {
+                'player_id': stats['player_id'],
+                'avg_runs': round(stats['total_runs'] / n, 1),
+                'avg_balls': round(stats['total_balls'] / n, 1),
+                'avg_fours': round(stats['total_fours'] / n, 1),
+                'avg_sixes': round(stats['total_sixes'] / n, 1),
+                'dismissal_rate': round(stats['times_out'] / n * 100, 1),
+                'strike_rate': round(stats['total_runs'] * 100 / stats['total_balls'], 1) if stats['total_balls'] > 0 else 0
+            }
+        
+        def avg_bowling(stats):
+            n = stats['simulations']
+            if n == 0:
+                return None
+            return {
+                'player_id': stats['player_id'],
+                'avg_overs': round(stats['total_balls'] / n / 6, 1),
+                'avg_runs': round(stats['total_runs'] / n, 1),
+                'avg_wickets': round(stats['total_wickets'] / n, 2),
+                'avg_dots': round(stats['total_dots'] / n, 1),
+                'economy': round(stats['total_runs'] * 6 / stats['total_balls'], 2) if stats['total_balls'] > 0 else 0
+            }
+        
+        return {
+            'team1_batting_expected': [avg_batting(s) for s in t1_bat_stats if s['simulations'] > 0],
+            'team2_batting_expected': [avg_batting(s) for s in t2_bat_stats if s['simulations'] > 0],
+            'team1_bowling_expected': [avg_bowling(s) for s in t1_bowl_stats if s['simulations'] > 0],
+            'team2_bowling_expected': [avg_bowling(s) for s in t2_bowl_stats if s['simulations'] > 0],
+            'n_simulations': n_simulations
+        }
+
+
+# Global simulator instances for worker processes (avoid re-initialization)
+_worker_simulators = {}
+
+def _run_simulation_chunk(args):
+    """
+    Worker function for parallel simulation.
+    
+    Creates its own simulator instance (TensorFlow models can't be shared across processes).
+    """
+    (n_matches, team1_batters, team1_bowlers, team2_batters, team2_bowlers, 
+     venue_id, use_toss, toss_field_prob, gender, worker_id) = args
+    
+    global _worker_simulators
+    
+    # Create simulator for this worker if not exists
+    if gender not in _worker_simulators:
+        _worker_simulators[gender] = VectorizedNNSimulator(gender=gender)
+    
+    simulator = _worker_simulators[gender]
+    
+    results = simulator.simulate_matches(
+        n_matches,
+        team1_batters,
+        team1_bowlers,
+        team2_batters,
+        team2_bowlers,
+        venue_id=venue_id,
+        use_toss=use_toss,
+        toss_field_prob=toss_field_prob
+    )
+    
+    return {
+        'team1_scores': results['team1_scores'].tolist(),
+        'team2_scores': results['team2_scores'].tolist(),
+        'toss_stats': results.get('toss_stats'),
+        'worker_id': worker_id
+    }
+
+
+def run_parallel_simulations(
+    n_simulations: int,
+    team1_batters: List[int],
+    team1_bowlers: List[int],
+    team2_batters: List[int],
+    team2_bowlers: List[int],
+    venue_id: Optional[int] = None,
+    use_toss: bool = False,
+    toss_field_prob: float = 0.65,
+    gender: str = 'male',
+    n_workers: Optional[int] = None,
+    progress_callback = None
+) -> Dict:
+    """
+    Run simulations in parallel across multiple CPU cores.
+    
+    Uses ProcessPoolExecutor to distribute work across cores,
+    bypassing Python's GIL for true parallelism.
+    
+    Args:
+        n_simulations: Total number of simulations
+        n_workers: Number of parallel workers (default: CPU count - 2)
+        progress_callback: Optional callback(completed, total) for progress updates
+        
+    Returns:
+        Combined results from all workers
+    """
+    from concurrent.futures import ProcessPoolExecutor, as_completed
+    
+    if n_workers is None:
+        n_workers = max(2, multiprocessing.cpu_count() - 2)
+    
+    # Split work across workers
+    chunk_size = n_simulations // n_workers
+    remainder = n_simulations % n_workers
+    
+    # Create argument tuples for each worker
+    worker_args = []
+    for i in range(n_workers):
+        n_chunk = chunk_size + (1 if i < remainder else 0)
+        if n_chunk > 0:
+            worker_args.append((
+                n_chunk,
+                team1_batters,
+                team1_bowlers,
+                team2_batters,
+                team2_bowlers,
+                venue_id,
+                use_toss,
+                toss_field_prob,
+                gender,
+                i  # worker_id
+            ))
+    
+    # Run in parallel
+    all_team1_scores = []
+    all_team2_scores = []
+    toss_stats_accum = {'team1_won_toss': 0, 'chose_field': 0, 'team1_batted_first': 0, 'total': 0}
+    completed = 0
+    
+    with ProcessPoolExecutor(max_workers=n_workers) as executor:
+        futures = [executor.submit(_run_simulation_chunk, args) for args in worker_args]
+        
+        for future in as_completed(futures):
+            result = future.result()
+            all_team1_scores.extend(result['team1_scores'])
+            all_team2_scores.extend(result['team2_scores'])
+            
+            # Accumulate toss stats
+            if use_toss and result.get('toss_stats'):
+                ts = result['toss_stats']
+                n = len(result['team1_scores'])
+                toss_stats_accum['team1_won_toss'] += ts['team1_won_toss_pct'] * n
+                toss_stats_accum['chose_field'] += ts['chose_field_pct'] * n
+                toss_stats_accum['team1_batted_first'] += ts['team1_batted_first_pct'] * n
+                toss_stats_accum['total'] += n
+            
+            completed += len(result['team1_scores'])
+            if progress_callback:
+                progress_callback(completed, n_simulations)
+    
+    # Convert to numpy arrays
+    team1_scores = np.array(all_team1_scores)
+    team2_scores = np.array(all_team2_scores)
+    
+    # Build final results
+    results = {
+        'team1_scores': team1_scores,
+        'team2_scores': team2_scores,
+        'team1_win_pct': float((team1_scores > team2_scores).mean() * 100),
+        'team2_win_pct': float((team2_scores > team1_scores).mean() * 100),
+        'n_workers': n_workers
+    }
+    
+    if use_toss and toss_stats_accum['total'] > 0:
+        t = toss_stats_accum['total']
+        results['toss_stats'] = {
+            'team1_won_toss_pct': toss_stats_accum['team1_won_toss'] / t,
+            'chose_field_pct': toss_stats_accum['chose_field'] / t,
+            'team1_batted_first_pct': toss_stats_accum['team1_batted_first'] / t
+        }
+    
+    return results
 
 
 def benchmark_vectorized_simulator():

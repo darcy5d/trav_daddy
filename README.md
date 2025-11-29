@@ -1,178 +1,108 @@
 # Cricket Match Predictor
 
-A machine learning system for predicting T20 and ODI cricket match outcomes using ball-by-ball simulation and ELO rating systems.
-
-## Overview
-
-This project builds a comprehensive cricket match prediction engine that:
-
-- **Ingests ball-by-ball match data** from [Cricsheet.org](https://cricsheet.org/)
-- **Maintains ELO ratings** for teams and players (batting, bowling, overall)
-- **Trains deep learning models** to predict match outcomes and simulate ball-by-ball progression
-- **Provides a Flask web interface** for making predictions on upcoming matches
+A neural network-powered Monte Carlo simulation system for predicting T20 cricket match outcomes. Supports both Men's and Women's cricket including franchise leagues (IPL, BBL, WBBL, etc.).
 
 ## Features
 
-- **ELO Rating System**: Track team and player ratings over time with monthly snapshots
-- **Ball-by-Ball Simulation**: Monte Carlo simulation of matches using trained models
-- **Multiple Model Support**: Baseline ML models (XGBoost, Random Forest) and deep learning (TensorFlow/PyTorch)
-- **Web Interface**: User-friendly Flask application for match predictions
+- **Neural Network Ball-by-Ball Simulation**: Predicts individual ball outcomes (dot, single, boundary, wicket) using a trained deep learning model
+- **Monte Carlo Simulation**: Run 1,000-10,000 match simulations to generate win probabilities
+- **ELO Rating System**: Tracks team and player ratings with historical snapshots
+- **Men's & Women's Cricket**: Separate models trained on men's and women's T20 data
+- **WBBL Integration**: Auto-load upcoming WBBL matches and squads via Cricket Data API
+- **ESPN-Style Scorecards**: View detailed sample scorecards from simulations
+- **Venue Effects**: Stadium-specific scoring patterns influence predictions
+- **Toss Simulation**: Per-match toss outcomes simulated based on historical data
+
+## Quick Start
+
+```bash
+# 1. Clone and setup
+git clone https://github.com/yourusername/cricket-match-predictor.git
+cd cricket-match-predictor
+python -m venv venv
+source venv/bin/activate
+pip install -r requirements.txt
+
+# 2. Download data and build database
+python -m src.data.downloader
+python -m src.data.ingest
+
+# 3. Calculate ELO ratings
+python -m src.elo.calculator_v2
+
+# 4. Train neural network (optional - pre-trained models included)
+python -m src.models.ball_prediction_nn
+
+# 5. Run the web app
+python app/main.py
+```
+
+Visit `http://localhost:5001` in your browser.
+
+## How It Works
+
+1. **Data**: Ball-by-ball JSON data from [Cricsheet.org](https://cricsheet.org/) (3.2M+ deliveries, 11,300+ matches)
+2. **Training**: Neural network learns ball outcome probabilities based on:
+   - Batter/bowler ELO ratings and historical distributions
+   - Match situation (score, wickets, required rate)
+   - Innings phase (powerplay, middle, death)
+   - Venue characteristics
+3. **Simulation**: Monte Carlo engine simulates full matches ball-by-ball
+4. **Prediction**: Aggregate simulation results into win probabilities
+
+## Tech Stack
+
+| Component | Technology |
+|-----------|------------|
+| ML Framework | TensorFlow/Keras |
+| Backend | Python, Flask |
+| Database | SQLite |
+| Data | Cricsheet.org, Cricket Data API |
 
 ## Project Structure
 
 ```
-cricket-match-predictor/
-├── data/
-│   ├── raw/               # Downloaded JSON files from Cricsheet
-│   └── processed/         # Cleaned/processed data
+├── app/                  # Flask web application
+│   ├── main.py          # API endpoints
+│   └── templates/       # HTML templates
 ├── src/
-│   ├── data/              # Data ingestion and processing
-│   ├── models/            # ML/DL model implementations
-│   ├── features/          # Feature engineering
-│   ├── elo/               # ELO rating system
-│   └── utils/             # Helper functions
-├── app/                   # Flask web application
-│   ├── templates/
-│   ├── static/
-│   └── routes/
-├── notebooks/             # Jupyter notebooks for EDA
-├── tests/
-├── requirements.txt
-├── config.py
-└── README.md
+│   ├── data/            # Data ingestion
+│   ├── models/          # Neural network & simulators
+│   ├── features/        # Feature engineering
+│   └── elo/             # ELO rating system
+├── data/
+│   ├── raw/             # Cricsheet JSON files
+│   └── processed/       # Training data, distributions
+└── models/              # Trained model weights
 ```
-
-## Installation
-
-### Prerequisites
-
-- Python 3.11 or higher
-- pip package manager
-
-### Setup
-
-1. Clone the repository:
-```bash
-git clone https://github.com/yourusername/cricket-match-predictor.git
-cd cricket-match-predictor
-```
-
-2. Create and activate a virtual environment:
-```bash
-python -m venv venv
-source venv/bin/activate  # On Windows: venv\Scripts\activate
-```
-
-3. Install dependencies:
-```bash
-pip install -r requirements.txt
-```
-
-4. Download the cricket data:
-```bash
-python -m src.data.downloader
-```
-
-5. Initialize the database and ingest data:
-```bash
-python -m src.data.ingest
-```
-
-6. Calculate ELO ratings:
-```bash
-python -m src.elo.calculator
-```
-
-## Usage
-
-### Running the Web Application
-
-```bash
-python -m app.main
-```
-
-Visit `http://localhost:5000` in your browser.
-
-### Training Models
-
-```bash
-# Train baseline models
-python -m src.models.baseline
-
-# Train deep learning models
-python -m src.models.deep_learning
-```
-
-### Running Predictions
-
-```python
-from src.models.predictor import MatchPredictor
-
-predictor = MatchPredictor()
-result = predictor.predict(
-    team1="India",
-    team2="Australia",
-    venue="Melbourne Cricket Ground",
-    match_type="T20"
-)
-print(f"Win probability: {result}")
-```
-
-## Data Sources
-
-- **Match Data**: [Cricsheet.org](https://cricsheet.org/) - Ball-by-ball JSON data
-- **Formats Supported**: T20 Internationals, One Day Internationals (ODI)
-
-## Technology Stack
-
-| Component | Technology |
-|-----------|------------|
-| Database | SQLite |
-| Backend | Python 3.11+, Flask |
-| ML/DL | TensorFlow, PyTorch, scikit-learn |
-| Data Processing | pandas, numpy |
-| Visualization | Plotly, Matplotlib |
 
 ## API Endpoints
 
-| Endpoint | Description |
-|----------|-------------|
-| `GET /api/teams` | List available teams with current ELOs |
-| `GET /api/players/{team}` | Players for a team with ELO ratings |
-| `GET /api/elo/team/{team_id}` | Team ELO history |
-| `GET /api/elo/player/{player_id}` | Player ELO history |
-| `POST /api/predict` | Run prediction for match setup |
-| `POST /api/simulate` | Run Monte Carlo simulation |
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/api/teams` | GET | List teams with ELO ratings |
+| `/api/players/{team}` | GET | Team players with ELO |
+| `/api/simulate-stream` | POST | Run simulation with progress |
+| `/api/wbbl/fixtures` | GET | Upcoming WBBL matches |
+| `/api/rankings/teams` | GET | Team ELO rankings |
 
-## Model Architecture
+## Performance
 
-### ELO System
+Optimized for Apple Silicon (M2 Pro):
+- TensorFlow threading configured for multi-core
+- NumPy BLAS parallelization
+- ~60 simulations/second with Neural Network engine
 
-- **Team ELO**: Updated after each match based on result and opponent strength
-- **Player Batting ELO**: Based on runs scored vs expected, considering bowler quality
-- **Player Bowling ELO**: Based on wickets taken and economy vs expected
-- **Monthly Snapshots**: Historical ratings preserved for time-travel queries
+## Data Sources
 
-### Prediction Models
-
-1. **Baseline Models**: Logistic Regression, Random Forest, XGBoost
-2. **Deep Learning**: MLP, LSTM/GRU for sequential modeling
-3. **Ball Simulation**: Predicts outcome distribution per delivery for Monte Carlo simulation
-
-## Contributing
-
-1. Fork the repository
-2. Create a feature branch (`git checkout -b feature/amazing-feature`)
-3. Commit your changes (`git commit -m 'Add amazing feature'`)
-4. Push to the branch (`git push origin feature/amazing-feature`)
-5. Open a Pull Request
+- [Cricsheet.org](https://cricsheet.org/) - Ball-by-ball match data
+- [Cricket Data API](https://cricketdata.org/) - Live fixtures and squads
 
 ## License
 
-This project is licensed under the MIT License - see the LICENSE file for details.
+MIT License
 
 ## Acknowledgments
 
-- [Cricsheet.org](https://cricsheet.org/) for providing comprehensive cricket data
-- The cricket analytics community for research and inspiration
-
+- Cricsheet.org for comprehensive cricket data
+- Inspired by [Towards Data Science cricket simulation article](https://towardsdatascience.com/)

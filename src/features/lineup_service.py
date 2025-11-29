@@ -364,6 +364,221 @@ class LineupService:
             suggested.append(player.player_id)
         
         return suggested
+    
+    def _get_top_players_by_role(
+        self, 
+        team_name: str, 
+        role: str,  # 'batter' or 'bowler'
+        count: int, 
+        exclude_ids: set,
+        gender: str = 'female'
+    ) -> List[MatchedPlayer]:
+        """
+        Get highest ELO players for a specific role from team's historical data.
+        
+        Args:
+            team_name: DB team name (e.g., "Sydney Sixers")
+            role: 'batter' or 'bowler'
+            count: Number of players needed
+            exclude_ids: Player IDs already selected
+            gender: 'male' or 'female'
+            
+        Returns:
+            List of MatchedPlayer objects from DB
+        """
+        if count <= 0:
+            return []
+        
+        conn = get_connection()
+        cursor = conn.cursor()
+        
+        # Determine which ELO column to use
+        elo_col = f'batting_elo_t20_{gender}' if role == 'batter' else f'bowling_elo_t20_{gender}'
+        
+        # Build exclusion clause
+        if exclude_ids:
+            exclude_clause = f"AND p.player_id NOT IN ({','.join(str(pid) for pid in exclude_ids)})"
+        else:
+            exclude_clause = ""
+        
+        # Query players who have played for this team, ordered by relevant ELO
+        # We look at player_match_stats to find players who played for this team
+        query = f"""
+            SELECT DISTINCT 
+                p.player_id, 
+                p.name,
+                COALESCE(e.{elo_col}, 1500) as elo,
+                COALESCE(e.batting_elo_t20_{gender}, 1500) as batting_elo,
+                COALESCE(e.bowling_elo_t20_{gender}, 1500) as bowling_elo
+            FROM players p
+            JOIN player_match_stats pms ON p.player_id = pms.player_id
+            JOIN matches m ON pms.match_id = m.match_id
+            JOIN teams t ON pms.team_id = t.team_id
+            LEFT JOIN player_current_elo e ON p.player_id = e.player_id
+            WHERE t.name = ? 
+            AND m.gender = ?
+            AND m.match_type = 'T20'
+            {exclude_clause}
+            GROUP BY p.player_id
+            ORDER BY elo DESC
+            LIMIT ?
+        """
+        
+        cursor.execute(query, (team_name, gender, count))
+        rows = cursor.fetchall()
+        conn.close()
+        
+        players = []
+        for row in rows:
+            players.append(MatchedPlayer(
+                player_id=row['player_id'],
+                api_name='',
+                db_name=row['name'],
+                role='Batter' if role == 'batter' else 'Bowler',
+                batting_style=None,
+                bowling_style=None,
+                matched=True,
+                elo_batting=row['batting_elo'],
+                elo_bowling=row['bowling_elo'],
+                recent_form="Auto-filled from team history"
+            ))
+        
+        logger.info(f"Auto-filled {len(players)} {role}s for {team_name} from DB")
+        return players
+    
+    def ensure_playing_xi(
+        self, 
+        matched_players: List[MatchedPlayer], 
+        team_db_name: str,
+        gender: str = 'female'
+    ) -> Tuple[List[MatchedPlayer], Dict]:
+        """
+        Ensure we have exactly 11 UNIQUE valid players with proper role balance.
+        
+        CRITICAL: Each player can only appear ONCE in the XI (cricket law).
+        
+        Target composition:
+        - At least 6 recognized batters (top order + wicket-keeper)
+        - At least 4 recognized bowlers
+        
+        Args:
+            matched_players: List of players from API with DB matches
+            team_db_name: DB team name for fallback queries
+            gender: 'male' or 'female'
+            
+        Returns:
+            Tuple of (List of 11 UNIQUE MatchedPlayer, dict with fill info)
+        """
+        # STEP 1: Deduplicate input - each player_id can only appear once
+        seen_ids = set()
+        unique_players = []
+        duplicates_removed = 0
+        
+        for p in matched_players:
+            if p.player_id and p.player_id not in seen_ids:
+                unique_players.append(p)
+                seen_ids.add(p.player_id)
+            elif p.player_id:
+                duplicates_removed += 1
+        
+        if duplicates_removed > 0:
+            logger.warning(f"Removed {duplicates_removed} duplicate player(s) from input")
+        
+        valid = unique_players
+        
+        fill_info = {
+            'original_count': len(valid),
+            'duplicates_removed': duplicates_removed,
+            'batters_added': 0,
+            'bowlers_added': 0,
+            'auto_filled': []
+        }
+        
+        # Already have 11+ unique players, return first 11
+        if len(valid) >= 11:
+            return valid[:11], fill_info
+        
+        needed = 11 - len(valid)
+        used_ids = seen_ids.copy()  # Use the already-seen IDs for exclusion
+        
+        # Categorize players by role
+        batter_roles = {'Batter', 'Top order Batter', 'Opening Batter', 
+                       'WK-Batter', 'Wicketkeeper Batter', 'Batting Allrounder'}
+        bowler_roles = {'Bowler', 'Bowling Allrounder'}
+        
+        batters = [p for p in valid if p.role in batter_roles]
+        bowlers = [p for p in valid if p.role in bowler_roles]
+        
+        # Target: 6 batters, 5 bowlers (typical T20 balance)
+        target_batters = 6
+        target_bowlers = 5
+        
+        # Determine what we need to fill
+        batters_needed = max(0, target_batters - len(batters))
+        bowlers_needed = max(0, target_bowlers - len(bowlers))
+        
+        # Don't overfill - respect total needed
+        if batters_needed + bowlers_needed > needed:
+            # Prioritize what we're more short on
+            if len(batters) < len(bowlers):
+                batters_needed = min(batters_needed, needed)
+                bowlers_needed = needed - batters_needed
+            else:
+                bowlers_needed = min(bowlers_needed, needed)
+                batters_needed = needed - bowlers_needed
+        
+        # Fill batters first
+        if batters_needed > 0:
+            fill_batters = self._get_top_players_by_role(
+                team_db_name, 'batter', batters_needed, used_ids, gender
+            )
+            valid.extend(fill_batters)
+            used_ids.update(p.player_id for p in fill_batters)
+            fill_info['batters_added'] = len(fill_batters)
+            fill_info['auto_filled'].extend([p.db_name for p in fill_batters])
+        
+        # Fill bowlers
+        remaining_needed = 11 - len(valid)
+        if remaining_needed > 0:
+            fill_bowlers = self._get_top_players_by_role(
+                team_db_name, 'bowler', remaining_needed, used_ids, gender
+            )
+            valid.extend(fill_bowlers)
+            fill_info['bowlers_added'] = len(fill_bowlers)
+            fill_info['auto_filled'].extend([p.db_name for p in fill_bowlers])
+        
+        # Final safety: if still not 11, fill with any players by overall ELO
+        remaining_needed = 11 - len(valid)
+        if remaining_needed > 0:
+            # Update used_ids with any bowlers we added
+            used_ids.update(p.player_id for p in valid if p.player_id)
+            # Get any players with best combined ELO
+            any_players = self._get_top_players_by_role(
+                team_db_name, 'batter', remaining_needed, used_ids, gender
+            )
+            valid.extend(any_players)
+            fill_info['auto_filled'].extend([p.db_name for p in any_players])
+        
+        # FINAL VALIDATION: Ensure all 11 are unique
+        final_xi = valid[:11]
+        final_ids = [p.player_id for p in final_xi]
+        if len(set(final_ids)) != len(final_ids):
+            logger.error(f"DUPLICATE PLAYER IDS IN FINAL XI: {final_ids}")
+            # Deduplicate again as last resort
+            seen = set()
+            deduped = []
+            for p in final_xi:
+                if p.player_id not in seen:
+                    deduped.append(p)
+                    seen.add(p.player_id)
+            final_xi = deduped
+            logger.warning(f"After final dedup: {len(final_xi)} unique players")
+        
+        logger.info(f"Playing XI for {team_db_name}: {len(final_xi)} unique players "
+                   f"(batters added: {fill_info['batters_added']}, "
+                   f"bowlers added: {fill_info['bowlers_added']})")
+        
+        return final_xi, fill_info
 
 
 def get_service() -> LineupService:
