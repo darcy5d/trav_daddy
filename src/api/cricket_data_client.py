@@ -372,22 +372,46 @@ class CricketDataClient:
         Returns:
             List of T20Series objects with t20_count > 0
         """
+        # Track series by ID to avoid duplicates
+        series_by_id = {}
+        
+        # Fetch main series list
         data = self._request('series')
+        if 'data' in data:
+            for s in data['data']:
+                if s.get('t20', 0) > 0:
+                    series = T20Series.from_api(s)
+                    series_by_id[series.id] = series
         
-        if 'data' not in data:
-            logger.warning("Failed to fetch series list")
-            return []
+        # Search for known leagues that might not be in first page of results
+        # These are major competitions that users expect to see
+        # Note: Use actual names as API search doesn't recognize abbreviations
+        search_leagues = []
+        if gender == 'female' or gender is None:
+            search_leagues.extend(['Womens Big Bash', 'Women Premier League', 'hundred women', 'fairbreak'])
+        if gender == 'male' or gender is None:
+            search_leagues.extend(['Big Bash League', 'Indian Premier League', 'Pakistan Super League', 'Caribbean Premier League', 'sa20', 'hundred'])
         
-        # Filter for T20 series only
-        all_series = []
-        for s in data['data']:
-            if s.get('t20', 0) > 0:
-                series = T20Series.from_api(s)
-                all_series.append(series)
+        for league in search_leagues:
+            try:
+                data = self._request('series', {'search': league})
+                if 'data' in data:
+                    for s in data['data']:
+                        if s.get('t20', 0) > 0 and s.get('id') not in series_by_id:
+                            series = T20Series.from_api(s)
+                            # Only add if gender matches (when filtering)
+                            if gender is None or series.gender == gender:
+                                series_by_id[series.id] = series
+            except Exception as e:
+                logger.warning(f"Failed to search for {league}: {e}")
         
-        # Filter by gender if specified
+        # Convert to list and filter by gender if specified
+        all_series = list(series_by_id.values())
         if gender:
             all_series = [s for s in all_series if s.gender == gender]
+        
+        # Sort by start date (most recent first)
+        all_series.sort(key=lambda x: x.start_date, reverse=True)
         
         logger.info(f"Found {len(all_series)} T20 series" + 
                    (f" for {gender}" if gender else ""))
