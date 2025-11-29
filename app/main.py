@@ -812,10 +812,22 @@ def get_bowling_rankings():
 
 
 # ============================================================================
-# WBBL Fixture Endpoints
+# T20 Series & Fixture Endpoints (All Competitions)
 # ============================================================================
 
+_cricket_api_client = None
 _lineup_service = None
+
+
+def get_cricket_api_client():
+    """Get or initialize the Cricket Data API client."""
+    global _cricket_api_client
+    if _cricket_api_client is None:
+        from src.api.cricket_data_client import CricketDataClient
+        _cricket_api_client = CricketDataClient()
+        logger.info("Cricket Data API client initialized")
+    return _cricket_api_client
+
 
 def get_lineup_service():
     """Get or initialize the lineup service."""
@@ -825,6 +837,202 @@ def get_lineup_service():
         _lineup_service = LineupService()
         logger.info("Lineup service initialized")
     return _lineup_service
+
+
+@app.route('/api/t20/series', methods=['GET'])
+def get_t20_series():
+    """
+    Get list of active T20 series.
+    
+    Query params:
+        gender: Optional filter - 'male' or 'female'
+        
+    Returns:
+        List of T20 series with id, name, dates, match counts
+    """
+    try:
+        gender = request.args.get('gender')  # None = all genders
+        
+        client = get_cricket_api_client()
+        series_list = client.get_t20_series(gender=gender)
+        
+        return jsonify({
+            'success': True,
+            'series': [
+                {
+                    'id': s.id,
+                    'name': s.name,
+                    'start_date': s.start_date,
+                    'end_date': s.end_date,
+                    't20_count': s.t20_count,
+                    'gender': s.gender
+                }
+                for s in series_list
+            ],
+            'gender_filter': gender,
+            'total': len(series_list)
+        })
+    
+    except Exception as e:
+        logger.error(f"Error fetching T20 series: {e}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/t20/series/<series_id>/fixtures', methods=['GET'])
+def get_series_fixtures(series_id):
+    """
+    Get upcoming fixtures for a specific T20 series.
+    
+    Path params:
+        series_id: The series ID from the API
+        
+    Query params:
+        days_ahead: How many days ahead to include (default 14)
+        
+    Returns:
+        List of upcoming T20 matches in the series
+    """
+    try:
+        days_ahead = int(request.args.get('days_ahead', 14))
+        series_name = request.args.get('series_name', '')
+        
+        client = get_cricket_api_client()
+        matches = client.get_upcoming_series_matches(
+            series_id=series_id,
+            series_name=series_name,
+            days_ahead=days_ahead
+        )
+        
+        return jsonify({
+            'success': True,
+            'fixtures': [
+                {
+                    'id': m.id,
+                    'name': m.name,
+                    'date': m.date,
+                    'team1': m.team1,
+                    'team2': m.team2,
+                    'status': m.status,
+                    'venue': m.venue,
+                    'gender': m.gender,
+                    'series_id': m.series_id,
+                    'series_name': m.series_name,
+                    'has_squad': m.has_squad,
+                    'is_upcoming': m.is_upcoming,
+                    'date_time_gmt': m.date_time_gmt
+                }
+                for m in matches
+            ],
+            'series_id': series_id,
+            'days_ahead': days_ahead,
+            'total': len(matches)
+        })
+    
+    except Exception as e:
+        logger.error(f"Error fetching series fixtures: {e}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/t20/match/<match_id>', methods=['GET'])
+def get_t20_match(match_id):
+    """
+    Get full T20 match data with squads.
+    
+    This is a generalized version of /api/wbbl/match/<match_id>
+    that works with any T20 competition.
+    
+    Path params:
+        match_id: The match ID from the API
+        
+    Returns:
+        Match details with squad data and suggested XI
+    """
+    try:
+        service = get_lineup_service()
+        match = service.get_match_with_squads(match_id)
+        
+        if not match:
+            return jsonify({'success': False, 'error': 'Match not found'}), 404
+        
+        def player_to_dict(p):
+            return {
+                'player_id': p.player_id,
+                'api_name': p.api_name,
+                'db_name': p.db_name,
+                'role': p.role,
+                'batting_style': p.batting_style,
+                'bowling_style': p.bowling_style,
+                'matched': p.matched,
+                'elo_batting': p.elo_batting,
+                'elo_bowling': p.elo_bowling,
+                'recent_form': p.recent_form
+            }
+        
+        # Detect gender from team names
+        from src.api.cricket_data_client import detect_gender
+        gender = detect_gender(f"{match.team1_name} {match.team2_name}")
+        
+        # Get suggested XI from squads
+        team1_suggested_ids = service.suggest_lineup(match.team1_squad, match.team1_recent_xi)
+        team2_suggested_ids = service.suggest_lineup(match.team2_squad, match.team2_recent_xi)
+        
+        # Filter squad to get suggested players as MatchedPlayer objects
+        team1_suggested_players = [p for p in match.team1_squad if p.player_id in team1_suggested_ids]
+        team2_suggested_players = [p for p in match.team2_squad if p.player_id in team2_suggested_ids]
+        
+        # Ensure we have exactly 11 players with proper role balance
+        team1_final, team1_fill_info = service.ensure_playing_xi(
+            team1_suggested_players, match.team1_db_name, gender=gender
+        )
+        team2_final, team2_fill_info = service.ensure_playing_xi(
+            team2_suggested_players, match.team2_db_name, gender=gender
+        )
+        
+        return jsonify({
+            'success': True,
+            'match': {
+                'match_id': match.match_id,
+                'date': match.date,
+                'team1_name': match.team1_name,
+                'team2_name': match.team2_name,
+                'team1_db_name': match.team1_db_name,
+                'team2_db_name': match.team2_db_name,
+                'venue': match.venue,
+                'venue_db_id': match.venue_db_id,
+                'venue_db_name': match.venue_db_name,
+                'status': match.status,
+                'is_upcoming': match.is_upcoming,
+                'gender': gender,
+                'team1_squad': [player_to_dict(p) for p in match.team1_squad],
+                'team2_squad': [player_to_dict(p) for p in match.team2_squad],
+                'team1_recent_xi': match.team1_recent_xi,
+                'team2_recent_xi': match.team2_recent_xi,
+                # Final playing XI with exactly 11 players
+                'team1_suggested_xi': [p.player_id for p in team1_final],
+                'team2_suggested_xi': [p.player_id for p in team2_final],
+                # Full player info for suggested XI (for display)
+                'team1_xi_players': [player_to_dict(p) for p in team1_final],
+                'team2_xi_players': [player_to_dict(p) for p in team2_final],
+                # Fill info for UI display
+                'team1_fill_info': team1_fill_info,
+                'team2_fill_info': team2_fill_info
+            }
+        })
+    
+    except Exception as e:
+        logger.error(f"Error fetching T20 match: {e}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+# ============================================================================
+# WBBL Fixture Endpoints (Legacy - kept for backward compatibility)
+# ============================================================================
 
 
 def _get_player_names(player_ids: list) -> dict:

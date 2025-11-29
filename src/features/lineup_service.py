@@ -2,7 +2,7 @@
 Lineup Service.
 
 Combines Cricket Data API with our database to provide:
-1. Upcoming WBBL match fixtures
+1. Upcoming T20 match fixtures (all competitions)
 2. Match squads with matched player IDs
 3. Recent playing XI for each team
 4. Smart player suggestions based on ELO
@@ -17,7 +17,14 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 
 from src.data.database import get_connection
-from src.api.cricket_data_client import CricketDataClient, WBBLMatch, TeamSquad
+from src.api.cricket_data_client import (
+    CricketDataClient, 
+    WBBLMatch, 
+    TeamSquad,
+    T20Match,
+    T20Series,
+    detect_gender
+)
 from src.features.name_matcher import PlayerNameMatcher
 
 logger = logging.getLogger(__name__)
@@ -40,7 +47,7 @@ class MatchedPlayer:
 
 @dataclass
 class MatchFixture:
-    """WBBL match fixture with full squad data."""
+    """T20 match fixture with full squad data (works for any competition)."""
     match_id: str
     date: str
     team1_name: str
@@ -56,11 +63,14 @@ class MatchFixture:
     team2_squad: List[MatchedPlayer]
     team1_recent_xi: List[int]  # Player IDs from last match
     team2_recent_xi: List[int]
+    gender: str = 'female'  # 'male' or 'female'
+    series_id: Optional[str] = None
+    series_name: Optional[str] = None
 
 
 class LineupService:
     """
-    Service for getting WBBL match lineups.
+    Service for getting T20 match lineups (all competitions).
     
     Combines:
     - Cricket Data API for fixtures and squads
@@ -77,12 +87,13 @@ class LineupService:
         """Convert API team name to DB team name."""
         return self._team_name_map.get(api_team_name, api_team_name.replace(' Women', ''))
     
-    def find_venue_in_db(self, api_venue: str) -> Tuple[Optional[int], Optional[str]]:
+    def find_venue_in_db(self, api_venue: str, gender: str = 'female') -> Tuple[Optional[int], Optional[str]]:
         """
         Find a venue in our database matching the API venue name.
         
         Args:
             api_venue: Venue string from API (e.g., "Adelaide Oval, Adelaide")
+            gender: 'male' or 'female' for fallback venue lookup
             
         Returns:
             Tuple of (venue_id, venue_name) or (None, None) if not found
@@ -119,16 +130,16 @@ class LineupService:
             # Try matching by city (fallback for variations like "WACA Ground" vs "W.A.C.A. Ground")
             city_part = api_venue.split(',')[-1].strip() if ',' in api_venue else None
             if city_part:
-                # Get most common venue in that city for women's T20
+                # Get most common venue in that city for specified gender
                 cursor.execute("""
                     SELECT v.venue_id, v.name, v.city, COUNT(m.match_id) as match_count
                     FROM venues v
                     JOIN matches m ON m.venue_id = v.venue_id
-                    WHERE v.city = ? AND m.gender = 'female'
+                    WHERE v.city = ? AND m.gender = ?
                     GROUP BY v.venue_id
                     ORDER BY match_count DESC
                     LIMIT 1
-                """, (city_part,))
+                """, (city_part, gender))
                 result = cursor.fetchone()
         
         conn.close()
@@ -141,21 +152,61 @@ class LineupService:
         logger.warning(f"Could not match venue: {api_venue}")
         return None, None
     
-    def get_upcoming_fixtures(self, limit: int = 10) -> List[WBBLMatch]:
+    def get_upcoming_fixtures(self, limit: int = 10, gender: str = 'female') -> List[WBBLMatch]:
         """
-        Get upcoming WBBL matches.
+        Get upcoming WBBL matches (legacy method for backward compatibility).
         
+        Args:
+            limit: Maximum number of fixtures to return
+            gender: 'male' or 'female' (ignored for WBBL, always female)
+            
         Returns:
             List of upcoming WBBLMatch objects
         """
         return self.api_client.get_upcoming_wbbl_matches()[:limit]
     
-    def get_recent_lineup(self, team_name: str) -> Tuple[List[int], str]:
+    def get_t20_series(self, gender: Optional[str] = None) -> List[T20Series]:
         """
-        Get the playing XI from a team's most recent WBBL match.
+        Get list of active T20 series.
         
         Args:
-            team_name: DB team name (e.g., "Adelaide Strikers")
+            gender: Optional filter - 'male' or 'female'
+            
+        Returns:
+            List of T20Series objects
+        """
+        return self.api_client.get_t20_series(gender=gender)
+    
+    def get_series_fixtures(
+        self, 
+        series_id: str, 
+        series_name: str = '',
+        days_ahead: int = 14
+    ) -> List[T20Match]:
+        """
+        Get upcoming fixtures for a specific T20 series.
+        
+        Args:
+            series_id: The series ID from the API
+            series_name: Optional series name for gender detection
+            days_ahead: How many days ahead to include
+            
+        Returns:
+            List of upcoming T20Match objects
+        """
+        return self.api_client.get_upcoming_series_matches(
+            series_id=series_id,
+            series_name=series_name,
+            days_ahead=days_ahead
+        )
+    
+    def get_recent_lineup(self, team_name: str, gender: str = 'female') -> Tuple[List[int], str]:
+        """
+        Get the playing XI from a team's most recent T20 match.
+        
+        Args:
+            team_name: DB team name (e.g., "Adelaide Strikers", "Mumbai Indians")
+            gender: 'male' or 'female'
             
         Returns:
             Tuple of (list of player IDs, match date)
@@ -163,17 +214,17 @@ class LineupService:
         conn = get_connection()
         cursor = conn.cursor()
         
-        # Find most recent WBBL match for this team
+        # Find most recent T20 match for this team
         cursor.execute("""
             SELECT m.match_id, m.date, t.team_id
             FROM matches m
             JOIN teams t ON t.team_id IN (m.team1_id, m.team2_id)
             WHERE t.name = ? 
-            AND m.event_name LIKE '%Big Bash%'
-            AND m.gender = 'female'
+            AND m.match_type = 'T20'
+            AND m.gender = ?
             ORDER BY m.date DESC
             LIMIT 1
-        """, (team_name,))
+        """, (team_name, gender))
         
         result = cursor.fetchone()
         if not result:
@@ -197,17 +248,29 @@ class LineupService:
         conn.close()
         
         player_ids = [p['player_id'] for p in players]
-        logger.info(f"{team_name}: {len(player_ids)} players from {match_date}")
+        logger.info(f"{team_name} ({gender}): {len(player_ids)} players from {match_date}")
         
         return player_ids, match_date
     
-    def get_player_elo(self, player_id: int) -> Tuple[Optional[float], Optional[float]]:
-        """Get batting and bowling ELO for a player."""
+    def get_player_elo(self, player_id: int, gender: str = 'female') -> Tuple[Optional[float], Optional[float]]:
+        """
+        Get batting and bowling ELO for a player.
+        
+        Args:
+            player_id: The player ID
+            gender: 'male' or 'female'
+            
+        Returns:
+            Tuple of (batting_elo, bowling_elo) or (None, None)
+        """
         conn = get_connection()
         cursor = conn.cursor()
         
-        cursor.execute("""
-            SELECT batting_elo_t20_female, bowling_elo_t20_female
+        batting_col = f'batting_elo_t20_{gender}'
+        bowling_col = f'bowling_elo_t20_{gender}'
+        
+        cursor.execute(f"""
+            SELECT {batting_col}, {bowling_col}
             FROM player_current_elo
             WHERE player_id = ?
         """, (player_id,))
@@ -216,22 +279,61 @@ class LineupService:
         conn.close()
         
         if result:
-            return result['batting_elo_t20_female'], result['bowling_elo_t20_female']
+            return result[batting_col], result[bowling_col]
         return None, None
     
-    def get_match_with_squads(self, match_id: str) -> Optional[MatchFixture]:
+    def get_match_with_squads(self, match_id: str, series_id: str = None) -> Optional[MatchFixture]:
         """
         Get full fixture data with matched squads.
         
+        Works with any T20 competition (WBBL, BBL, IPL, etc.)
+        
         Args:
             match_id: API match ID
+            series_id: Optional series ID to search within
             
         Returns:
             MatchFixture with all squad data
         """
-        # Get upcoming matches to find this one
-        matches = self.api_client.get_wbbl_matches()
-        match = next((m for m in matches if m.id == match_id), None)
+        # Try to find the match - first in WBBL (legacy), then via match_info API
+        match = None
+        gender = 'female'  # Default
+        series_name = ''
+        
+        # Try WBBL first (for backward compatibility)
+        wbbl_matches = self.api_client.get_wbbl_matches()
+        match = next((m for m in wbbl_matches if m.id == match_id), None)
+        
+        if match:
+            gender = 'female'
+            series_name = 'WBBL'
+        else:
+            # Try to get match info directly from API
+            match_info = self.api_client.get_match_info(match_id)
+            if match_info:
+                # Create a temporary match object from match_info
+                teams = match_info.get('teams', [])
+                team1 = teams[0] if teams else ''
+                team2 = teams[1] if len(teams) > 1 else ''
+                
+                # Detect gender from team names
+                gender = detect_gender(f"{team1} {team2}")
+                series_name = match_info.get('series', '')
+                
+                # Create a WBBLMatch-like object for compatibility
+                class TempMatch:
+                    def __init__(self, data):
+                        self.id = data.get('id', match_id)
+                        self.name = data.get('name', '')
+                        self.date = data.get('date', '')
+                        self.status = data.get('status', '')
+                        self.team1 = team1
+                        self.team2 = team2
+                        self.venue = data.get('venue')
+                        self.has_squad = True
+                        self.is_upcoming = 'won' not in self.status.lower()
+                
+                match = TempMatch(match_info)
         
         if not match:
             logger.warning(f"Match not found: {match_id}")
@@ -248,19 +350,19 @@ class LineupService:
         team1_db = self._get_db_team_name(match.team1)
         team2_db = self._get_db_team_name(match.team2)
         
-        # Get recent lineups from our DB
-        team1_recent, team1_date = self.get_recent_lineup(team1_db)
-        team2_recent, team2_date = self.get_recent_lineup(team2_db)
+        # Get recent lineups from our DB (gender-aware)
+        team1_recent, team1_date = self.get_recent_lineup(team1_db, gender=gender)
+        team2_recent, team2_date = self.get_recent_lineup(team2_db, gender=gender)
         
         # Match squads to DB players
         team1_squad_data = squads.get(match.team1, TeamSquad(match.team1, '', []))
         team2_squad_data = squads.get(match.team2, TeamSquad(match.team2, '', []))
         
-        team1_matched = self._match_squad_to_db(team1_squad_data, team1_db, team1_recent)
-        team2_matched = self._match_squad_to_db(team2_squad_data, team2_db, team2_recent)
+        team1_matched = self._match_squad_to_db(team1_squad_data, team1_db, team1_recent, gender=gender)
+        team2_matched = self._match_squad_to_db(team2_squad_data, team2_db, team2_recent, gender=gender)
         
         # Match venue to our database
-        venue_db_id, venue_db_name = self.find_venue_in_db(match.venue)
+        venue_db_id, venue_db_name = self.find_venue_in_db(match.venue, gender=gender)
         
         return MatchFixture(
             match_id=match_id,
@@ -277,14 +379,18 @@ class LineupService:
             team1_squad=team1_matched,
             team2_squad=team2_matched,
             team1_recent_xi=team1_recent,
-            team2_recent_xi=team2_recent
+            team2_recent_xi=team2_recent,
+            gender=gender,
+            series_id=series_id,
+            series_name=series_name
         )
     
     def _match_squad_to_db(
         self, 
         api_squad: TeamSquad, 
         db_team_name: str,
-        recent_xi: List[int]
+        recent_xi: List[int],
+        gender: str = 'female'
     ) -> List[MatchedPlayer]:
         """Match API squad to database players with ELO."""
         matched_players = []
@@ -298,7 +404,7 @@ class LineupService:
             )
             
             if match:
-                batting_elo, bowling_elo = self.get_player_elo(match.player_id)
+                batting_elo, bowling_elo = self.get_player_elo(match.player_id, gender=gender)
                 in_recent = match.player_id in recent_xi
                 
                 matched_players.append(MatchedPlayer(
@@ -593,11 +699,23 @@ if __name__ == "__main__":
     service = LineupService()
     
     print("=" * 70)
-    print("WBBL LINEUP SERVICE TEST")
+    print("T20 LINEUP SERVICE TEST")
     print("=" * 70)
     
-    # Get upcoming fixtures
-    print("\nUpcoming WBBL Matches:")
+    # Test T20 series listing
+    print("\n--- Women's T20 Series ---")
+    women_series = service.get_t20_series(gender='female')
+    for s in women_series[:5]:
+        print(f"  {s.name} | {s.t20_count} T20s")
+    
+    print("\n--- Men's T20 Series ---")
+    men_series = service.get_t20_series(gender='male')
+    for s in men_series[:5]:
+        print(f"  {s.name} | {s.t20_count} T20s")
+    
+    # Get upcoming WBBL fixtures (legacy method)
+    print("\n" + "=" * 70)
+    print("Upcoming WBBL Matches (Legacy):")
     print("-" * 50)
     fixtures = service.get_upcoming_fixtures(5)
     
@@ -617,7 +735,8 @@ if __name__ == "__main__":
                 
                 if match:
                     print(f"\n{match.team1_name} ({match.team1_db_name}):")
-                    print(f"  Recent XI from {service.get_recent_lineup(match.team1_db_name)[1]}")
+                    print(f"  Gender: {match.gender}")
+                    print(f"  Recent XI from {service.get_recent_lineup(match.team1_db_name, match.gender)[1]}")
                     for p in match.team1_squad[:8]:
                         status = "✓" if p.matched else "✗"
                         elo = f"ELO: {p.elo_batting:.0f}/{p.elo_bowling:.0f}" if p.elo_batting else ""

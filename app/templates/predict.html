@@ -18,41 +18,48 @@
     </div>
 </div>
 
-<!-- WBBL Quick Load Section (Women's only) -->
-<div id="wbbl-loader" class="card" style="display: none; margin-bottom: 1.5rem; border: 2px solid var(--accent-primary);">
+<!-- T20 Match Loader (Works for all genders) -->
+<div id="t20-loader" class="card" style="margin-bottom: 1.5rem; border: 2px solid var(--accent-primary);">
     <h2 class="card-title" style="display: flex; align-items: center; gap: 0.5rem;">
-        <span style="font-size: 1.5rem;">🏏</span> Load WBBL Match
+        <span style="font-size: 1.5rem;">🏏</span> <span id="loader-title">Load T20 Match</span>
     </h2>
     <p style="color: var(--text-secondary); margin-bottom: 1rem;">
-        Select an upcoming WBBL match to auto-fill both teams with their most recent lineups.
+        Select a competition and upcoming match to auto-fill both teams with their most recent lineups.
     </p>
     
-    <div class="grid grid-2" style="gap: 1rem; align-items: end;">
+    <div class="grid grid-3" style="gap: 1rem; align-items: end;">
         <div class="form-group" style="margin: 0;">
-            <label>Upcoming WBBL Fixtures</label>
-            <select id="wbbl-fixture-select" style="width: 100%;">
+            <label>Competition / Series</label>
+            <select id="series-select" onchange="loadSeriesFixtures()" style="width: 100%;">
+                <option value="">-- Select Competition --</option>
+            </select>
+        </div>
+        <div class="form-group" style="margin: 0;">
+            <label>Upcoming Fixtures</label>
+            <select id="fixture-select" style="width: 100%;">
                 <option value="">-- Select a Match --</option>
             </select>
         </div>
         <div class="form-group" style="margin: 0;">
-            <button class="btn btn-primary" onclick="loadWBBLMatch()" style="width: 100%;">
+            <label>&nbsp;</label>
+            <button class="btn btn-primary" onclick="loadT20Match()" style="width: 100%;">
                 Load Squads
             </button>
         </div>
     </div>
     
-    <div id="wbbl-loading" style="display: none; text-align: center; padding: 1rem;">
+    <div id="t20-loading" style="display: none; text-align: center; padding: 1rem;">
         <div class="spinner" style="margin: 0 auto;"></div>
         <p style="color: var(--text-secondary); margin-top: 0.5rem;">Loading squads from API...</p>
     </div>
     
-    <div id="wbbl-match-info" style="display: none; margin-top: 1rem; padding: 1rem; background: var(--bg-tertiary); border-radius: 8px;">
+    <div id="t20-match-info" style="display: none; margin-top: 1rem; padding: 1rem; background: var(--bg-tertiary); border-radius: 8px;">
         <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.5rem;">
-            <strong id="wbbl-match-name"></strong>
-            <span id="wbbl-match-date" style="color: var(--text-muted);"></span>
+            <strong id="t20-match-name"></strong>
+            <span id="t20-match-date" style="color: var(--text-muted);"></span>
         </div>
         <div style="font-size: 0.875rem; color: var(--text-secondary);">
-            <span id="wbbl-team1-info"></span> vs <span id="wbbl-team2-info"></span>
+            <span id="t20-team1-info"></span> vs <span id="t20-team2-info"></span>
         </div>
     </div>
 </div>
@@ -370,11 +377,14 @@
 <script>
     // Current gender selection
     let currentGender = 'male';
+    let currentSeriesId = '';
+    let currentSeriesName = '';
     
     // Initialize on page load
     document.addEventListener('DOMContentLoaded', () => {
         loadTeams();
         loadVenues();
+        loadT20Series();  // Load series for match loader
     });
     
     function setGender(gender) {
@@ -384,14 +394,16 @@
         document.getElementById('gender-male').className = gender === 'male' ? 'btn btn-primary' : 'btn';
         document.getElementById('gender-female').className = gender === 'female' ? 'btn btn-primary' : 'btn';
         
-        // Show/hide WBBL loader (women's only)
-        const wbblLoader = document.getElementById('wbbl-loader');
-        if (gender === 'female') {
-            wbblLoader.style.display = 'block';
-            loadWBBLFixtures();
-        } else {
-            wbblLoader.style.display = 'none';
-        }
+        // Update loader title
+        const genderText = gender === 'male' ? "Men's" : "Women's";
+        document.getElementById('loader-title').textContent = `Load ${genderText} T20 Match`;
+        
+        // Reload series for the new gender
+        loadT20Series();
+        
+        // Clear fixture select
+        document.getElementById('fixture-select').innerHTML = '<option value="">-- Select a Match --</option>';
+        document.getElementById('t20-match-info').style.display = 'none';
         
         // Reload teams and venues for new gender
         loadTeams();
@@ -405,64 +417,113 @@
             document.getElementById(id).value = '';
         });
         
-        // Clear WBBL match info
-        document.getElementById('wbbl-match-info').style.display = 'none';
-        
         // Update subtitle
-        const genderText = gender === 'male' ? "Men's" : "Women's";
         document.querySelector('.hero p').textContent = `Select teams and players to simulate ${genderText} T20 matches`;
     }
     
-    // WBBL Functions
-    async function loadWBBLFixtures() {
+    // T20 Series and Match Loading Functions
+    async function loadT20Series() {
         try {
-            const response = await fetch('/api/wbbl/fixtures');
+            const response = await fetch(`/api/t20/series?gender=${currentGender}`);
             const data = await response.json();
             
             if (data.success) {
-                const select = document.getElementById('wbbl-fixture-select');
-                select.innerHTML = '<option value="">-- Select a Match --</option>';
+                const select = document.getElementById('series-select');
+                select.innerHTML = '<option value="">-- Select Competition --</option>';
                 
-                data.fixtures.forEach(fixture => {
+                data.series.forEach(series => {
                     const opt = document.createElement('option');
-                    opt.value = fixture.id;
-                    opt.textContent = `${fixture.date}: ${fixture.team1.replace(' Women', '')} vs ${fixture.team2.replace(' Women', '')}`;
+                    opt.value = series.id;
+                    opt.dataset.name = series.name;
+                    // Show series name with T20 count
+                    opt.textContent = `${series.name} (${series.t20_count} matches)`;
                     select.appendChild(opt);
                 });
+                
+                console.log(`Loaded ${data.series.length} ${currentGender} T20 series`);
             }
         } catch (error) {
-            console.error('Error loading WBBL fixtures:', error);
+            console.error('Error loading T20 series:', error);
         }
     }
     
-    async function loadWBBLMatch() {
-        const matchId = document.getElementById('wbbl-fixture-select').value;
+    async function loadSeriesFixtures() {
+        const seriesSelect = document.getElementById('series-select');
+        const selectedOption = seriesSelect.selectedOptions[0];
+        
+        currentSeriesId = seriesSelect.value;
+        currentSeriesName = selectedOption?.dataset?.name || '';
+        
+        if (!currentSeriesId) {
+            document.getElementById('fixture-select').innerHTML = '<option value="">-- Select a Match --</option>';
+            return;
+        }
+        
+        try {
+            const response = await fetch(`/api/t20/series/${currentSeriesId}/fixtures?days_ahead=14&series_name=${encodeURIComponent(currentSeriesName)}`);
+            const data = await response.json();
+            
+            if (data.success) {
+                const select = document.getElementById('fixture-select');
+                select.innerHTML = '<option value="">-- Select a Match --</option>';
+                
+                if (data.fixtures.length === 0) {
+                    const opt = document.createElement('option');
+                    opt.value = '';
+                    opt.textContent = 'No upcoming matches in next 14 days';
+                    opt.disabled = true;
+                    select.appendChild(opt);
+                } else {
+                    data.fixtures.forEach(fixture => {
+                        const opt = document.createElement('option');
+                        opt.value = fixture.id;
+                        // Format: date - team1 vs team2
+                        const team1Short = fixture.team1.replace(' Women', '').replace(' Men', '');
+                        const team2Short = fixture.team2.replace(' Women', '').replace(' Men', '');
+                        opt.textContent = `${fixture.date}: ${team1Short} vs ${team2Short}`;
+                        if (fixture.has_squad) {
+                            opt.textContent += ' ✓';
+                        }
+                        select.appendChild(opt);
+                    });
+                }
+                
+                console.log(`Loaded ${data.fixtures.length} fixtures for ${currentSeriesName}`);
+            }
+        } catch (error) {
+            console.error('Error loading series fixtures:', error);
+        }
+    }
+    
+    async function loadT20Match() {
+        const matchId = document.getElementById('fixture-select').value;
         if (!matchId) {
             alert('Please select a match first');
             return;
         }
         
         // Show loading
-        document.getElementById('wbbl-loading').style.display = 'block';
-        document.getElementById('wbbl-match-info').style.display = 'none';
+        document.getElementById('t20-loading').style.display = 'block';
+        document.getElementById('t20-match-info').style.display = 'none';
         
         try {
-            const response = await fetch(`/api/wbbl/match/${matchId}`);
+            const response = await fetch(`/api/t20/match/${matchId}`);
             const data = await response.json();
             
-            document.getElementById('wbbl-loading').style.display = 'none';
+            document.getElementById('t20-loading').style.display = 'none';
             
             if (data.success && data.match) {
                 const match = data.match;
                 
                 // Show match info
-                document.getElementById('wbbl-match-name').textContent = `${match.team1_db_name} vs ${match.team2_db_name}`;
-                document.getElementById('wbbl-match-date').textContent = match.date;
+                document.getElementById('t20-match-name').textContent = `${match.team1_db_name} vs ${match.team2_db_name}`;
+                document.getElementById('t20-match-date').textContent = match.date;
                 
-                let venueInfo = match.venue_db_name ? `📍 ${match.venue_db_name}` : '';
-                document.getElementById('wbbl-team1-info').textContent = `${match.team1_squad.filter(p => p.matched).length}/${match.team1_squad.length} players`;
-                document.getElementById('wbbl-team2-info').textContent = `${match.team2_squad.filter(p => p.matched).length}/${match.team2_squad.length} players`;
-                document.getElementById('wbbl-match-info').style.display = 'block';
+                const matched1 = match.team1_squad.filter(p => p.matched).length;
+                const matched2 = match.team2_squad.filter(p => p.matched).length;
+                document.getElementById('t20-team1-info').textContent = `${matched1}/${match.team1_squad.length} players`;
+                document.getElementById('t20-team2-info').textContent = `${matched2}/${match.team2_squad.length} players`;
+                document.getElementById('t20-match-info').style.display = 'block';
                 
                 // Auto-fill teams
                 await autoFillTeam(1, match.team1_db_name, match.team1_squad, match.team1_suggested_xi);
@@ -482,10 +543,21 @@
                 alert('Error loading match: ' + (data.error || 'Unknown error'));
             }
         } catch (error) {
-            document.getElementById('wbbl-loading').style.display = 'none';
-            console.error('Error loading WBBL match:', error);
+            document.getElementById('t20-loading').style.display = 'none';
+            console.error('Error loading T20 match:', error);
             alert('Error loading match data');
         }
+    }
+    
+    // Legacy WBBL functions (kept for backward compatibility)
+    async function loadWBBLFixtures() {
+        // Redirect to the new series-based loader
+        console.log('Legacy loadWBBLFixtures called - use loadT20Series instead');
+    }
+    
+    async function loadWBBLMatch() {
+        // Redirect to the new T20 loader
+        console.log('Legacy loadWBBLMatch called - use loadT20Match instead');
     }
     
     async function autoFillTeam(teamNum, teamName, squad, suggestedXI) {

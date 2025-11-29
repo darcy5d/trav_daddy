@@ -3,7 +3,7 @@ Cricket Data API Client.
 
 Client for cricketdata.org API to fetch:
 - Current/upcoming matches
-- Series information (WBBL)
+- Series information (all T20 competitions)
 - Match squads
 
 API Documentation: https://cricketdata.org/how-to-use-cricket-data-api.aspx
@@ -11,9 +11,9 @@ API Documentation: https://cricketdata.org/how-to-use-cricket-data-api.aspx
 
 import logging
 from typing import Dict, List, Optional
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import requests
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import sys
 from pathlib import Path
@@ -26,7 +26,7 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class WBBLMatch:
-    """Represents a WBBL match."""
+    """Represents a WBBL match (legacy, use T20Match for new code)."""
     id: str
     name: str
     date: str
@@ -59,6 +59,120 @@ class WBBLMatch:
             has_squad=data.get('hasSquad', False),
             is_upcoming=is_upcoming
         )
+
+
+@dataclass
+class T20Series:
+    """Represents a T20 series/competition."""
+    id: str
+    name: str
+    start_date: str
+    end_date: str
+    t20_count: int
+    gender: str  # 'male' or 'female'
+    odi_count: int = 0
+    test_count: int = 0
+    match_count: int = 0
+    
+    @classmethod
+    def from_api(cls, data: dict) -> 'T20Series':
+        """Create from API response."""
+        name = data.get('name', '')
+        return cls(
+            id=data.get('id', ''),
+            name=name,
+            start_date=data.get('startDate', ''),
+            end_date=data.get('endDate', ''),
+            t20_count=data.get('t20', 0),
+            gender=detect_gender(name),
+            odi_count=data.get('odi', 0),
+            test_count=data.get('test', 0),
+            match_count=data.get('matches', 0)
+        )
+
+
+@dataclass
+class T20Match:
+    """Represents a T20 match from any competition."""
+    id: str
+    name: str
+    date: str
+    status: str
+    team1: str
+    team2: str
+    series_id: str
+    series_name: str
+    gender: str  # 'male' or 'female'
+    venue: Optional[str] = None
+    has_squad: bool = False
+    is_upcoming: bool = False
+    date_time_gmt: Optional[str] = None
+    
+    @classmethod
+    def from_api(cls, data: dict, series_id: str = '', series_name: str = '') -> 'T20Match':
+        """Create from API response."""
+        teams = data.get('teams', [])
+        team1 = teams[0] if teams else data.get('name', '').split(' vs ')[0].strip()
+        team2 = teams[1] if len(teams) > 1 else ''
+        
+        # Check if upcoming
+        status = data.get('status', '')
+        is_upcoming = (
+            'Match starts at' in status 
+            or status == '' 
+            or 'not started' in status.lower()
+        )
+        
+        # Detect gender from teams or series name
+        gender = detect_gender(f"{team1} {team2} {series_name}")
+        
+        return cls(
+            id=data.get('id', ''),
+            name=data.get('name', ''),
+            date=data.get('date', ''),
+            status=status,
+            team1=team1,
+            team2=team2,
+            series_id=series_id or data.get('series_id', ''),
+            series_name=series_name,
+            gender=gender,
+            venue=data.get('venue'),
+            has_squad=data.get('hasSquad', False),
+            is_upcoming=is_upcoming,
+            date_time_gmt=data.get('dateTimeGMT')
+        )
+    
+    def to_wbbl_match(self) -> WBBLMatch:
+        """Convert to legacy WBBLMatch for backward compatibility."""
+        return WBBLMatch(
+            id=self.id,
+            name=self.name,
+            date=self.date,
+            status=self.status,
+            team1=self.team1,
+            team2=self.team2,
+            venue=self.venue,
+            has_squad=self.has_squad,
+            is_upcoming=self.is_upcoming
+        )
+
+
+# Gender detection keywords
+WOMEN_KEYWORDS = ['women', 'wbbl', 'wpl', 'female', "women's", 'wpsl', 'wt20']
+
+
+def detect_gender(text: str) -> str:
+    """
+    Detect gender from series/team name.
+    
+    Args:
+        text: Series name, team name, or combination
+        
+    Returns:
+        'female' if women's cricket detected, 'male' otherwise
+    """
+    text_lower = text.lower()
+    return 'female' if any(kw in text_lower for kw in WOMEN_KEYWORDS) else 'male'
 
 
 @dataclass
@@ -243,6 +357,154 @@ class CricketDataClient:
         """
         data = self._request('match_info', {'id': match_id})
         return data.get('data')
+    
+    # =========================================================================
+    # Generic T20 Methods (for all competitions)
+    # =========================================================================
+    
+    def get_t20_series(self, gender: Optional[str] = None) -> List[T20Series]:
+        """
+        Get all active T20 series.
+        
+        Args:
+            gender: Optional filter - 'male' or 'female'
+            
+        Returns:
+            List of T20Series objects with t20_count > 0
+        """
+        data = self._request('series')
+        
+        if 'data' not in data:
+            logger.warning("Failed to fetch series list")
+            return []
+        
+        # Filter for T20 series only
+        all_series = []
+        for s in data['data']:
+            if s.get('t20', 0) > 0:
+                series = T20Series.from_api(s)
+                all_series.append(series)
+        
+        # Filter by gender if specified
+        if gender:
+            all_series = [s for s in all_series if s.gender == gender]
+        
+        logger.info(f"Found {len(all_series)} T20 series" + 
+                   (f" for {gender}" if gender else ""))
+        return all_series
+    
+    def get_series_matches(self, series_id: str, series_name: str = '') -> List[T20Match]:
+        """
+        Get all matches for a specific series.
+        
+        Args:
+            series_id: The series ID from the API
+            series_name: Optional series name for gender detection
+            
+        Returns:
+            List of T20Match objects (all matches in series)
+        """
+        data = self._request('series_info', {'id': series_id})
+        
+        if 'data' not in data:
+            logger.warning(f"Failed to fetch series info for {series_id}")
+            return []
+        
+        series_data = data['data']
+        series_name = series_name or series_data.get('info', {}).get('name', '')
+        match_list = series_data.get('matchList', [])
+        
+        matches = [
+            T20Match.from_api(m, series_id=series_id, series_name=series_name)
+            for m in match_list
+        ]
+        
+        logger.info(f"Found {len(matches)} matches in series {series_name or series_id}")
+        return matches
+    
+    def get_upcoming_series_matches(
+        self, 
+        series_id: str, 
+        series_name: str = '',
+        days_ahead: int = 14
+    ) -> List[T20Match]:
+        """
+        Get upcoming matches for a specific series.
+        
+        Args:
+            series_id: The series ID
+            series_name: Optional series name for gender detection
+            days_ahead: How many days ahead to include (default 14)
+            
+        Returns:
+            List of upcoming T20Match objects, sorted by date
+        """
+        all_matches = self.get_series_matches(series_id, series_name)
+        
+        today = datetime.now().date()
+        cutoff = today + timedelta(days=days_ahead)
+        
+        upcoming = []
+        for m in all_matches:
+            # Check if upcoming by status
+            if not m.is_upcoming:
+                continue
+            
+            # Also check date if available
+            try:
+                match_date = datetime.strptime(m.date, '%Y-%m-%d').date()
+                if match_date < today:
+                    continue
+                if match_date > cutoff:
+                    continue
+            except (ValueError, TypeError):
+                pass  # Keep match if date parsing fails
+            
+            upcoming.append(m)
+        
+        # Sort by date
+        upcoming.sort(key=lambda m: m.date)
+        
+        logger.info(f"Found {len(upcoming)} upcoming matches in next {days_ahead} days")
+        return upcoming
+    
+    def get_all_upcoming_t20_matches(
+        self, 
+        gender: Optional[str] = None,
+        days_ahead: int = 7
+    ) -> List[T20Match]:
+        """
+        Get all upcoming T20 matches across all active series.
+        
+        This makes multiple API calls (one per active series).
+        Consider caching results.
+        
+        Args:
+            gender: Optional filter - 'male' or 'female'
+            days_ahead: How many days ahead to include
+            
+        Returns:
+            List of upcoming T20Match objects from all series, sorted by date
+        """
+        series_list = self.get_t20_series(gender=gender)
+        
+        all_matches = []
+        for series in series_list:
+            try:
+                matches = self.get_upcoming_series_matches(
+                    series.id, 
+                    series.name,
+                    days_ahead=days_ahead
+                )
+                all_matches.extend(matches)
+            except Exception as e:
+                logger.warning(f"Failed to fetch matches for {series.name}: {e}")
+        
+        # Sort all by date
+        all_matches.sort(key=lambda m: m.date)
+        
+        logger.info(f"Found {len(all_matches)} total upcoming T20 matches")
+        return all_matches
 
 
 # Convenience function
@@ -257,25 +519,56 @@ if __name__ == "__main__":
     
     client = CricketDataClient()
     
-    print("=" * 60)
-    print("WBBL Upcoming Matches")
-    print("=" * 60)
+    # =========================================================================
+    # Test new T20 Series methods
+    # =========================================================================
+    print("=" * 70)
+    print("T20 SERIES EXPLORATION")
+    print("=" * 70)
+    
+    print("\n--- All T20 Series ---")
+    all_series = client.get_t20_series()
+    print(f"Total T20 series: {len(all_series)}")
+    
+    print("\n--- Women's T20 Series ---")
+    women_series = client.get_t20_series(gender='female')
+    for s in women_series[:5]:
+        print(f"  {s.name} | {s.t20_count} T20s | {s.start_date} to {s.end_date}")
+    
+    print("\n--- Men's T20 Series ---")
+    men_series = client.get_t20_series(gender='male')
+    for s in men_series[:5]:
+        print(f"  {s.name} | {s.t20_count} T20s | {s.start_date} to {s.end_date}")
+    
+    # Test getting matches from a specific series
+    if women_series:
+        print("\n" + "=" * 70)
+        print(f"UPCOMING MATCHES: {women_series[0].name}")
+        print("=" * 70)
+        
+        upcoming = client.get_upcoming_series_matches(
+            women_series[0].id, 
+            women_series[0].name,
+            days_ahead=14
+        )
+        for m in upcoming[:5]:
+            print(f"\n{m.date}: {m.name}")
+            print(f"  Teams: {m.team1} vs {m.team2}")
+            print(f"  Gender: {m.gender}")
+            print(f"  Status: {m.status}")
+            print(f"  Has Squad: {m.has_squad}")
+    
+    # =========================================================================
+    # Legacy WBBL test (backward compatibility)
+    # =========================================================================
+    print("\n" + "=" * 70)
+    print("WBBL Upcoming Matches (Legacy Method)")
+    print("=" * 70)
     
     upcoming = client.get_upcoming_wbbl_matches()
-    for match in upcoming[:5]:
+    for match in upcoming[:3]:
         print(f"\n{match.date}: {match.name}")
         print(f"  Teams: {match.team1} vs {match.team2}")
         print(f"  Status: {match.status}")
         print(f"  Has Squad: {match.has_squad}")
-        
-        if match.has_squad:
-            print(f"\n  Loading squad for: {match.id}")
-            squads = client.get_match_squad(match.id)
-            for team_name, squad in squads.items():
-                print(f"\n  {team_name} ({len(squad.players)} players):")
-                for p in squad.players[:5]:
-                    print(f"    - {p.name} ({p.role})")
-                if len(squad.players) > 5:
-                    print(f"    ... and {len(squad.players) - 5} more")
-            break  # Just show one to save API calls
 
