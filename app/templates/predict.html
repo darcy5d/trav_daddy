@@ -512,35 +512,8 @@
             
             document.getElementById('t20-loading').style.display = 'none';
             
-            if (data.success && data.match) {
-                const match = data.match;
-                
-                // Show match info
-                document.getElementById('t20-match-name').textContent = `${match.team1_db_name} vs ${match.team2_db_name}`;
-                document.getElementById('t20-match-date').textContent = match.date;
-                
-                const matched1 = match.team1_squad.filter(p => p.matched).length;
-                const matched2 = match.team2_squad.filter(p => p.matched).length;
-                document.getElementById('t20-team1-info').textContent = `${matched1}/${match.team1_squad.length} players`;
-                document.getElementById('t20-team2-info').textContent = `${matched2}/${match.team2_squad.length} players`;
-                document.getElementById('t20-match-info').style.display = 'block';
-                
-                // Auto-fill teams
-                await autoFillTeam(1, match.team1_db_name, match.team1_squad, match.team1_suggested_xi);
-                await autoFillTeam(2, match.team2_db_name, match.team2_squad, match.team2_suggested_xi);
-                
-                // Auto-select venue if we found a match
-                if (match.venue_db_id) {
-                    const venueSelect = document.getElementById('venue-select');
-                    venueSelect.value = match.venue_db_id;
-                    console.log(`Auto-selected venue: ${match.venue_db_name} (ID: ${match.venue_db_id})`);
-                }
-                
-                // Enable toss simulation for upcoming matches (it's more realistic)
-                document.getElementById('use-toss').checked = true;
-                
-            } else if (data.from_database && data.match) {
-                // No API squad, but we have recent lineups from our database!
+            if (data.from_database && data.match) {
+                // DATABASE FALLBACK: No API squad, using recent lineups from our database
                 const match = data.match;
                 
                 // Show match info with database info
@@ -565,6 +538,34 @@
                 }
                 
                 // Enable toss simulation
+                document.getElementById('use-toss').checked = true;
+                
+            } else if (data.success && data.match) {
+                // API SQUAD: Full squad data from Cricket Data API
+                const match = data.match;
+                
+                // Show match info
+                document.getElementById('t20-match-name').textContent = `${match.team1_db_name} vs ${match.team2_db_name}`;
+                document.getElementById('t20-match-date').textContent = match.date;
+                
+                const matched1 = match.team1_squad.filter(p => p.matched).length;
+                const matched2 = match.team2_squad.filter(p => p.matched).length;
+                document.getElementById('t20-team1-info').textContent = `${matched1}/${match.team1_squad.length} players`;
+                document.getElementById('t20-team2-info').textContent = `${matched2}/${match.team2_squad.length} players`;
+                document.getElementById('t20-match-info').style.display = 'block';
+                
+                // Auto-fill teams
+                await autoFillTeam(1, match.team1_db_name, match.team1_squad, match.team1_suggested_xi);
+                await autoFillTeam(2, match.team2_db_name, match.team2_squad, match.team2_suggested_xi);
+                
+                // Auto-select venue if we found a match
+                if (match.venue_db_id) {
+                    const venueSelect = document.getElementById('venue-select');
+                    venueSelect.value = match.venue_db_id;
+                    console.log(`Auto-selected venue: ${match.venue_db_name} (ID: ${match.venue_db_id})`);
+                }
+                
+                // Enable toss simulation for upcoming matches
                 document.getElementById('use-toss').checked = true;
                 
             } else {
