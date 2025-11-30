@@ -5,52 +5,32 @@
 {% block content %}
 <div class="hero" style="padding: 2rem;">
     <h1>Match Prediction</h1>
-    <p>Select teams and players to simulate T20 matches</p>
-    
-    <!-- Gender Toggle -->
-    <div style="margin-top: 1rem; display: flex; justify-content: center; gap: 1rem;">
-        <button id="gender-male" class="btn btn-primary" onclick="setGender('male')" style="min-width: 150px;">
-            🏏 Men's T20
-        </button>
-        <button id="gender-female" class="btn" onclick="setGender('female')" style="min-width: 150px;">
-            🏏 Women's T20
-        </button>
-    </div>
+    <p>Select an upcoming match or manually configure teams to simulate</p>
 </div>
 
-<!-- T20 Match Loader (Works for all genders) -->
-<div id="t20-loader" class="card" style="margin-bottom: 1.5rem; border: 2px solid var(--accent-primary);">
-    <h2 class="card-title" style="display: flex; align-items: center; gap: 0.5rem;">
-        <span style="font-size: 1.5rem;">🏏</span> <span id="loader-title">Load T20 Match</span>
-    </h2>
-    <p style="color: var(--text-secondary); margin-bottom: 1rem;">
-        Select a competition and upcoming match to auto-fill both teams with their most recent lineups.
-    </p>
-    
-    <div class="grid grid-3" style="gap: 1rem; align-items: end;">
-        <div class="form-group" style="margin: 0;">
-            <label>Competition / Series</label>
-            <select id="series-select" onchange="loadSeriesFixtures()" style="width: 100%;">
-                <option value="">-- Select Competition --</option>
-            </select>
-        </div>
-        <div class="form-group" style="margin: 0;">
-            <label>Upcoming Fixtures</label>
-            <select id="fixture-select" style="width: 100%;">
-                <option value="">-- Select a Match --</option>
-            </select>
-        </div>
-        <div class="form-group" style="margin: 0;">
-            <label>&nbsp;</label>
-            <button class="btn btn-primary" onclick="loadT20Match()" style="width: 100%;">
-                Load Squads
-            </button>
-        </div>
+<!-- Upcoming Matches (Next 24 Hours) -->
+<div id="upcoming-matches" class="card" style="margin-bottom: 1.5rem; border: 2px solid var(--accent-primary);">
+    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 1rem;">
+        <h2 class="card-title" style="margin: 0; display: flex; align-items: center; gap: 0.5rem;">
+            <span style="font-size: 1.5rem;">🏏</span> Upcoming Matches (Next 24 Hours)
+        </h2>
+        <button class="btn" onclick="loadUpcomingMatches()" style="padding: 0.5rem 1rem;">
+            🔄 Refresh
+        </button>
     </div>
     
-    <div id="t20-loading" style="display: none; text-align: center; padding: 1rem;">
+    <div id="matches-loading" style="text-align: center; padding: 2rem;">
         <div class="spinner" style="margin: 0 auto;"></div>
-        <p style="color: var(--text-secondary); margin-top: 0.5rem;">Loading squads from API...</p>
+        <p style="color: var(--text-secondary); margin-top: 0.5rem;">Loading upcoming matches...</p>
+    </div>
+    
+    <div id="matches-list" style="display: none;">
+        <!-- Matches will be populated here by JavaScript -->
+    </div>
+    
+    <div id="matches-empty" style="display: none; text-align: center; padding: 2rem; color: var(--text-secondary);">
+        <p>No matches scheduled in the next 24 hours.</p>
+        <p style="font-size: 0.875rem; margin-top: 0.5rem;">You can still manually select teams below.</p>
     </div>
     
     <div id="t20-match-info" style="display: none; margin-top: 1rem; padding: 1rem; background: var(--bg-tertiary); border-radius: 8px;">
@@ -62,6 +42,12 @@
             <span id="t20-team1-info"></span> vs <span id="t20-team2-info"></span>
         </div>
     </div>
+</div>
+
+<!-- Hidden elements for match loading -->
+<div id="t20-loading" style="display: none; text-align: center; padding: 1rem;">
+    <div class="spinner" style="margin: 0 auto;"></div>
+    <p style="color: var(--text-secondary); margin-top: 0.5rem;">Loading match data...</p>
 </div>
 
 <div class="grid grid-2">
@@ -384,121 +370,88 @@
     document.addEventListener('DOMContentLoaded', () => {
         loadTeams();
         loadVenues();
-        loadT20Series();  // Load series for match loader
+        loadUpcomingMatches();  // Load upcoming matches for next 24h
     });
     
-    function setGender(gender) {
-        currentGender = gender;
+    // Upcoming Matches Functions
+    async function loadUpcomingMatches() {
+        const loadingEl = document.getElementById('matches-loading');
+        const listEl = document.getElementById('matches-list');
+        const emptyEl = document.getElementById('matches-empty');
         
-        // Update button styles
-        document.getElementById('gender-male').className = gender === 'male' ? 'btn btn-primary' : 'btn';
-        document.getElementById('gender-female').className = gender === 'female' ? 'btn btn-primary' : 'btn';
+        loadingEl.style.display = 'block';
+        listEl.style.display = 'none';
+        emptyEl.style.display = 'none';
         
-        // Update loader title
-        const genderText = gender === 'male' ? "Men's" : "Women's";
-        document.getElementById('loader-title').textContent = `Load ${genderText} T20 Match`;
-        
-        // Reload series for the new gender
-        loadT20Series();
-        
-        // Clear fixture select
-        document.getElementById('fixture-select').innerHTML = '<option value="">-- Select a Match --</option>';
-        document.getElementById('t20-match-info').style.display = 'none';
-        
-        // Reload teams and venues for new gender
-        loadTeams();
-        loadVenues();
-        
-        // Clear player selections
-        ['team1-batters', 'team1-bowlers', 'team2-batters', 'team2-bowlers'].forEach(id => {
-            document.getElementById(id).innerHTML = '';
-        });
-        ['team1-select', 'team2-select'].forEach(id => {
-            document.getElementById(id).value = '';
-        });
-        
-        // Update subtitle
-        document.querySelector('.hero p').textContent = `Select teams and players to simulate ${genderText} T20 matches`;
-    }
-    
-    // T20 Series and Match Loading Functions
-    async function loadT20Series() {
         try {
-            const response = await fetch(`/api/t20/series?gender=${currentGender}`);
+            const response = await fetch('/api/t20/upcoming');
             const data = await response.json();
             
-            if (data.success) {
-                const select = document.getElementById('series-select');
-                select.innerHTML = '<option value="">-- Select Competition --</option>';
+            loadingEl.style.display = 'none';
+            
+            if (data.success && data.matches_by_series.length > 0) {
+                listEl.innerHTML = '';
                 
-                data.series.forEach(series => {
-                    const opt = document.createElement('option');
-                    opt.value = series.id;
-                    opt.dataset.name = series.name;
-                    // Show series name with T20 count
-                    opt.textContent = `${series.name} (${series.t20_count} matches)`;
-                    select.appendChild(opt);
+                data.matches_by_series.forEach(series => {
+                    const genderBadge = series.gender === 'female' ? 
+                        '<span style="background: #e91e63; color: white; padding: 2px 6px; border-radius: 4px; font-size: 0.7rem; margin-left: 0.5rem;">W</span>' :
+                        '<span style="background: #2196f3; color: white; padding: 2px 6px; border-radius: 4px; font-size: 0.7rem; margin-left: 0.5rem;">M</span>';
+                    
+                    const seriesHtml = `
+                        <div style="margin-bottom: 1.5rem;">
+                            <h3 style="font-size: 1rem; color: var(--accent-primary); margin-bottom: 0.5rem; display: flex; align-items: center;">
+                                ${series.series_name} ${genderBadge}
+                            </h3>
+                            <div style="display: flex; flex-direction: column; gap: 0.5rem;">
+                                ${series.matches.map(m => `
+                                    <div style="display: flex; justify-content: space-between; align-items: center; padding: 0.75rem 1rem; background: var(--bg-tertiary); border-radius: 8px; border-left: 3px solid ${series.gender === 'female' ? '#e91e63' : '#2196f3'};">
+                                        <div style="flex: 1;">
+                                            <div style="font-weight: 500;">${m.team1} vs ${m.team2}</div>
+                                            <div style="font-size: 0.8rem; color: var(--text-muted);">
+                                                ${m.start_time} • ${m.venue}
+                                                ${m.has_squad ? '<span style="color: var(--accent-primary);"> ✓ Squad</span>' : ''}
+                                            </div>
+                                        </div>
+                                        <button class="btn btn-primary" style="padding: 0.4rem 1rem; font-size: 0.85rem;" 
+                                                onclick="selectMatch('${m.match_id}', '${series.gender}')">
+                                            Select
+                                        </button>
+                                    </div>
+                                `).join('')}
+                            </div>
+                        </div>
+                    `;
+                    listEl.innerHTML += seriesHtml;
                 });
                 
-                console.log(`Loaded ${data.series.length} ${currentGender} T20 series`);
+                listEl.style.display = 'block';
+                console.log(`Loaded ${data.total_matches} upcoming matches`);
+            } else {
+                emptyEl.style.display = 'block';
             }
         } catch (error) {
-            console.error('Error loading T20 series:', error);
+            console.error('Error loading upcoming matches:', error);
+            loadingEl.style.display = 'none';
+            emptyEl.innerHTML = '<p style="color: var(--danger);">Error loading matches. Please try again.</p>';
+            emptyEl.style.display = 'block';
         }
     }
     
-    async function loadSeriesFixtures() {
-        const seriesSelect = document.getElementById('series-select');
-        const selectedOption = seriesSelect.selectedOptions[0];
+    async function selectMatch(matchId, gender) {
+        // Set the gender for correct model selection
+        currentGender = gender;
         
-        currentSeriesId = seriesSelect.value;
-        currentSeriesName = selectedOption?.dataset?.name || '';
+        // Load teams and venues for this gender
+        await loadTeams();
+        await loadVenues();
         
-        if (!currentSeriesId) {
-            document.getElementById('fixture-select').innerHTML = '<option value="">-- Select a Match --</option>';
-            return;
-        }
-        
-        try {
-            const response = await fetch(`/api/t20/series/${currentSeriesId}/fixtures?days_ahead=14&series_name=${encodeURIComponent(currentSeriesName)}`);
-            const data = await response.json();
-            
-            if (data.success) {
-                const select = document.getElementById('fixture-select');
-                select.innerHTML = '<option value="">-- Select a Match --</option>';
-                
-                if (data.fixtures.length === 0) {
-                    const opt = document.createElement('option');
-                    opt.value = '';
-                    opt.textContent = 'No upcoming matches in next 14 days';
-                    opt.disabled = true;
-                    select.appendChild(opt);
-                } else {
-                    data.fixtures.forEach(fixture => {
-                        const opt = document.createElement('option');
-                        opt.value = fixture.id;
-                        // Format: date - team1 vs team2
-                        const team1Short = fixture.team1.replace(' Women', '').replace(' Men', '');
-                        const team2Short = fixture.team2.replace(' Women', '').replace(' Men', '');
-                        opt.textContent = `${fixture.date}: ${team1Short} vs ${team2Short}`;
-                        if (fixture.has_squad) {
-                            opt.textContent += ' ✓';
-                        }
-                        select.appendChild(opt);
-                    });
-                }
-                
-                console.log(`Loaded ${data.fixtures.length} fixtures for ${currentSeriesName}`);
-            }
-        } catch (error) {
-            console.error('Error loading series fixtures:', error);
-        }
+        // Load the match
+        await loadT20MatchById(matchId);
     }
     
-    async function loadT20Match() {
-        const matchId = document.getElementById('fixture-select').value;
+    async function loadT20MatchById(matchId) {
         if (!matchId) {
-            alert('Please select a match first');
+            alert('Invalid match ID');
             return;
         }
         
@@ -1131,3 +1084,4 @@
     }
 </script>
 {% endblock %}
+

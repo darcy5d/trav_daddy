@@ -540,6 +540,67 @@ class CricketDataClient:
         
         logger.info(f"Found {len(all_matches)} total upcoming T20 matches")
         return all_matches
+    
+    def get_upcoming_matches_24h(self) -> Dict[str, List[T20Match]]:
+        """
+        Get all T20 matches in the next 24 hours, grouped by series.
+        
+        Returns:
+            Dict mapping series_name to list of T20Match objects
+            Each match includes gender for model selection
+        """
+        from datetime import timezone
+        
+        now = datetime.now(timezone.utc)
+        cutoff = now + timedelta(hours=24)
+        
+        # Get all active series (both genders)
+        all_series = self.get_t20_series(gender=None)
+        
+        matches_by_series = {}
+        
+        for series in all_series:
+            try:
+                # Get matches for this series
+                matches = self.get_series_matches(series.id, series.name)
+                
+                # Filter to matches within 24 hours
+                upcoming_24h = []
+                for m in matches:
+                    if not m.is_upcoming:
+                        continue
+                    
+                    # Parse the datetime
+                    try:
+                        if m.date_time_gmt:
+                            match_dt = datetime.fromisoformat(m.date_time_gmt.replace('Z', '+00:00'))
+                        else:
+                            # Fallback to date only (assume start of day)
+                            match_dt = datetime.strptime(m.date, '%Y-%m-%d').replace(tzinfo=timezone.utc)
+                        
+                        # Check if within 24 hours
+                        if now <= match_dt <= cutoff:
+                            upcoming_24h.append(m)
+                    except (ValueError, TypeError) as e:
+                        # If date parsing fails but it's today, include it
+                        if m.date == now.strftime('%Y-%m-%d'):
+                            upcoming_24h.append(m)
+                
+                if upcoming_24h:
+                    # Sort by time
+                    upcoming_24h.sort(key=lambda x: x.date_time_gmt or x.date)
+                    matches_by_series[series.name] = {
+                        'gender': series.gender,
+                        'series_id': series.id,
+                        'matches': upcoming_24h
+                    }
+                    
+            except Exception as e:
+                logger.warning(f"Failed to fetch matches for {series.name}: {e}")
+        
+        total = sum(len(s['matches']) for s in matches_by_series.values())
+        logger.info(f"Found {total} matches in next 24h across {len(matches_by_series)} series")
+        return matches_by_series
 
 
 # Convenience function

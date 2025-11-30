@@ -960,6 +960,71 @@ def get_series_fixtures(series_id):
         return jsonify({'success': False, 'error': str(e)}), 500
 
 
+@app.route('/api/t20/upcoming', methods=['GET'])
+def get_upcoming_matches():
+    """
+    Get all T20 matches in the next 24 hours, grouped by series.
+    
+    Returns matches from all competitions (men's and women's) with gender indicators.
+    """
+    try:
+        client = get_cricket_api_client()
+        matches_by_series = client.get_upcoming_matches_24h()
+        
+        # Format for frontend
+        result = []
+        total_matches = 0
+        
+        for series_name, series_data in matches_by_series.items():
+            matches_list = []
+            for m in series_data['matches']:
+                # Format start time from dateTimeGMT
+                start_time = ''
+                if m.date_time_gmt:
+                    try:
+                        from datetime import datetime
+                        dt = datetime.fromisoformat(m.date_time_gmt.replace('Z', '+00:00'))
+                        start_time = dt.strftime('%H:%M GMT')
+                    except:
+                        start_time = m.status
+                else:
+                    start_time = m.status
+                
+                matches_list.append({
+                    'match_id': m.id,
+                    'team1': m.team1,
+                    'team2': m.team2,
+                    'start_time': start_time,
+                    'venue': m.venue or 'TBD',
+                    'date': m.date,
+                    'status': m.status,
+                    'has_squad': m.has_squad
+                })
+                total_matches += 1
+            
+            result.append({
+                'series_name': series_name,
+                'series_id': series_data['series_id'],
+                'gender': series_data['gender'],
+                'matches': matches_list
+            })
+        
+        # Sort by series name
+        result.sort(key=lambda x: x['series_name'])
+        
+        return jsonify({
+            'success': True,
+            'matches_by_series': result,
+            'total_matches': total_matches
+        })
+    
+    except Exception as e:
+        logger.error(f"Error fetching upcoming matches: {e}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
 @app.route('/api/t20/match/<match_id>', methods=['GET'])
 def get_t20_match(match_id):
     """
