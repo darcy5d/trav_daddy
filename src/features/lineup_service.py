@@ -290,50 +290,43 @@ class LineupService:
         
         Args:
             match_id: API match ID
-            series_id: Optional series ID to search within
+            series_id: Optional series ID to search within (not currently used)
             
         Returns:
             MatchFixture with all squad data
         """
-        # Try to find the match - first in WBBL (legacy), then via match_info API
-        match = None
-        gender = 'female'  # Default
-        series_name = ''
+        # Get match info directly from API (works for any match/competition)
+        match_info = self.api_client.get_match_info(match_id)
         
-        # Try WBBL first (for backward compatibility)
-        wbbl_matches = self.api_client.get_wbbl_matches()
-        match = next((m for m in wbbl_matches if m.id == match_id), None)
+        if not match_info:
+            logger.warning(f"Match not found via API: {match_id}")
+            return None
         
-        if match:
-            gender = 'female'
-            series_name = 'WBBL'
-        else:
-            # Try to get match info directly from API
-            match_info = self.api_client.get_match_info(match_id)
-            if match_info:
-                # Create a temporary match object from match_info
-                teams = match_info.get('teams', [])
-                team1 = teams[0] if teams else ''
-                team2 = teams[1] if len(teams) > 1 else ''
-                
-                # Detect gender from team names
-                gender = detect_gender(f"{team1} {team2}")
-                series_name = match_info.get('series', '')
-                
-                # Create a WBBLMatch-like object for compatibility
-                class TempMatch:
-                    def __init__(self, data):
-                        self.id = data.get('id', match_id)
-                        self.name = data.get('name', '')
-                        self.date = data.get('date', '')
-                        self.status = data.get('status', '')
-                        self.team1 = team1
-                        self.team2 = team2
-                        self.venue = data.get('venue')
-                        self.has_squad = True
-                        self.is_upcoming = 'won' not in self.status.lower()
-                
-                match = TempMatch(match_info)
+        # Extract team names and detect gender
+        teams = match_info.get('teams', [])
+        team1 = teams[0] if teams else ''
+        team2 = teams[1] if len(teams) > 1 else ''
+        
+        # Detect gender from team names OR series name
+        series_name = match_info.get('series', '')
+        gender = detect_gender(f"{team1} {team2} {series_name}")
+        
+        logger.info(f"Loading match: {team1} vs {team2} (gender: {gender}, series: {series_name})")
+        
+        # Create a match object for compatibility
+        class TempMatch:
+            def __init__(self, data):
+                self.id = data.get('id', match_id)
+                self.name = data.get('name', '')
+                self.date = data.get('date', '')
+                self.status = data.get('status', '')
+                self.team1 = team1
+                self.team2 = team2
+                self.venue = data.get('venue')
+                self.has_squad = True
+                self.is_upcoming = 'won' not in self.status.lower()
+        
+        match = TempMatch(match_info)
         
         if not match:
             logger.warning(f"Match not found: {match_id}")
