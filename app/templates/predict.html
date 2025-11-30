@@ -539,21 +539,33 @@
                 // Enable toss simulation for upcoming matches (it's more realistic)
                 document.getElementById('use-toss').checked = true;
                 
-            } else if (data.error === 'no_squad') {
-                // Squad data not available - help user select teams manually
-                const info = data.match_info;
-                const msg = `⚠️ Squad data not available for this match.\n\n` +
-                    `Teams: ${info.team1_name} vs ${info.team2_name}\n` +
-                    `Venue: ${info.venue}\n\n` +
-                    `Please select the teams manually from the dropdowns below.`;
-                alert(msg);
+            } else if (data.from_database && data.match) {
+                // No API squad, but we have recent lineups from our database!
+                const match = data.match;
                 
-                // Show match info with what we know
-                document.getElementById('t20-match-name').textContent = `${info.team1_name} vs ${info.team2_name}`;
-                document.getElementById('t20-match-date').textContent = info.date;
-                document.getElementById('t20-team1-info').textContent = 'Select manually';
-                document.getElementById('t20-team2-info').textContent = 'Select manually';
+                // Show match info with database info
+                document.getElementById('t20-match-name').textContent = `${match.team1_db_name} vs ${match.team2_db_name}`;
+                document.getElementById('t20-match-date').textContent = match.date;
+                document.getElementById('t20-team1-info').textContent = `${match.team1_players.length} from last match (${match.team1_last_match || 'N/A'})`;
+                document.getElementById('t20-team2-info').textContent = `${match.team2_players.length} from last match (${match.team2_last_match || 'N/A'})`;
                 document.getElementById('t20-match-info').style.display = 'block';
+                
+                // Show info message
+                console.log(`Using database lineups: ${match.team1_db_name} (${match.team1_recent_xi.length} players), ${match.team2_db_name} (${match.team2_recent_xi.length} players)`);
+                
+                // Auto-fill teams using database recent XI
+                await autoFillTeamFromDB(1, match.team1_db_name, match.team1_recent_xi);
+                await autoFillTeamFromDB(2, match.team2_db_name, match.team2_recent_xi);
+                
+                // Auto-select venue if found
+                if (match.venue_db_id) {
+                    const venueSelect = document.getElementById('venue-select');
+                    venueSelect.value = match.venue_db_id;
+                    console.log(`Auto-selected venue: ${match.venue_db_name} (ID: ${match.venue_db_id})`);
+                }
+                
+                // Enable toss simulation
+                document.getElementById('use-toss').checked = true;
                 
             } else {
                 alert('Error loading match: ' + (data.error || 'Unknown error'));
@@ -574,6 +586,67 @@
     async function loadWBBLMatch() {
         // Redirect to the new T20 loader
         console.log('Legacy loadWBBLMatch called - use loadT20Match instead');
+    }
+    
+    async function autoFillTeamFromDB(teamNum, teamName, recentXI) {
+        // Find and select the team by name
+        const teamSelect = document.getElementById(`team${teamNum}-select`);
+        let teamFound = false;
+        
+        for (let opt of teamSelect.options) {
+            if (opt.textContent === teamName) {
+                teamSelect.value = opt.value;
+                teamFound = true;
+                break;
+            }
+        }
+        
+        if (!teamFound) {
+            console.warn(`Team not found in dropdown: ${teamName}`);
+            return;
+        }
+        
+        // Load players for this team
+        await loadPlayers(teamNum);
+        
+        // Small delay to ensure DOM is updated
+        await new Promise(resolve => setTimeout(resolve, 100));
+        
+        // Select the recent XI players
+        const battersSelect = document.getElementById(`team${teamNum}-batters`);
+        const bowlersSelect = document.getElementById(`team${teamNum}-bowlers`);
+        
+        // Clear current selections
+        for (let opt of battersSelect.options) opt.selected = false;
+        for (let opt of bowlersSelect.options) opt.selected = false;
+        
+        let battersSelected = 0;
+        let bowlersSelected = 0;
+        
+        // Select players from recent XI (first in batters, then in bowlers)
+        for (let playerId of recentXI) {
+            // Try batters first
+            for (let opt of battersSelect.options) {
+                if (parseInt(opt.value) === playerId && !opt.selected) {
+                    opt.selected = true;
+                    battersSelected++;
+                    break;
+                }
+            }
+            // If not in batters (or not selected), try bowlers
+            let foundInBatters = Array.from(battersSelect.options).some(opt => parseInt(opt.value) === playerId && opt.selected);
+            if (!foundInBatters) {
+                for (let opt of bowlersSelect.options) {
+                    if (parseInt(opt.value) === playerId && !opt.selected) {
+                        opt.selected = true;
+                        bowlersSelected++;
+                        break;
+                    }
+                }
+            }
+        }
+        
+        console.log(`Team ${teamNum} (${teamName}): Selected ${battersSelected} batters, ${bowlersSelected} bowlers from recent XI`);
     }
     
     async function autoFillTeam(teamNum, teamName, squad, suggestedXI) {

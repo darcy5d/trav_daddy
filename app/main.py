@@ -986,25 +986,76 @@ def get_t20_match(match_id):
         
         # Check if squad data is available
         if not match_info.get('hasSquad', False):
-            # No squad data available - return match info so frontend can show helpful message
+            # No squad data available - try to get recent lineups from our database
             teams = match_info.get('teams', [])
             team1 = teams[0] if teams else ''
             team2 = teams[1] if len(teams) > 1 else ''
-            gender = detect_gender(f"{team1} {team2}")
+            series_name = match_info.get('series', '')
+            gender = detect_gender(f"{team1} {team2} {series_name}")
+            
+            # Try to find teams and their recent lineups in our database
+            service = get_lineup_service()
+            team1_db = service._get_db_team_name(team1)
+            team2_db = service._get_db_team_name(team2)
+            
+            team1_recent_xi, team1_last_match = service.get_recent_lineup(team1_db, gender=gender)
+            team2_recent_xi, team2_last_match = service.get_recent_lineup(team2_db, gender=gender)
+            
+            # Get player details for the recent XI
+            def get_player_details(player_ids, gender):
+                if not player_ids:
+                    return []
+                conn = get_connection()
+                cursor = conn.cursor()
+                placeholders = ','.join('?' * len(player_ids))
+                elo_col_bat = f'batting_elo_t20_{gender}'
+                elo_col_bowl = f'bowling_elo_t20_{gender}'
+                cursor.execute(f"""
+                    SELECT p.player_id, p.name,
+                           COALESCE(e.{elo_col_bat}, 1500) as batting_elo,
+                           COALESCE(e.{elo_col_bowl}, 1500) as bowling_elo
+                    FROM players p
+                    LEFT JOIN player_current_elo e ON p.player_id = e.player_id
+                    WHERE p.player_id IN ({placeholders})
+                """, player_ids)
+                players = [dict(row) for row in cursor.fetchall()]
+                conn.close()
+                # Sort by original order
+                id_to_player = {p['player_id']: p for p in players}
+                return [id_to_player[pid] for pid in player_ids if pid in id_to_player]
+            
+            team1_players = get_player_details(team1_recent_xi, gender)
+            team2_players = get_player_details(team2_recent_xi, gender)
+            
+            # Match venue
+            venue_db_id, venue_db_name = service.find_venue_in_db(match_info.get('venue', ''), gender=gender)
+            
+            logger.info(f"No API squad - using DB recent XI: {team1_db} ({len(team1_recent_xi)} players), {team2_db} ({len(team2_recent_xi)} players)")
             
             return jsonify({
-                'success': False,
-                'error': 'no_squad',
-                'message': f'Squad data not available for this match. You can manually select players for {team1} and {team2}.',
-                'match_info': {
+                'success': True,  # We can still proceed with DB data!
+                'from_database': True,
+                'message': f'Squad data not available from API. Using most recent lineups from database.',
+                'match': {
+                    'match_id': match_id,
                     'team1_name': team1,
                     'team2_name': team2,
+                    'team1_db_name': team1_db,
+                    'team2_db_name': team2_db,
                     'venue': match_info.get('venue', ''),
+                    'venue_db_id': venue_db_id,
+                    'venue_db_name': venue_db_name,
                     'date': match_info.get('date', ''),
                     'gender': gender,
-                    'series': match_info.get('series', '')
+                    'series': series_name,
+                    'team1_recent_xi': team1_recent_xi,
+                    'team2_recent_xi': team2_recent_xi,
+                    'team1_last_match': team1_last_match,
+                    'team2_last_match': team2_last_match,
+                    'team1_players': team1_players,
+                    'team2_players': team2_players
                 }
-            }), 200  # Return 200 so frontend can handle gracefully
+            }), 200
         
         service = get_lineup_service()
         match = service.get_match_with_squads(match_id)
