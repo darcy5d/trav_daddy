@@ -545,7 +545,8 @@ class CricketDataClient:
         """
         Get all T20 matches in the next 24 hours, grouped by series.
         
-        Uses /currentMatches API for efficiency (single call), then groups by series.
+        Uses /currentMatches API for live/in-progress matches, supplemented with
+        series-specific lookups for major leagues (WBBL, BBL) to catch scheduled matches.
         
         Returns:
             Dict mapping series_name to list of T20Match objects
@@ -554,10 +555,15 @@ class CricketDataClient:
         from datetime import timezone
         
         now = datetime.now(timezone.utc)
+        cutoff = now + timedelta(hours=24)
         today_str = now.strftime('%Y-%m-%d')
         tomorrow_str = (now + timedelta(days=1)).strftime('%Y-%m-%d')
         
-        # Use currentMatches endpoint - much faster (single API call)
+        # Track match IDs to avoid duplicates
+        seen_match_ids = set()
+        matches_by_series = {}
+        
+        # PART 1: Use currentMatches for live/in-progress matches
         data = self._request('currentMatches', {'type': 't20'})
         
         if 'data' not in data:
@@ -567,6 +573,12 @@ class CricketDataClient:
         matches_by_series = {}
         
         for match_data in data['data']:
+            # IMPORTANT: Filter by matchType - API doesn't always respect type=t20 param
+            match_type = match_data.get('matchType', '').lower()
+            if match_type != 't20':
+                logger.debug(f"Skipping non-T20 match: {match_data.get('name')} (type: {match_type})")
+                continue
+            
             # Only include matches from today or tomorrow
             match_date = match_data.get('date', '')
             if match_date not in [today_str, tomorrow_str]:
@@ -577,6 +589,7 @@ class CricketDataClient:
             
             # Skip finished matches
             if not match.is_upcoming:
+                logger.debug(f"Skipping finished match: {match.name}")
                 continue
             
             # Get series name (or default)
@@ -596,6 +609,9 @@ class CricketDataClient:
             else:
                 start_time = match.status or 'TBD'
             
+            # Track to avoid duplicates
+            seen_match_ids.add(match.id)
+            
             # Group by series
             if series_name not in matches_by_series:
                 matches_by_series[series_name] = {
@@ -605,6 +621,71 @@ class CricketDataClient:
                 }
             
             matches_by_series[series_name]['matches'].append(match)
+        
+        # PART 2: Supplement with major leagues to catch scheduled matches not in currentMatches
+        # These leagues often have tomorrow's matches scheduled but not yet in currentMatches
+        major_leagues = [
+            ('Womens Big Bash', 'WBBL 2025', 'female'),
+            ('Big Bash League', 'BBL 2025-26', 'male'),
+        ]
+        
+        for search_term, display_name, gender in major_leagues:
+            try:
+                # Find the series
+                series_data = self._request('series', {'search': search_term})
+                if 'data' not in series_data or not series_data['data']:
+                    continue
+                
+                # Get the most recent series (first result)
+                series = series_data['data'][0]
+                series_id = series.get('id')
+                
+                # Get matches for this series
+                matches_data = self._request('series_info', {'id': series_id})
+                if 'data' not in matches_data:
+                    continue
+                
+                match_list = matches_data['data'].get('matchList', [])
+                
+                for m in match_list:
+                    match_id = m.get('id')
+                    if match_id in seen_match_ids:
+                        continue  # Already have this match
+                    
+                    match_date = m.get('date', '')
+                    if match_date not in [today_str, tomorrow_str]:
+                        continue
+                    
+                    # Check if within 24 hours
+                    date_time_gmt = m.get('dateTimeGMT')
+                    if date_time_gmt:
+                        try:
+                            match_dt = datetime.fromisoformat(date_time_gmt.replace('Z', '+00:00'))
+                            if not (now <= match_dt <= cutoff):
+                                continue
+                        except:
+                            pass
+                    
+                    # Create match object
+                    match = T20Match.from_api(m, series_id=series_id, series_name=display_name)
+                    
+                    # Only include upcoming matches
+                    if not match.is_upcoming:
+                        continue
+                    
+                    seen_match_ids.add(match_id)
+                    
+                    if display_name not in matches_by_series:
+                        matches_by_series[display_name] = {
+                            'gender': gender,
+                            'series_id': series_id,
+                            'matches': []
+                        }
+                    
+                    matches_by_series[display_name]['matches'].append(match)
+                    
+            except Exception as e:
+                logger.warning(f"Failed to fetch {search_term} matches: {e}")
         
         # Sort matches within each series by time
         for series_data in matches_by_series.values():
