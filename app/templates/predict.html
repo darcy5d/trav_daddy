@@ -408,7 +408,9 @@
                                     let localTime = m.status || 'TBD';
                                     if (m.date_time_gmt) {
                                         try {
-                                            const dt = new Date(m.date_time_gmt);
+                                            // Append 'Z' to indicate UTC timezone for proper conversion
+                                            const utcString = m.date_time_gmt.endsWith('Z') ? m.date_time_gmt : m.date_time_gmt + 'Z';
+                                            const dt = new Date(utcString);
                                             localTime = dt.toLocaleTimeString('en-US', {
                                                 hour: '2-digit', 
                                                 minute: '2-digit', 
