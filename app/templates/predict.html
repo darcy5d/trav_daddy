@@ -539,6 +539,22 @@
                 // Enable toss simulation for upcoming matches (it's more realistic)
                 document.getElementById('use-toss').checked = true;
                 
+            } else if (data.error === 'no_squad') {
+                // Squad data not available - help user select teams manually
+                const info = data.match_info;
+                const msg = `⚠️ Squad data not available for this match.\n\n` +
+                    `Teams: ${info.team1_name} vs ${info.team2_name}\n` +
+                    `Venue: ${info.venue}\n\n` +
+                    `Please select the teams manually from the dropdowns below.`;
+                alert(msg);
+                
+                // Show match info with what we know
+                document.getElementById('t20-match-name').textContent = `${info.team1_name} vs ${info.team2_name}`;
+                document.getElementById('t20-match-date').textContent = info.date;
+                document.getElementById('t20-team1-info').textContent = 'Select manually';
+                document.getElementById('t20-team2-info').textContent = 'Select manually';
+                document.getElementById('t20-match-info').style.display = 'block';
+                
             } else {
                 alert('Error loading match: ' + (data.error || 'Unknown error'));
             }

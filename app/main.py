@@ -975,11 +975,42 @@ def get_t20_match(match_id):
         Match details with squad data and suggested XI
     """
     try:
+        from src.api.cricket_data_client import CricketDataClient, detect_gender
+        
+        # First check if match exists and has squad data
+        api_client = CricketDataClient()
+        match_info = api_client.get_match_info(match_id)
+        
+        if not match_info:
+            return jsonify({'success': False, 'error': 'Match not found in API'}), 404
+        
+        # Check if squad data is available
+        if not match_info.get('hasSquad', False):
+            # No squad data available - return match info so frontend can show helpful message
+            teams = match_info.get('teams', [])
+            team1 = teams[0] if teams else ''
+            team2 = teams[1] if len(teams) > 1 else ''
+            gender = detect_gender(f"{team1} {team2}")
+            
+            return jsonify({
+                'success': False,
+                'error': 'no_squad',
+                'message': f'Squad data not available for this match. You can manually select players for {team1} and {team2}.',
+                'match_info': {
+                    'team1_name': team1,
+                    'team2_name': team2,
+                    'venue': match_info.get('venue', ''),
+                    'date': match_info.get('date', ''),
+                    'gender': gender,
+                    'series': match_info.get('series', '')
+                }
+            }), 200  # Return 200 so frontend can handle gracefully
+        
         service = get_lineup_service()
         match = service.get_match_with_squads(match_id)
         
         if not match:
-            return jsonify({'success': False, 'error': 'Match not found'}), 404
+            return jsonify({'success': False, 'error': 'Failed to load match data'}), 500
         
         def player_to_dict(p):
             return {
