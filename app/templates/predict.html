@@ -404,18 +404,65 @@
                             </h3>
                             <div style="display: flex; flex-direction: column; gap: 0.5rem;">
                                 ${series.matches.map(m => {
-                                    // Convert UTC to local time
+                                    // Convert UTC to local time and format date
                                     let localTime = m.status || 'TBD';
+                                    let localDate = '';
+                                    let countdownHtml = '';
+                                    let matchTimestamp = 0;
+                                    
                                     if (m.date_time_gmt) {
                                         try {
-                                            // Append 'Z' to indicate UTC timezone for proper conversion
                                             const utcString = m.date_time_gmt.endsWith('Z') ? m.date_time_gmt : m.date_time_gmt + 'Z';
                                             const dt = new Date(utcString);
+                                            matchTimestamp = dt.getTime();
+                                            
+                                            // Format time
                                             localTime = dt.toLocaleTimeString('en-US', {
                                                 hour: '2-digit', 
                                                 minute: '2-digit', 
                                                 timeZoneName: 'short'
                                             });
+                                            
+                                            // Format date (e.g., "Mon 1st December")
+                                            const days = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+                                            const months = ['January', 'February', 'March', 'April', 'May', 'June', 
+                                                           'July', 'August', 'September', 'October', 'November', 'December'];
+                                            const dayOfWeek = days[dt.getDay()];
+                                            const dayNum = dt.getDate();
+                                            const month = months[dt.getMonth()];
+                                            
+                                            // Add ordinal suffix (1st, 2nd, 3rd, etc.)
+                                            const ordinal = (n) => {
+                                                const s = ['th', 'st', 'nd', 'rd'];
+                                                const v = n % 100;
+                                                return n + (s[(v - 20) % 10] || s[v] || s[0]);
+                                            };
+                                            localDate = dayOfWeek + ' ' + ordinal(dayNum) + ' ' + month;
+                                            
+                                            // Calculate countdown
+                                            const now = Date.now();
+                                            const diff = matchTimestamp - now;
+                                            const absDiff = Math.abs(diff);
+                                            const hours = Math.floor(absDiff / (1000 * 60 * 60));
+                                            const mins = Math.floor((absDiff % (1000 * 60 * 60)) / (1000 * 60));
+                                            
+                                            let countdownColor = '#4caf50'; // Green by default
+                                            let countdownText = '';
+                                            
+                                            if (diff < 0) {
+                                                // Match has started (negative countdown)
+                                                countdownColor = '#f44336'; // Red
+                                                countdownText = '-' + hours + 'h ' + mins + 'm';
+                                            } else if (diff < 60 * 60 * 1000) {
+                                                // Within 1 hour
+                                                countdownColor = '#ff9800'; // Orange
+                                                countdownText = hours + 'h ' + mins + 'm';
+                                            } else {
+                                                // More than 1 hour away
+                                                countdownText = hours + 'h ' + mins + 'm';
+                                            }
+                                            
+                                            countdownHtml = '<span class="countdown-timer" data-timestamp="' + matchTimestamp + '" style="font-weight: 600; color: ' + countdownColor + '; font-size: 0.85rem; min-width: 70px; text-align: right;">' + countdownText + '</span>';
                                         } catch (e) {
                                             console.error('Error parsing date:', e);
                                         }
@@ -425,14 +472,17 @@
                                         <div style="flex: 1;">
                                             <div style="font-weight: 500;">${m.team1} vs ${m.team2}</div>
                                             <div style="font-size: 0.8rem; color: var(--text-muted);">
-                                                ${localTime} • ${m.venue}
+                                                <span style="color: var(--text-secondary);">${localDate}</span>, ${localTime} • ${m.venue}
                                                 ${m.has_squad ? '<span style="color: var(--accent-primary);"> ✓ Squad</span>' : ''}
                                             </div>
                                         </div>
-                                        <button class="btn btn-primary" style="padding: 0.4rem 1rem; font-size: 0.85rem;" 
-                                                onclick="selectMatch('${m.match_id}', '${series.gender}')">
-                                            Select
-                                        </button>
+                                        <div style="display: flex; align-items: center; gap: 0.75rem;">
+                                            ${countdownHtml}
+                                            <button class="btn btn-primary" style="padding: 0.4rem 1rem; font-size: 0.85rem;" 
+                                                    onclick="selectMatch('${m.match_id}', '${series.gender}')">
+                                                Select
+                                            </button>
+                                        </div>
                                     </div>
                                 `}).join('')}
                             </div>
@@ -443,6 +493,9 @@
                 
                 listEl.style.display = 'block';
                 console.log(`Loaded ${data.total_matches} upcoming matches`);
+                
+                // Start the countdown timer updater
+                startCountdownUpdater();
             } else {
                 emptyEl.style.display = 'block';
             }
@@ -452,6 +505,56 @@
             emptyEl.innerHTML = '<p style="color: var(--danger);">Error loading matches. Please try again.</p>';
             emptyEl.style.display = 'block';
         }
+    }
+    
+    // Countdown timer updater
+    let countdownInterval = null;
+    
+    function startCountdownUpdater() {
+        // Clear any existing interval
+        if (countdownInterval) {
+            clearInterval(countdownInterval);
+        }
+        
+        // Update immediately
+        updateCountdowns();
+        
+        // Then update every 30 seconds
+        countdownInterval = setInterval(updateCountdowns, 30000);
+    }
+    
+    function updateCountdowns() {
+        const timers = document.querySelectorAll('.countdown-timer');
+        const now = Date.now();
+        
+        timers.forEach(timer => {
+            const timestamp = parseInt(timer.dataset.timestamp);
+            if (!timestamp) return;
+            
+            const diff = timestamp - now;
+            const absDiff = Math.abs(diff);
+            const hours = Math.floor(absDiff / (1000 * 60 * 60));
+            const mins = Math.floor((absDiff % (1000 * 60 * 60)) / (1000 * 60));
+            
+            let color = '#4caf50'; // Green
+            let text = '';
+            
+            if (diff < 0) {
+                // Match has started (negative countdown)
+                color = '#f44336'; // Red
+                text = '-' + hours + 'h ' + mins + 'm';
+            } else if (diff < 60 * 60 * 1000) {
+                // Within 1 hour
+                color = '#ff9800'; // Orange
+                text = hours + 'h ' + mins + 'm';
+            } else {
+                // More than 1 hour away
+                text = hours + 'h ' + mins + 'm';
+            }
+            
+            timer.style.color = color;
+            timer.textContent = text;
+        });
     }
     
     async function selectMatch(matchId, gender) {
