@@ -614,6 +614,23 @@ class VectorizedNNSimulator:
             batter_ids = deduped
             logger.info(f"Deduplicated to {len(batter_ids)} batters: {batter_ids}")
         
+        # VALIDATION: Check for duplicate bowler IDs (each bowler appears only once)
+        unique_bowler_ids = set(bowler_ids)
+        if len(unique_bowler_ids) != len(bowler_ids):
+            from collections import Counter
+            counts = Counter(bowler_ids)
+            duplicates = {pid: count for pid, count in counts.items() if count > 1}
+            logger.warning(f"DUPLICATE BOWLER IDS DETECTED: {duplicates}")
+            # Deduplicate, keeping order
+            seen = set()
+            deduped = []
+            for pid in bowler_ids:
+                if pid not in seen:
+                    deduped.append(pid)
+                    seen.add(pid)
+            bowler_ids = deduped
+            logger.info(f"Deduplicated to {len(bowler_ids)} bowlers: {bowler_ids}")
+        
         # Handle fewer than 11 batters (shouldn't happen, but be resilient)
         if len(batter_ids) < 11:
             logger.warning(f"Only {len(batter_ids)} batters provided, expected 11")

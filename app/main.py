@@ -313,14 +313,27 @@ def simulate_match():
         
         team1_batters = build_batting_order(team1_batters_raw, team1_bowlers_raw)
         team2_batters = build_batting_order(team2_batters_raw, team2_bowlers_raw)
-        team1_bowlers = team1_bowlers_raw[:5]
-        team2_bowlers = team2_bowlers_raw[:5]
         
-        # Ensure minimum bowlers
-        while len(team1_bowlers) < 5 and team1_bowlers:
-            team1_bowlers.append(team1_bowlers[-1])
-        while len(team2_bowlers) < 5 and team2_bowlers:
-            team2_bowlers.append(team2_bowlers[-1])
+        # Get unique bowlers (no duplicates allowed - each bowler can only bowl once)
+        team1_bowlers = list(dict.fromkeys(team1_bowlers_raw[:5]))  # Dedupe, keep order
+        team2_bowlers = list(dict.fromkeys(team2_bowlers_raw[:5]))
+        
+        # If < 5 bowlers, add part-timers from batters (realistic cricket strategy)
+        # Part-timers are batters who aren't already in the bowling list
+        def fill_with_parttimers(bowlers, batters, min_bowlers=5):
+            if len(bowlers) >= min_bowlers:
+                return bowlers
+            bowler_set = set(bowlers)
+            for batter_id in batters:
+                if batter_id not in bowler_set:
+                    bowlers.append(batter_id)
+                    bowler_set.add(batter_id)
+                    if len(bowlers) >= min_bowlers:
+                        break
+            return bowlers
+        
+        team1_bowlers = fill_with_parttimers(team1_bowlers, team1_batters_raw)
+        team2_bowlers = fill_with_parttimers(team2_bowlers, team2_batters_raw)
         
         # Get toss field probability from historical data
         toss_field_prob = 0.65  # Default T20 field preference
@@ -482,15 +495,25 @@ def simulate_match_stream():
     team1_batting_order = build_batting_order(team1_batters_raw, team1_bowlers_raw)
     team2_batting_order = build_batting_order(team2_batters_raw, team2_bowlers_raw)
     
-    # Bowlers are the ones who bowl (5 players)
-    team1_bowlers = team1_bowlers_raw[:5]
-    team2_bowlers = team2_bowlers_raw[:5]
+    # Get unique bowlers (no duplicates allowed - each bowler can only bowl once)
+    team1_bowlers = list(dict.fromkeys(team1_bowlers_raw[:5]))  # Dedupe, keep order
+    team2_bowlers = list(dict.fromkeys(team2_bowlers_raw[:5]))
     
-    # Ensure minimum bowlers
-    while len(team1_bowlers) < 5 and team1_bowlers:
-        team1_bowlers.append(team1_bowlers[-1])
-    while len(team2_bowlers) < 5 and team2_bowlers:
-        team2_bowlers.append(team2_bowlers[-1])
+    # If < 5 bowlers, add part-timers from batters (realistic cricket strategy)
+    def fill_with_parttimers(bowlers, batters, min_bowlers=5):
+        if len(bowlers) >= min_bowlers:
+            return bowlers
+        bowler_set = set(bowlers)
+        for batter_id in batters:
+            if batter_id not in bowler_set:
+                bowlers.append(batter_id)
+                bowler_set.add(batter_id)
+                if len(bowlers) >= min_bowlers:
+                    break
+        return bowlers
+    
+    team1_bowlers = fill_with_parttimers(team1_bowlers, team1_batters_raw)
+    team2_bowlers = fill_with_parttimers(team2_bowlers, team2_batters_raw)
     
     logger.info(f"Team 1 batting order: {len(team1_batting_order)} unique players")
     logger.info(f"Team 2 batting order: {len(team2_batting_order)} unique players")
