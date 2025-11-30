@@ -115,12 +115,23 @@ class T20Match:
         team1 = teams[0] if teams else data.get('name', '').split(' vs ')[0].strip()
         team2 = teams[1] if len(teams) > 1 else ''
         
-        # Check if upcoming
-        status = data.get('status', '')
+        # Check if match is selectable (upcoming or in progress today)
+        status = data.get('status', '').lower()
+        match_date = data.get('date', '')
+        
+        # Match is upcoming/selectable if:
+        # 1. Status explicitly says it's starting
+        # 2. Status is empty (unknown)
+        # 3. Match is today and not ended (toss done, in progress, etc.)
+        # 4. Status doesn't indicate the match has ended
+        is_ended = any(word in status for word in ['won by', 'tied', 'draw', 'no result', 'abandoned'])
+        is_today = match_date == datetime.now().strftime('%Y-%m-%d')
+        
         is_upcoming = (
-            'Match starts at' in status 
+            'match starts at' in status 
             or status == '' 
-            or 'not started' in status.lower()
+            or 'not started' in status
+            or (is_today and not is_ended)  # Today's match, not ended = still selectable
         )
         
         # Detect gender from teams or series name
