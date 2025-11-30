@@ -403,12 +403,27 @@
                                 ${series.series_name} ${genderBadge}
                             </h3>
                             <div style="display: flex; flex-direction: column; gap: 0.5rem;">
-                                ${series.matches.map(m => `
+                                ${series.matches.map(m => {
+                                    // Convert UTC to local time
+                                    let localTime = m.status || 'TBD';
+                                    if (m.date_time_gmt) {
+                                        try {
+                                            const dt = new Date(m.date_time_gmt);
+                                            localTime = dt.toLocaleTimeString('en-US', {
+                                                hour: '2-digit', 
+                                                minute: '2-digit', 
+                                                timeZoneName: 'short'
+                                            });
+                                        } catch (e) {
+                                            console.error('Error parsing date:', e);
+                                        }
+                                    }
+                                    return `
                                     <div style="display: flex; justify-content: space-between; align-items: center; padding: 0.75rem 1rem; background: var(--bg-tertiary); border-radius: 8px; border-left: 3px solid ${series.gender === 'female' ? '#e91e63' : '#2196f3'};">
                                         <div style="flex: 1;">
                                             <div style="font-weight: 500;">${m.team1} vs ${m.team2}</div>
                                             <div style="font-size: 0.8rem; color: var(--text-muted);">
-                                                ${m.start_time} • ${m.venue}
+                                                ${localTime} • ${m.venue}
                                                 ${m.has_squad ? '<span style="color: var(--accent-primary);"> ✓ Squad</span>' : ''}
                                             </div>
                                         </div>
@@ -417,7 +432,7 @@
                                             Select
                                         </button>
                                     </div>
-                                `).join('')}
+                                `}).join('')}
                             </div>
                         </div>
                     `;

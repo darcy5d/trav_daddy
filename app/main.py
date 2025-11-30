@@ -978,23 +978,11 @@ def get_upcoming_matches():
         for series_name, series_data in matches_by_series.items():
             matches_list = []
             for m in series_data['matches']:
-                # Format start time from dateTimeGMT
-                start_time = ''
-                if m.date_time_gmt:
-                    try:
-                        from datetime import datetime
-                        dt = datetime.fromisoformat(m.date_time_gmt.replace('Z', '+00:00'))
-                        start_time = dt.strftime('%H:%M GMT')
-                    except:
-                        start_time = m.status
-                else:
-                    start_time = m.status
-                
                 matches_list.append({
                     'match_id': m.id,
                     'team1': m.team1,
                     'team2': m.team2,
-                    'start_time': start_time,
+                    'date_time_gmt': m.date_time_gmt,  # Send raw UTC for frontend to convert
                     'venue': m.venue or 'TBD',
                     'date': m.date,
                     'status': m.status,

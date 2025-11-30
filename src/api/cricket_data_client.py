@@ -541,39 +541,37 @@ class CricketDataClient:
         logger.info(f"Found {len(all_matches)} total upcoming T20 matches")
         return all_matches
     
-    def get_upcoming_matches_24h(self) -> Dict[str, List[T20Match]]:
+    def get_upcoming_matches_24h(self) -> Dict[str, Dict]:
         """
         Get all T20 matches in the next 24 hours, grouped by series.
         
-        Uses /currentMatches API for live/in-progress matches, supplemented with
-        series-specific lookups for major leagues (WBBL, BBL) to catch scheduled matches.
+        Approach:
+        1. Get all T20 matches from /currentMatches (single API call)
+        2. Group by series_id, collect unique IDs
+        3. Batch lookup series names (one /series_info call per unique series)
+        4. Group matches by actual series name
         
         Returns:
-            Dict mapping series_name to list of T20Match objects
-            Each match includes gender for model selection
+            Dict mapping series_name to dict with 'gender', 'series_id', 'matches'
         """
         from datetime import timezone
         
         now = datetime.now(timezone.utc)
-        cutoff = now + timedelta(hours=24)
         today_str = now.strftime('%Y-%m-%d')
         tomorrow_str = (now + timedelta(days=1)).strftime('%Y-%m-%d')
         
-        # Track match IDs to avoid duplicates
-        seen_match_ids = set()
-        matches_by_series = {}
-        
-        # PART 1: Use currentMatches for live/in-progress matches
+        # STEP 1: Get all current T20 matches
         data = self._request('currentMatches', {'type': 't20'})
         
         if 'data' not in data:
             logger.warning("Failed to fetch current matches")
             return {}
         
-        matches_by_series = {}
+        # STEP 2: Group matches by series_id and collect unique IDs
+        matches_by_series_id = {}  # series_id -> list of match_data
         
         for match_data in data['data']:
-            # IMPORTANT: Filter by matchType - API doesn't always respect type=t20 param
+            # Filter by matchType - API doesn't always respect type=t20 param
             match_type = match_data.get('matchType', '').lower()
             if match_type != 't20':
                 logger.debug(f"Skipping non-T20 match: {match_data.get('name')} (type: {match_type})")
@@ -592,100 +590,45 @@ class CricketDataClient:
                 logger.debug(f"Skipping finished match: {match.name}")
                 continue
             
-            # Get series name (or default)
-            series_name = match_data.get('series', '') or match_data.get('name', 'Unknown Series')
-            # Clean up series name if it includes match details
-            if ' vs ' in series_name:
-                series_name = 'T20 Matches'
+            series_id = match_data.get('series_id', 'unknown')
+            if series_id not in matches_by_series_id:
+                matches_by_series_id[series_id] = []
+            matches_by_series_id[series_id].append(match)
+        
+        # STEP 3: Lookup series names for each unique series_id
+        series_names = {}  # series_id -> series_name
+        
+        for series_id in matches_by_series_id.keys():
+            if series_id == 'unknown':
+                series_names[series_id] = 'T20 Matches'
+                continue
             
-            # Format start time
-            start_time = ''
-            if match.date_time_gmt:
-                try:
-                    dt = datetime.fromisoformat(match.date_time_gmt.replace('Z', '+00:00'))
-                    start_time = dt.strftime('%H:%M GMT')
-                except:
-                    start_time = match.status
-            else:
-                start_time = match.status or 'TBD'
+            try:
+                series_info = self._request('series_info', {'id': series_id})
+                if 'data' in series_info and 'info' in series_info['data']:
+                    series_names[series_id] = series_info['data']['info'].get('name', 'T20 Matches')
+                else:
+                    series_names[series_id] = 'T20 Matches'
+            except Exception as e:
+                logger.warning(f"Failed to lookup series {series_id}: {e}")
+                series_names[series_id] = 'T20 Matches'
+        
+        # STEP 4: Group matches by actual series name
+        matches_by_series = {}
+        
+        for series_id, matches in matches_by_series_id.items():
+            series_name = series_names.get(series_id, 'T20 Matches')
             
-            # Track to avoid duplicates
-            seen_match_ids.add(match.id)
-            
-            # Group by series
             if series_name not in matches_by_series:
+                # Use gender from first match in the series
+                first_match = matches[0] if matches else None
                 matches_by_series[series_name] = {
-                    'gender': match.gender,
-                    'series_id': match.series_id,
+                    'gender': first_match.gender if first_match else 'male',
+                    'series_id': series_id,
                     'matches': []
                 }
             
-            matches_by_series[series_name]['matches'].append(match)
-        
-        # PART 2: Supplement with major leagues to catch scheduled matches not in currentMatches
-        # These leagues often have tomorrow's matches scheduled but not yet in currentMatches
-        major_leagues = [
-            ('Womens Big Bash', 'WBBL 2025', 'female'),
-            ('Big Bash League', 'BBL 2025-26', 'male'),
-        ]
-        
-        for search_term, display_name, gender in major_leagues:
-            try:
-                # Find the series
-                series_data = self._request('series', {'search': search_term})
-                if 'data' not in series_data or not series_data['data']:
-                    continue
-                
-                # Get the most recent series (first result)
-                series = series_data['data'][0]
-                series_id = series.get('id')
-                
-                # Get matches for this series
-                matches_data = self._request('series_info', {'id': series_id})
-                if 'data' not in matches_data:
-                    continue
-                
-                match_list = matches_data['data'].get('matchList', [])
-                
-                for m in match_list:
-                    match_id = m.get('id')
-                    if match_id in seen_match_ids:
-                        continue  # Already have this match
-                    
-                    match_date = m.get('date', '')
-                    if match_date not in [today_str, tomorrow_str]:
-                        continue
-                    
-                    # Check if within 24 hours
-                    date_time_gmt = m.get('dateTimeGMT')
-                    if date_time_gmt:
-                        try:
-                            match_dt = datetime.fromisoformat(date_time_gmt.replace('Z', '+00:00'))
-                            if not (now <= match_dt <= cutoff):
-                                continue
-                        except:
-                            pass
-                    
-                    # Create match object
-                    match = T20Match.from_api(m, series_id=series_id, series_name=display_name)
-                    
-                    # Only include upcoming matches
-                    if not match.is_upcoming:
-                        continue
-                    
-                    seen_match_ids.add(match_id)
-                    
-                    if display_name not in matches_by_series:
-                        matches_by_series[display_name] = {
-                            'gender': gender,
-                            'series_id': series_id,
-                            'matches': []
-                        }
-                    
-                    matches_by_series[display_name]['matches'].append(match)
-                    
-            except Exception as e:
-                logger.warning(f"Failed to fetch {search_term} matches: {e}")
+            matches_by_series[series_name]['matches'].extend(matches)
         
         # Sort matches within each series by time
         for series_data in matches_by_series.values():
