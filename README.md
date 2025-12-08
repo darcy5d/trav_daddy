@@ -1,6 +1,6 @@
 # Cricket Match Predictor
 
-A neural network-powered Monte Carlo simulation system for predicting T20 cricket match outcomes. Supports both Men's and Women's cricket including franchise leagues (IPL, BBL, WBBL, etc.).
+A neural network-powered Monte Carlo simulation system for predicting T20 cricket match outcomes. Supports both Men's and Women's cricket including franchise leagues (IPL, BBL, WBBL, WPL, etc.) and international T20s.
 
 ## Features
 
@@ -8,10 +8,12 @@ A neural network-powered Monte Carlo simulation system for predicting T20 cricke
 - **Monte Carlo Simulation**: Run 1,000-10,000 match simulations to generate win probabilities
 - **ELO Rating System**: Tracks team and player ratings with historical snapshots
 - **Men's & Women's Cricket**: Separate models trained on men's and women's T20 data
-- **WBBL Integration**: Auto-load upcoming WBBL matches and squads via Cricket Data API
+- **Live Match Integration**: Auto-load upcoming T20 matches from all competitions via Cricket Data API
+- **Unified Match View**: See all upcoming matches (Men's [M] and Women's [W]) in one place with countdown timers
 - **ESPN-Style Scorecards**: View detailed sample scorecards from simulations
-- **Venue Effects**: Stadium-specific scoring patterns influence predictions
+- **Venue Effects**: 600+ venues with country flags and hierarchical grouping (including West Indies regions)
 - **Toss Simulation**: Per-match toss outcomes simulated based on historical data
+- **Smart Venue Matching**: Fuzzy matching for API venue names to database entries
 
 ## Quick Start
 
@@ -41,13 +43,19 @@ Visit `http://localhost:5001` in your browser.
 
 ## How It Works
 
-1. **Data**: Ball-by-ball JSON data from [Cricsheet.org](https://cricsheet.org/) (3.2M+ deliveries, 11,300+ matches)
+1. **Data**: Ball-by-ball JSON data from [Cricsheet.org](https://cricsheet.org/)
+   - 16,700+ men's matches (IPL, BBL, T20I, PSL, CPL, etc.)
+   - 3,900+ women's matches (WBBL, WPL, WT20I, etc.)
+   - 600+ venues across 75+ countries
+
 2. **Training**: Neural network learns ball outcome probabilities based on:
    - Batter/bowler ELO ratings and historical distributions
    - Match situation (score, wickets, required rate)
    - Innings phase (powerplay, middle, death)
-   - Venue characteristics
+   - Venue characteristics (scoring rate, boundary %, wicket rate)
+
 3. **Simulation**: Monte Carlo engine simulates full matches ball-by-ball
+
 4. **Prediction**: Aggregate simulation results into win probabilities
 
 ## Tech Stack
@@ -66,14 +74,19 @@ Visit `http://localhost:5001` in your browser.
 │   ├── main.py          # API endpoints
 │   └── templates/       # HTML templates
 ├── src/
-│   ├── data/            # Data ingestion
+│   ├── api/             # Cricket Data API client
+│   ├── data/            # Data ingestion & venue mapping
 │   ├── models/          # Neural network & simulators
 │   ├── features/        # Feature engineering
 │   └── elo/             # ELO rating system
+├── scripts/
+│   ├── capture_baseline.py   # Database metrics snapshot
+│   ├── migrate_venues.py     # Venue schema migration
+│   └── full_retrain.py       # Complete retraining pipeline
 ├── data/
 │   ├── raw/             # Cricsheet JSON files
 │   └── processed/       # Training data, distributions
-└── models/              # Trained model weights
+└── docs/                # Database schema documentation
 ```
 
 ## API Endpoints
@@ -82,9 +95,12 @@ Visit `http://localhost:5001` in your browser.
 |----------|--------|-------------|
 | `/api/teams` | GET | List teams with ELO ratings |
 | `/api/players/{team}` | GET | Team players with ELO |
-| `/api/simulate-stream` | POST | Run simulation with progress |
-| `/api/wbbl/fixtures` | GET | Upcoming WBBL matches |
+| `/api/venues` | GET | Venues with hierarchical country grouping |
+| `/api/t20/upcoming` | GET | All upcoming T20 matches (next 24 hours) |
+| `/api/t20/match/{id}` | GET | Load specific match with squads |
+| `/api/simulate-stream` | POST | Run simulation with progress stream |
 | `/api/rankings/teams` | GET | Team ELO rankings |
+| `/api/rankings/players` | GET | Player ELO rankings |
 
 ## Performance
 

@@ -68,15 +68,23 @@ batting_style: "right-hand bat"
 ---
 
 ### venues
-Stores match venues/grounds.
+Stores match venues/grounds with hierarchical location data.
 
 | Column | Type | Description |
 |--------|------|-------------|
 | `venue_id` | INTEGER | Primary key, auto-increment |
 | `name` | TEXT | Venue name (e.g., "Melbourne Cricket Ground") |
 | `city` | TEXT | City location |
-| `country` | TEXT | Country |
+| `country` | TEXT | Country (auto-populated from city mapping) |
+| `canonical_name` | TEXT | Standardized name for display (removes city suffix) |
+| `region` | TEXT | Supra-national grouping (e.g., "West Indies" for Caribbean venues) |
 | `created_at` | TIMESTAMP | Record creation time |
+
+**Venue Normalization:**
+- 600+ venues across 75+ countries
+- Fuzzy matching during ingestion prevents duplicates
+- West Indies venues grouped under region with country subdivisions
+- Country auto-populated using `src/data/country_mapping.py`
 
 ---
 
@@ -457,14 +465,19 @@ GROUP BY m.match_type;
 
 | Category | Count |
 |----------|-------|
-| Total Matches | ~3,800 |
-| T20 Men | ~2,430 |
-| T20 Women | ~217 |
-| ODI Men | ~773 |
-| ODI Women | ~379 |
-| Total Players | ~4,500 |
-| Total Deliveries | ~850,000 |
-| Player-Match Stats | ~80,000 |
+| Total Matches | ~11,300 |
+| T20 Men | ~8,130 |
+| T20 Women | ~3,172 |
+| Total Players | ~9,620 |
+| Total Venues | ~614 |
+| Countries | ~75 |
+| Total Teams | ~353 |
+
+**Raw Data (Cricsheet):**
+| Dataset | Match Files |
+|---------|-------------|
+| all_male | 16,708 |
+| all_female | 3,967 |
 
 ---
 
