@@ -541,6 +541,53 @@ class CricketDataClient:
         logger.info(f"Found {len(all_matches)} total upcoming T20 matches")
         return all_matches
     
+    def _series_might_have_matches_today(
+        self, 
+        start_date: str, 
+        end_date: str, 
+        today_str: str, 
+        tomorrow_str: str
+    ) -> bool:
+        """
+        Check if a series might have matches today based on its date range.
+        
+        Args:
+            start_date: Series start date (various formats)
+            end_date: Series end date (various formats)
+            today_str: Today's date as YYYY-MM-DD
+            tomorrow_str: Tomorrow's date as YYYY-MM-DD
+            
+        Returns:
+            True if series dates overlap with today/tomorrow
+        """
+        try:
+            # Parse dates - handle various formats from API
+            # Format examples: "2025-12-08", "Dec 08", "2025-12-08 to Dec 15"
+            from datetime import datetime
+            
+            # Try to extract year-month-day from start_date
+            if len(start_date) >= 10 and start_date[4] == '-':
+                series_start = start_date[:10]
+            else:
+                # Can't parse, assume it might be active
+                return True
+            
+            # Try to extract from end_date
+            if len(end_date) >= 10 and end_date[4] == '-':
+                series_end = end_date[:10]
+            elif 'Dec' in end_date or 'Jan' in end_date:
+                # Partial date like "Dec 15" - assume current year
+                series_end = tomorrow_str  # Be inclusive
+            else:
+                series_end = tomorrow_str
+            
+            # Check if today/tomorrow falls within series date range
+            return series_start <= tomorrow_str and series_end >= today_str
+            
+        except Exception:
+            # If we can't parse, be inclusive
+            return True
+    
     def get_upcoming_matches_24h(self) -> Dict[str, Dict]:
         """
         Get all T20 matches in the next 24 hours, grouped by series.
@@ -548,9 +595,9 @@ class CricketDataClient:
         Approach:
         1. Get all T20 matches from /currentMatches (live/recent matches)
         2. Collect unique series_id values - these are "active" series
-        3. For each active series, fetch ALL matches via /series_info
-        4. Include any matches from those series that are in the next 24 hours
-        5. This catches scheduled matches that aren't in /currentMatches yet
+        3. Search for T20I series to catch international matches not in /currentMatches
+        4. For each discovered series, fetch ALL matches via /series_info
+        5. Include any matches from those series that are in the next 24 hours
         
         Returns:
             Dict mapping series_name to dict with 'gender', 'series_id', 'matches'
@@ -578,7 +625,39 @@ class CricketDataClient:
                 if series_id:
                     active_series_ids.add(series_id)
         
-        logger.info(f"Discovered {len(active_series_ids)} active T20 series")
+        logger.info(f"Discovered {len(active_series_ids)} active T20 series from currentMatches")
+        
+        # STEP 1b: Search for T20I series to catch international matches
+        # These might not appear in /currentMatches if no matches are currently live
+        # Limit to avoid too many API calls
+        t20i_search_terms = ['T20I 2025']  # Focused search for recent T20Is
+        max_additional_series = 5  # Limit extra series to avoid slow response
+        additional_series_count = 0
+        
+        for search_term in t20i_search_terms:
+            if additional_series_count >= max_additional_series:
+                break
+            try:
+                series_data = self._request('series', {'search': search_term})
+                if 'data' in series_data:
+                    for series in series_data['data'][:10]:  # Only check first 10 results
+                        if additional_series_count >= max_additional_series:
+                            break
+                        # Only include series with T20 matches
+                        if series.get('t20', 0) > 0:
+                            series_id = series.get('id')
+                            start_date = series.get('startDate', '')
+                            end_date = series.get('endDate', '')
+                            if series_id and series_id not in active_series_ids:
+                                # Check if series could have matches today
+                                if self._series_might_have_matches_today(start_date, end_date, today_str, tomorrow_str):
+                                    active_series_ids.add(series_id)
+                                    additional_series_count += 1
+                                    logger.debug(f"Added T20I series from search: {series.get('name')}")
+            except Exception as e:
+                logger.warning(f"Failed to search for {search_term} series: {e}")
+        
+        logger.info(f"Total active series after T20I search: {len(active_series_ids)} (+{additional_series_count} from search)")
         
         # STEP 2: For each active series, get ALL matches and filter to next 24h
         matches_by_series = {}
