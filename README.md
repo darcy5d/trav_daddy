@@ -54,6 +54,12 @@ Visit `http://localhost:5001` in your browser.
    - Innings phase (powerplay, middle, death)
    - Venue characteristics (scoring rate, boundary %, wicket rate)
 
+   **Current Model Stats:**
+   | Model | Training Samples | Features | Validation Accuracy |
+   |-------|------------------|----------|---------------------|
+   | Men's T20 | 1,477,440 | 29 | 44.2% |
+   | Women's T20 | 571,659 | 29 | 51.1% |
+
 3. **Simulation**: Monte Carlo engine simulates full matches ball-by-ball
 
 4. **Prediction**: Aggregate simulation results into win probabilities
