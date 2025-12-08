@@ -150,25 +150,59 @@ def rankings_page():
 
 @app.route('/api/teams', methods=['GET'])
 def get_teams():
-    """Get list of all teams for specified gender."""
+    """
+    Get list of teams for specified gender and type.
+    
+    Query params:
+        gender: 'male' or 'female' (default: 'male')
+        team_type: 'international', 'franchise', 'domestic', or 'all' (default: 'all')
+    """
     try:
         gender = request.args.get('gender', 'male')
+        team_type = request.args.get('team_type', 'all')
         
         conn = get_connection()
         cursor = conn.cursor()
         
-        cursor.execute("""
-            SELECT DISTINCT t.team_id, t.name
-            FROM teams t
-            JOIN matches m ON t.team_id IN (m.team1_id, m.team2_id)
-            WHERE m.match_type = 'T20' AND m.gender = ?
-            ORDER BY t.name
-        """, (gender,))
+        # Build query based on filters
+        if team_type == 'all':
+            cursor.execute("""
+                SELECT DISTINCT t.team_id, t.name, t.team_type
+                FROM teams t
+                JOIN matches m ON t.team_id IN (m.team1_id, m.team2_id)
+                WHERE m.match_type = 'T20' AND m.gender = ?
+                ORDER BY t.name
+            """, (gender,))
+        elif team_type == 'club':
+            # 'club' combines franchise and domestic
+            cursor.execute("""
+                SELECT DISTINCT t.team_id, t.name, t.team_type
+                FROM teams t
+                JOIN matches m ON t.team_id IN (m.team1_id, m.team2_id)
+                WHERE m.match_type = 'T20' AND m.gender = ?
+                  AND t.team_type IN ('franchise', 'domestic')
+                ORDER BY t.name
+            """, (gender,))
+        else:
+            cursor.execute("""
+                SELECT DISTINCT t.team_id, t.name, t.team_type
+                FROM teams t
+                JOIN matches m ON t.team_id IN (m.team1_id, m.team2_id)
+                WHERE m.match_type = 'T20' AND m.gender = ?
+                  AND t.team_type = ?
+                ORDER BY t.name
+            """, (gender, team_type))
         
         teams = [dict(row) for row in cursor.fetchall()]
         conn.close()
         
-        return jsonify({'success': True, 'teams': teams, 'gender': gender})
+        return jsonify({
+            'success': True, 
+            'teams': teams, 
+            'gender': gender,
+            'team_type': team_type,
+            'count': len(teams)
+        })
     
     except Exception as e:
         logger.error(f"Error fetching teams: {e}")

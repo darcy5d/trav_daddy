@@ -11,6 +11,7 @@ CREATE TABLE IF NOT EXISTS teams (
     name TEXT NOT NULL UNIQUE,
     country_code TEXT,
     is_international BOOLEAN DEFAULT TRUE,
+    team_type TEXT DEFAULT 'domestic' CHECK(team_type IN ('international', 'franchise', 'domestic')),
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
