@@ -114,7 +114,8 @@
         <!-- Type Filter -->
         <span class="team-filter-label">Team Type</span>
         <div class="segmented-control secondary" id="team1-type-control">
-            <button class="active" data-value="international" onclick="setTeamFilter(1, 'type', 'international')">International</button>
+            <button class="active" data-value="all" onclick="setTeamFilter(1, 'type', 'all')">All</button>
+            <button data-value="international" onclick="setTeamFilter(1, 'type', 'international')">International</button>
             <button data-value="club" onclick="setTeamFilter(1, 'type', 'club')">Club / Domestic</button>
         </div>
         
@@ -153,7 +154,8 @@
         <!-- Type Filter -->
         <span class="team-filter-label">Team Type</span>
         <div class="segmented-control secondary" id="team2-type-control">
-            <button class="active" data-value="international" onclick="setTeamFilter(2, 'type', 'international')">International</button>
+            <button class="active" data-value="all" onclick="setTeamFilter(2, 'type', 'all')">All</button>
+            <button data-value="international" onclick="setTeamFilter(2, 'type', 'international')">International</button>
             <button data-value="club" onclick="setTeamFilter(2, 'type', 'club')">Club / Domestic</button>
         </div>
         
@@ -445,8 +447,8 @@
     
     // Team filter state (for manual selection)
     const teamFilters = {
-        1: { gender: 'male', type: 'international' },
-        2: { gender: 'male', type: 'international' }
+        1: { gender: 'male', type: 'all' },
+        2: { gender: 'male', type: 'all' }
     };
     
     // Initialize on page load
@@ -704,16 +706,26 @@
         // Set the gender for correct model selection
         currentGender = gender;
         
-        // Sync segmented controls to match gender for both teams
+        // Sync segmented controls to match gender AND set type to "all" for API matches
+        // (API matches can be international or franchise, so we need all teams)
         [1, 2].forEach(teamNum => {
             teamFilters[teamNum].gender = gender;
-            const control = document.getElementById(`team${teamNum}-gender-control`);
-            control.querySelectorAll('button').forEach(btn => {
+            teamFilters[teamNum].type = 'all';  // Show all teams for API matches
+            
+            // Update gender control
+            const genderControl = document.getElementById(`team${teamNum}-gender-control`);
+            genderControl.querySelectorAll('button').forEach(btn => {
                 btn.classList.toggle('active', btn.dataset.value === gender);
+            });
+            
+            // Update type control - select "all"
+            const typeControl = document.getElementById(`team${teamNum}-type-control`);
+            typeControl.querySelectorAll('button').forEach(btn => {
+                btn.classList.toggle('active', btn.dataset.value === 'all');
             });
         });
         
-        // Load teams and venues for this gender
+        // Load teams (all types) and venues for this gender
         await loadTeams();
         await loadVenues();
         
