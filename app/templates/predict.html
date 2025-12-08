@@ -799,10 +799,35 @@
     
     async function loadVenues() {
         try {
-            const response = await fetch(`/api/venues?gender=${currentGender}`);
+            const response = await fetch(`/api/venues?gender=${currentGender}&min_matches=3`);
             const data = await response.json();
             
-            if (data.success) {
+            if (data.success && data.venues_hierarchical) {
+                const venueSelect = document.getElementById('venue-select');
+                venueSelect.innerHTML = '<option value="">-- Neutral Venue --</option>';
+                
+                // Use hierarchical data for grouped dropdown
+                data.venues_hierarchical.forEach(country => {
+                    // Create optgroup for each country
+                    const countryGroup = document.createElement('optgroup');
+                    countryGroup.label = `${country.flag} ${country.name}`;
+                    
+                    country.cities.forEach(city => {
+                        city.venues.forEach(venue => {
+                            const opt = document.createElement('option');
+                            opt.value = venue.venue_id;
+                            // Format: "City • Venue Name (X matches)"
+                            opt.textContent = `${city.name} • ${venue.name} (${venue.match_count})`;
+                            countryGroup.appendChild(opt);
+                        });
+                    });
+                    
+                    if (countryGroup.children.length > 0) {
+                        venueSelect.appendChild(countryGroup);
+                    }
+                });
+            } else if (data.success && data.venues) {
+                // Fallback to flat list
                 const venueSelect = document.getElementById('venue-select');
                 venueSelect.innerHTML = '<option value="">-- Neutral Venue --</option>';
                 data.venues.forEach(v => {

@@ -177,9 +177,16 @@ def get_teams():
 
 @app.route('/api/venues', methods=['GET'])
 def get_venues():
-    """Get list of venues with match counts for specified gender."""
+    """
+    Get list of venues with match counts for specified gender.
+    
+    Returns venues grouped hierarchically by country -> city -> venue.
+    """
+    from src.data.country_mapping import get_country_for_city, get_flag_for_country
+    
     try:
         gender = request.args.get('gender', 'male')
+        min_matches = int(request.args.get('min_matches', 3))  # Lower default threshold
         
         conn = get_connection()
         cursor = conn.cursor()
@@ -191,15 +198,72 @@ def get_venues():
             JOIN matches m ON m.venue_id = v.venue_id
             WHERE m.match_type = 'T20' AND m.gender = ?
             GROUP BY v.venue_id
-            HAVING match_count >= 5
-            ORDER BY match_count DESC
-            LIMIT 100
-        """, (gender,))
+            HAVING match_count >= ?
+            ORDER BY v.city, v.name
+        """, (gender, min_matches))
         
-        venues = [dict(row) for row in cursor.fetchall()]
+        raw_venues = cursor.fetchall()
         conn.close()
         
-        return jsonify({'success': True, 'venues': venues, 'gender': gender})
+        # Build hierarchical structure: country -> city -> venues
+        countries = {}
+        
+        for row in raw_venues:
+            venue_id = row['venue_id']
+            name = row['name']
+            city = row['city'] or 'Unknown'
+            country = row['country'] or get_country_for_city(city)
+            match_count = row['match_count']
+            
+            # Initialize country if not seen
+            if country not in countries:
+                countries[country] = {
+                    'name': country,
+                    'flag': get_flag_for_country(country),
+                    'cities': {}
+                }
+            
+            # Initialize city if not seen
+            if city not in countries[country]['cities']:
+                countries[country]['cities'][city] = []
+            
+            # Add venue
+            countries[country]['cities'][city].append({
+                'venue_id': venue_id,
+                'name': name,
+                'city': city,
+                'country': country,
+                'match_count': match_count
+            })
+        
+        # Convert to sorted list structure
+        result = []
+        for country_name in sorted(countries.keys()):
+            country_data = countries[country_name]
+            cities_list = []
+            
+            for city_name in sorted(country_data['cities'].keys()):
+                venues = sorted(country_data['cities'][city_name], key=lambda v: v['name'])
+                cities_list.append({
+                    'name': city_name,
+                    'venues': venues
+                })
+            
+            result.append({
+                'name': country_data['name'],
+                'flag': country_data['flag'],
+                'cities': cities_list
+            })
+        
+        # Also return flat list for backward compatibility
+        flat_venues = [dict(row) for row in raw_venues]
+        
+        return jsonify({
+            'success': True, 
+            'venues': flat_venues,  # Backward compatible
+            'venues_hierarchical': result,  # New hierarchical format
+            'gender': gender
+        })
     
     except Exception as e:
         logger.error(f"Error fetching venues: {e}")
