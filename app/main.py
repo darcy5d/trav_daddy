@@ -181,18 +181,20 @@ def get_venues():
     Get list of venues with match counts for specified gender.
     
     Returns venues grouped hierarchically by country -> city -> venue.
+    Consolidates duplicate venues (same venue with different name formats).
     """
-    from src.data.country_mapping import get_country_for_venue, get_flag_for_country, is_west_indies_country, get_region_for_country
+    from src.data.country_mapping import get_country_for_venue, get_flag_for_country, get_region_for_country, get_location_for_venue
+    from src.data.venue_normalizer import normalize_venue_name, extract_canonical_name
     
     try:
         gender = request.args.get('gender', 'male')
-        min_matches = int(request.args.get('min_matches', 3))  # Lower default threshold
+        min_matches = int(request.args.get('min_matches', 3))
         
         conn = get_connection()
         cursor = conn.cursor()
         
         cursor.execute("""
-            SELECT v.venue_id, v.name, v.city, v.country,
+            SELECT v.venue_id, v.name, v.city, v.country, v.canonical_name,
                    COUNT(m.match_id) as match_count
             FROM venues v
             JOIN matches m ON m.venue_id = v.venue_id
@@ -205,15 +207,57 @@ def get_venues():
         raw_venues = cursor.fetchall()
         conn.close()
         
-        # Build hierarchical structure: country -> city -> venues
-        countries = {}
+        # Consolidate duplicate venues by canonical name + city
+        # Keep the venue with the most matches
+        consolidated = {}  # key: (canonical_name, city) -> best venue
         
         for row in raw_venues:
             venue_id = row['venue_id']
             name = row['name']
-            city = row['city'] or 'Unknown'
-            country = row['country'] or get_country_for_venue(name, city)
+            city = row['city']
+            country = row['country']
             match_count = row['match_count']
+            
+            # If city or country is missing, try to get from venue name mapping
+            if not city or not country:
+                mapped_city, mapped_country = get_location_for_venue(name)
+                if not city and mapped_city:
+                    city = mapped_city
+                if not country and mapped_country:
+                    country = mapped_country
+            
+            # Fall back to venue-based country lookup
+            if not country:
+                country = get_country_for_venue(name, city)
+            
+            # Get canonical name (remove city suffix if present)
+            canonical = row['canonical_name'] or extract_canonical_name(name, city)
+            
+            # Create consolidation key
+            key = (normalize_venue_name(canonical), city or '')
+            
+            if key not in consolidated or match_count > consolidated[key]['match_count']:
+                consolidated[key] = {
+                    'venue_id': venue_id,
+                    'name': canonical,  # Use canonical name for display
+                    'original_name': name,
+                    'city': city,
+                    'country': country,
+                    'match_count': match_count
+                }
+            else:
+                # Add match count from duplicate
+                consolidated[key]['match_count'] += match_count
+        
+        # Build hierarchical structure: country -> city -> venues
+        countries = {}
+        
+        for venue_data in consolidated.values():
+            venue_id = venue_data['venue_id']
+            name = venue_data['name']
+            city = venue_data['city'] or 'Unknown'
+            country = venue_data['country']
+            match_count = venue_data['match_count']
             
             # Check if this country should be grouped under West Indies
             region = get_region_for_country(country)
@@ -252,7 +296,7 @@ def get_venues():
             cities_list = []
             
             for city_name in sorted(country_data['cities'].keys()):
-                venues = sorted(country_data['cities'][city_name], key=lambda v: v['name'])
+                venues = sorted(country_data['cities'][city_name], key=lambda v: -v['match_count'])
                 cities_list.append({
                     'name': city_name,
                     'venues': venues
@@ -264,13 +308,13 @@ def get_venues():
                 'cities': cities_list
             })
         
-        # Also return flat list for backward compatibility
-        flat_venues = [dict(row) for row in raw_venues]
+        # Flat list (consolidated)
+        flat_venues = list(consolidated.values())
         
         return jsonify({
             'success': True, 
-            'venues': flat_venues,  # Backward compatible
-            'venues_hierarchical': result,  # New hierarchical format
+            'venues': flat_venues,
+            'venues_hierarchical': result,
             'gender': gender
         })
     

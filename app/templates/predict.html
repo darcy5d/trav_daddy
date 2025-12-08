@@ -802,10 +802,17 @@
             const response = await fetch(`/api/venues?gender=${currentGender}&min_matches=3`);
             const data = await response.json();
             
+            console.log('Venues API response:', data.success, 'hierarchical:', !!data.venues_hierarchical, 'countries:', data.venues_hierarchical?.length);
+            
             if (data.success && data.venues_hierarchical) {
                 const venueSelect = document.getElementById('venue-select');
+                if (!venueSelect) {
+                    console.error('venue-select element not found!');
+                    return;
+                }
                 venueSelect.innerHTML = '<option value="">-- Neutral Venue --</option>';
                 
+                let totalVenues = 0;
                 // Use hierarchical data for grouped dropdown
                 data.venues_hierarchical.forEach(country => {
                     // Create optgroup for each country
@@ -819,6 +826,7 @@
                             // Format: "City • Venue Name (X matches)"
                             opt.textContent = `${city.name} • ${venue.name} (${venue.match_count})`;
                             countryGroup.appendChild(opt);
+                            totalVenues++;
                         });
                     });
                     
@@ -826,6 +834,7 @@
                         venueSelect.appendChild(countryGroup);
                     }
                 });
+                console.log('Loaded', totalVenues, 'venues into dropdown');
             } else if (data.success && data.venues) {
                 // Fallback to flat list
                 const venueSelect = document.getElementById('venue-select');
