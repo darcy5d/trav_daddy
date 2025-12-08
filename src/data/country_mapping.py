@@ -4,6 +4,21 @@ City to Country mapping for venue hierarchical display.
 This module provides mapping from cities to their countries and country emoji flags.
 """
 
+# West Indies countries - these should be grouped under "West Indies" region
+WEST_INDIES_COUNTRIES = {
+    "Antigua",
+    "Barbados",
+    "Dominica",
+    "Grenada",
+    "Guyana",
+    "Jamaica",
+    "St Kitts",
+    "St Lucia",
+    "St Vincent",
+    "Trinidad",
+    "Cayman Islands",
+}
+
 # Country emoji flags (ISO 3166-1 alpha-2 codes)
 COUNTRY_FLAGS = {
     "Afghanistan": "🇦🇫",
@@ -13,6 +28,10 @@ COUNTRY_FLAGS = {
     "Bahrain": "🇧🇭",
     "Bangladesh": "🇧🇩",
     "Barbados": "🇧🇧",
+    "Antigua": "🇦🇬",
+    "Dominica": "🇩🇲",
+    "Grenada": "🇬🇩",
+    "Cayman Islands": "🇰🇾",
     "Belgium": "🇧🇪",
     "Bhutan": "🇧🇹",
     "Botswana": "🇧🇼",
@@ -565,6 +584,97 @@ CITY_TO_COUNTRY = {
     "Bulawayo": "Zimbabwe",
     "Harare": "Zimbabwe",
     "Alexandra": "Zimbabwe",
+    "Highfield": "Zimbabwe",
+    
+    # Additional Indian cities/areas for domestic cricket
+    "Motera": "India",
+    "Palam": "India",
+    "Barsapara": "India",
+    "Mangalagiri": "India",
+    "Mulapadu": "India",
+    "Alur": "India",
+    "Sector-16": "India",
+    "Sector 26": "India",
+    "Gurugram": "India",
+    "BKC": "India",
+    "Thiruvananthapuram": "India",
+    
+    # Bhutan
+    "Gelephu": "Bhutan",
+    
+    # Argentina
+    "San Albano": "Argentina",
+    "Quilmes": "Argentina",
+}
+
+
+# Venue name to (city, country) mapping for venues without city data
+# This helps identify venues when the city field is NULL in the database
+VENUE_TO_LOCATION = {
+    # India - Domestic venues without city
+    "ACA Stadium, Barsapara": ("Guwahati", "India"),
+    "ACA Stadium,Mangalagiri": ("Mangalagiri", "India"),
+    "Airforce Complex ground, Palam": ("Delhi", "India"),
+    "Airforce Complex ground, Palam II": ("Delhi", "India"),
+    "Alembic 2  Cricket Ground": ("Vadodara", "India"),
+    "Alur Cricket Stadium": ("Bengaluru", "India"),
+    "Alur Cricket Stadium II": ("Bengaluru", "India"),
+    "Alur Cricket Stadium III": ("Bengaluru", "India"),
+    "BKC Ground": ("Mumbai", "India"),
+    "Barabati Stadium": ("Cuttack", "India"),
+    "Bharat Ratna Shri Atal Bihari Vajpayee Ekana Cricket Stadium": ("Lucknow", "India"),
+    "Bharat Ratna Shri Atal Bihari Vajpayee Ekana Cricket Stadium B": ("Lucknow", "India"),
+    "C B Patel Ground": ("Ahmedabad", "India"),
+    "Chaudhry Bansi Lal Cricket Stadium": ("Rohtak", "India"),
+    "Cricket Stadium, Sector-16": ("Chandigarh", "India"),
+    "DRIEMS Ground": ("Cuttack", "India"),
+    "Dr P.V.G. Raju ACA Sports Complex": ("Visakhapatnam", "India"),
+    "Dr. Gokaraju Laila Ganga Raju ACA Cricket Complex -CP Ground,Mulapadu": ("Vijayawada", "India"),
+    "Dr. Gokaraju Laila Ganga Raju ACA Cricket Complex -DVR Ground,Mulapadu": ("Vijayawada", "India"),
+    "Dr. Y.S. Rajasekhara Reddy ACA VDCA Cricket Stadium": ("Visakhapatnam", "India"),
+    "F B Colony Ground": ("Delhi", "India"),
+    "GSSS, Sector 26": ("Chandigarh", "India"),
+    "Gokaraju Liala Gangaaraju ACA Cricket Ground": ("Vijayawada", "India"),
+    "Greenfield Stadium": ("Thiruvananthapuram", "India"),
+    "Gurugram Cricket Ground (SRNCC)": ("Gurugram", "India"),
+    "Holkar Stadium": ("Indore", "India"),
+    "IC-Gurunanak College Ground": ("Chennai", "India"),
+    "Jadavpur University Campus": ("Kolkata", "India"),
+    "Lalbhai Contractor Stadium": ("Ahmedabad", "India"),
+    "Motibaug Cricket Ground": ("Vadodara", "India"),
+    "Narendra Modi Stadium Ground 'A', Motera": ("Ahmedabad", "India"),
+    "Nehru Stadium": ("Guwahati", "India"),
+    "Reliance Cricket Stadium": ("Mumbai", "India"),
+    "SSN College Ground": ("Chennai", "India"),
+    "Sharad Pawar Cricket Academy BKC": ("Mumbai", "India"),
+    "Sri Ramachandra Medical College": ("Chennai", "India"),
+    "St'Xavier's KCA Cricket Ground": ("Thiruvananthapuram", "India"),
+    "T I Murugappa Ground": ("Chennai", "India"),
+    "Emerald Heights International School Ground": ("Indore", "India"),
+    
+    # Romania
+    "Moara Vlasiei Cricket Ground": ("Ilfov County", "Romania"),
+    
+    # Guyana
+    "Guyana National Stadium, Providence": ("Providence", "Guyana"),
+    
+    # Argentina
+    "San Albano": ("Buenos Aires", "Argentina"),
+    "St Georges Quilmes": ("Buenos Aires", "Argentina"),
+    
+    # Nigeria
+    "Tafawa Balewa Square (TBS) Cricket Oval": ("Lagos", "Nigeria"),
+    
+    # West Indies / Caribbean
+    "Kensington Oval, Barbados": ("Bridgetown", "Barbados"),
+    "Kensington Oval, Bridgetown, Barbados": ("Bridgetown", "Barbados"),
+    "Sir Vivian Richards Stadium, North Sound": ("North Sound", "Antigua"),
+    
+    # Guernsey
+    "Guernsey Rovers Athletic Club Ground, Port Soif": ("Port Soif", "Guernsey"),
+    
+    # Bhutan
+    "Gelephu International Cricket Ground": ("Gelephu", "Bhutan"),
 }
 
 
@@ -579,6 +689,52 @@ def get_country_for_city(city: str) -> str:
         Country name or "Unknown" if not found
     """
     return CITY_TO_COUNTRY.get(city, "Unknown")
+
+
+def get_location_for_venue(venue_name: str) -> tuple:
+    """
+    Get (city, country) for a venue when city data is missing.
+    
+    Args:
+        venue_name: Full venue name from database
+        
+    Returns:
+        Tuple of (city, country) or (None, None) if not found
+    """
+    if venue_name in VENUE_TO_LOCATION:
+        return VENUE_TO_LOCATION[venue_name]
+    
+    # Try partial matching for variations
+    for known_venue, location in VENUE_TO_LOCATION.items():
+        if known_venue in venue_name or venue_name in known_venue:
+            return location
+    
+    return None, None
+
+
+def get_country_for_venue(venue_name: str, city: str = None) -> str:
+    """
+    Get country for a venue, trying city first, then venue name lookup.
+    
+    Args:
+        venue_name: Full venue name
+        city: City name (may be None)
+        
+    Returns:
+        Country name or "Unknown"
+    """
+    # Try city mapping first
+    if city:
+        country = get_country_for_city(city)
+        if country != "Unknown":
+            return country
+    
+    # Try venue name mapping
+    _, country = get_location_for_venue(venue_name)
+    if country:
+        return country
+    
+    return "Unknown"
 
 
 def get_flag_for_country(country: str) -> str:
@@ -607,4 +763,32 @@ def get_country_with_flag(city: str) -> tuple:
     country = get_country_for_city(city)
     flag = get_flag_for_country(country)
     return country, flag
+
+
+def is_west_indies_country(country: str) -> bool:
+    """
+    Check if a country is part of the West Indies grouping.
+    
+    Args:
+        country: Country name
+        
+    Returns:
+        True if the country is a West Indies member
+    """
+    return country in WEST_INDIES_COUNTRIES
+
+
+def get_region_for_country(country: str) -> str:
+    """
+    Get the region for a country (currently only West Indies has a region).
+    
+    Args:
+        country: Country name
+        
+    Returns:
+        Region name or None
+    """
+    if is_west_indies_country(country):
+        return "West Indies"
+    return None
 

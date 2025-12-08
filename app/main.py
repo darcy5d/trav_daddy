@@ -182,7 +182,7 @@ def get_venues():
     
     Returns venues grouped hierarchically by country -> city -> venue.
     """
-    from src.data.country_mapping import get_country_for_city, get_flag_for_country
+    from src.data.country_mapping import get_country_for_venue, get_flag_for_country, is_west_indies_country, get_region_for_country
     
     try:
         gender = request.args.get('gender', 'male')
@@ -212,27 +212,36 @@ def get_venues():
             venue_id = row['venue_id']
             name = row['name']
             city = row['city'] or 'Unknown'
-            country = row['country'] or get_country_for_city(city)
+            country = row['country'] or get_country_for_venue(name, city)
             match_count = row['match_count']
             
-            # Initialize country if not seen
-            if country not in countries:
-                countries[country] = {
-                    'name': country,
-                    'flag': get_flag_for_country(country),
-                    'cities': {}
+            # Check if this country should be grouped under West Indies
+            region = get_region_for_country(country)
+            display_country = region if region else country
+            
+            # Initialize country/region if not seen
+            if display_country not in countries:
+                countries[display_country] = {
+                    'name': display_country,
+                    'flag': get_flag_for_country(display_country),
+                    'cities': {},
+                    'is_region': region is not None
                 }
             
+            # For West Indies, include the actual country in city display
+            display_city = f"{country} - {city}" if region else city
+            
             # Initialize city if not seen
-            if city not in countries[country]['cities']:
-                countries[country]['cities'][city] = []
+            if display_city not in countries[display_country]['cities']:
+                countries[display_country]['cities'][display_city] = []
             
             # Add venue
-            countries[country]['cities'][city].append({
+            countries[display_country]['cities'][display_city].append({
                 'venue_id': venue_id,
                 'name': name,
                 'city': city,
                 'country': country,
+                'region': region,
                 'match_count': match_count
             })
         

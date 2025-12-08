@@ -238,10 +238,26 @@ class DatabaseManager:
         name: str,
         city: Optional[str] = None
     ) -> int:
-        """Get venue ID, creating if necessary."""
+        """
+        Get venue ID, creating if necessary.
+        
+        Uses fuzzy matching to find existing venues and populates
+        country, canonical_name, and region fields.
+        """
+        from src.data.venue_normalizer import (
+            normalize_venue_name,
+            extract_canonical_name,
+            venue_similarity,
+            extract_city_from_venue
+        )
+        from src.data.country_mapping import (
+            get_country_for_venue,
+            get_region_for_country
+        )
+        
         cursor = conn.cursor()
         
-        # Try to find existing venue
+        # Try exact match first
         if city:
             cursor.execute(
                 "SELECT venue_id FROM venues WHERE name = ? AND city = ?",
@@ -254,14 +270,45 @@ class DatabaseManager:
             )
         
         row = cursor.fetchone()
-        
         if row:
             return row[0]
         
-        # Create new venue
+        # Try to extract city from venue name if not provided
+        if not city:
+            city = extract_city_from_venue(name)
+        
+        # Try fuzzy matching against existing venues
+        # Only match if city matches or one city is NULL
+        if city:
+            # Get venues in the same city
+            cursor.execute(
+                "SELECT venue_id, name, city FROM venues WHERE city = ? OR city IS NULL",
+                (city,)
+            )
+        else:
+            # If no city provided, only match venues without city or with extracted city
+            cursor.execute(
+                "SELECT venue_id, name, city FROM venues WHERE city IS NULL"
+            )
+        
+        similar_venues = cursor.fetchall()
+        
+        # Check for similar venues
+        for existing in similar_venues:
+            similarity = venue_similarity(name, existing['name'])
+            if similarity >= 0.85:
+                logger.debug(f"Fuzzy matched venue: '{name}' -> '{existing['name']}' (score: {similarity:.2f})")
+                return existing['venue_id']
+        
+        # No match found - create new venue with enriched data
+        country = get_country_for_venue(name, city)
+        region = get_region_for_country(country) if country != "Unknown" else None
+        canonical = extract_canonical_name(name, city)
+        
         cursor.execute(
-            "INSERT INTO venues (name, city) VALUES (?, ?)",
-            (name, city)
+            """INSERT INTO venues (name, city, country, canonical_name, region) 
+               VALUES (?, ?, ?, ?, ?)""",
+            (name, city, country if country != "Unknown" else None, canonical, region)
         )
         return cursor.lastrowid
     
