@@ -595,7 +595,7 @@ class CricketDataClient:
         Approach:
         1. Get all T20 matches from /currentMatches (live/recent matches)
         2. Collect unique series_id values - these are "active" series
-        3. Search for T20I series to catch international matches not in /currentMatches
+        3. Search for major T20 leagues to catch matches not in /currentMatches
         4. For each discovered series, fetch ALL matches via /series_info
         5. Include any matches from those series that are in the next 24 hours
         
@@ -627,37 +627,36 @@ class CricketDataClient:
         
         logger.info(f"Discovered {len(active_series_ids)} active T20 series from currentMatches")
         
-        # STEP 1b: Search for T20I series to catch international matches
-        # These might not appear in /currentMatches if no matches are currently live
-        # Limit to avoid too many API calls
-        t20i_search_terms = ['T20I 2025']  # Focused search for recent T20Is
-        max_additional_series = 5  # Limit extra series to avoid slow response
-        additional_series_count = 0
+        # STEP 1b: Search for major T20 leagues that might have matches today
+        # /currentMatches only shows live/recent matches, so we search for major leagues
+        # to catch scheduled matches (e.g., WBBL knockout when no match is live)
+        major_league_searches = [
+            'Womens Big Bash',      # WBBL
+            'Big Bash League',      # BBL (men's)
+            'International League T20',  # ILT20
+            'T20I 2025',            # International T20s
+            'Premier League T20',   # Various domestic leagues
+        ]
         
-        for search_term in t20i_search_terms:
-            if additional_series_count >= max_additional_series:
-                break
+        for search_term in major_league_searches:
             try:
                 series_data = self._request('series', {'search': search_term})
                 if 'data' in series_data:
-                    for series in series_data['data'][:10]:  # Only check first 10 results
-                        if additional_series_count >= max_additional_series:
-                            break
+                    for series in series_data['data'][:5]:  # Check first 5 results per search
                         # Only include series with T20 matches
                         if series.get('t20', 0) > 0:
                             series_id = series.get('id')
                             start_date = series.get('startDate', '')
                             end_date = series.get('endDate', '')
                             if series_id and series_id not in active_series_ids:
-                                # Check if series could have matches today
+                                # Check if series could have matches today/tomorrow
                                 if self._series_might_have_matches_today(start_date, end_date, today_str, tomorrow_str):
                                     active_series_ids.add(series_id)
-                                    additional_series_count += 1
-                                    logger.debug(f"Added T20I series from search: {series.get('name')}")
+                                    logger.debug(f"Added series from search '{search_term}': {series.get('name')}")
             except Exception as e:
                 logger.warning(f"Failed to search for {search_term} series: {e}")
         
-        logger.info(f"Total active series after T20I search: {len(active_series_ids)} (+{additional_series_count} from search)")
+        logger.info(f"Total active series after league searches: {len(active_series_ids)}")
         
         # STEP 2: For each active series, get ALL matches and filter to next 24h
         matches_by_series = {}
