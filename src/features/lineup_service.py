@@ -87,13 +87,109 @@ class LineupService:
         """Convert API team name to DB team name."""
         return self._team_name_map.get(api_team_name, api_team_name.replace(' Women', ''))
     
+    def _normalize_venue_name(self, name: str) -> str:
+        """
+        Normalize venue name for fuzzy matching.
+        
+        - Lowercase
+        - Remove punctuation and extra spaces
+        - Standardize common venue terms
+        """
+        import re
+        if not name:
+            return ""
+        
+        # Lowercase
+        normalized = name.lower()
+        
+        # Remove punctuation except spaces
+        normalized = re.sub(r'[^\w\s]', ' ', normalized)
+        
+        # Standardize common terms
+        replacements = {
+            'cricket ground': 'stadium',
+            'cricket stadium': 'stadium',
+            'international cricket stadium': 'stadium',
+            'international stadium': 'stadium',
+            ' ground': ' stadium',
+            ' oval': ' stadium',
+        }
+        for old, new in replacements.items():
+            normalized = normalized.replace(old, new)
+        
+        # Remove extra spaces
+        normalized = ' '.join(normalized.split())
+        
+        return normalized
+    
+    def _extract_venue_tokens(self, name: str) -> set:
+        """Extract significant tokens from venue name for matching."""
+        # Words to ignore
+        stopwords = {'the', 'of', 'at', 'in', 'a', 'an', 'cricket', 'international', 
+                    'ground', 'stadium', 'oval', 'park', 'field', 'arena'}
+        
+        normalized = self._normalize_venue_name(name)
+        tokens = set(normalized.split())
+        return tokens - stopwords
+    
+    def _venue_similarity_score(self, api_venue: str, db_name: str, db_city: str) -> float:
+        """
+        Calculate similarity score between API venue and DB venue.
+        
+        Returns a score from 0 to 1, where 1 is exact match.
+        """
+        # Combine DB name and city
+        db_full = f"{db_name} {db_city}" if db_city else db_name
+        
+        # Check for exact match
+        if api_venue.lower() == db_full.lower():
+            return 1.0
+        if api_venue.lower() == db_name.lower():
+            return 0.95
+        
+        # Token-based matching
+        api_tokens = self._extract_venue_tokens(api_venue)
+        db_tokens = self._extract_venue_tokens(db_full)
+        
+        if not api_tokens or not db_tokens:
+            return 0.0
+        
+        # Jaccard similarity on tokens
+        intersection = api_tokens & db_tokens
+        union = api_tokens | db_tokens
+        token_score = len(intersection) / len(union) if union else 0
+        
+        # Check if city matches
+        api_parts = [p.strip().lower() for p in api_venue.split(',')]
+        city_match = any(db_city and db_city.lower() in p for p in api_parts)
+        
+        # Boost score if city matches
+        if city_match:
+            token_score = min(1.0, token_score + 0.3)
+        
+        # Check for substring match in key terms
+        api_norm = self._normalize_venue_name(api_venue)
+        db_norm = self._normalize_venue_name(db_name)
+        
+        if db_norm in api_norm or api_norm in db_norm:
+            token_score = max(token_score, 0.7)
+        
+        # Check for key venue name in API venue (e.g., "MCG" in "Melbourne Cricket Ground")
+        key_names = ['mcg', 'scg', 'waca', 'gabba', 'eden gardens', 'lords', 
+                    'chinnaswamy', 'wankhede', 'narendra modi', 'ekana', 'arun jaitley']
+        for key in key_names:
+            if key in api_venue.lower() and key in db_name.lower():
+                token_score = max(token_score, 0.8)
+        
+        return token_score
+    
     def find_venue_in_db(self, api_venue: str, gender: str = 'female') -> Tuple[Optional[int], Optional[str]]:
         """
-        Find a venue in our database matching the API venue name.
+        Find a venue in our database matching the API venue name using fuzzy matching.
         
         Args:
-            api_venue: Venue string from API (e.g., "Adelaide Oval, Adelaide")
-            gender: 'male' or 'female' for fallback venue lookup
+            api_venue: Venue string from API (e.g., "Narendra Modi Stadium B Ground, Ahmedabad")
+            gender: 'male' or 'female' for filtering venues with match history
             
         Returns:
             Tuple of (venue_id, venue_name) or (None, None) if not found
@@ -104,7 +200,7 @@ class LineupService:
         conn = get_connection()
         cursor = conn.cursor()
         
-        # Try exact match first
+        # Step 1: Try exact match first (fastest)
         cursor.execute("""
             SELECT venue_id, name, city
             FROM venues
@@ -115,41 +211,73 @@ class LineupService:
         
         result = cursor.fetchone()
         
-        if not result:
-            # Try partial match on venue name
-            venue_name_part = api_venue.split(',')[0].strip()
-            cursor.execute("""
-                SELECT venue_id, name, city
-                FROM venues
-                WHERE name LIKE ?
-                LIMIT 1
-            """, (f'%{venue_name_part}%',))
-            result = cursor.fetchone()
-        
-        if not result:
-            # Try matching by city (fallback for variations like "WACA Ground" vs "W.A.C.A. Ground")
-            city_part = api_venue.split(',')[-1].strip() if ',' in api_venue else None
-            if city_part:
-                # Get most common venue in that city for specified gender
-                cursor.execute("""
-                    SELECT v.venue_id, v.name, v.city, COUNT(m.match_id) as match_count
-                    FROM venues v
-                    JOIN matches m ON m.venue_id = v.venue_id
-                    WHERE v.city = ? AND m.gender = ?
-                    GROUP BY v.venue_id
-                    ORDER BY match_count DESC
-                    LIMIT 1
-                """, (city_part, gender))
-                result = cursor.fetchone()
-        
-        conn.close()
-        
         if result:
+            conn.close()
             full_name = f"{result['name']}, {result['city']}" if result['city'] else result['name']
-            logger.info(f"Matched venue '{api_venue}' -> {result['venue_id']}: {full_name}")
+            logger.info(f"Exact venue match: '{api_venue}' -> {result['venue_id']}: {full_name}")
             return result['venue_id'], full_name
         
-        logger.warning(f"Could not match venue: {api_venue}")
+        # Step 2: Fuzzy matching - get all venues with matches for this gender
+        cursor.execute("""
+            SELECT v.venue_id, v.name, v.city, COUNT(m.match_id) as match_count
+            FROM venues v
+            JOIN matches m ON m.venue_id = v.venue_id
+            WHERE m.match_type = 'T20' AND m.gender = ?
+            GROUP BY v.venue_id
+            HAVING match_count >= 3
+        """, (gender,))
+        
+        all_venues = cursor.fetchall()
+        conn.close()
+        
+        if not all_venues:
+            logger.warning(f"No venues found in DB for gender={gender}")
+            return None, None
+        
+        # Score each venue
+        best_match = None
+        best_score = 0.0
+        min_score_threshold = 0.4  # Minimum score to accept a match
+        
+        for venue in all_venues:
+            score = self._venue_similarity_score(api_venue, venue['name'], venue['city'])
+            
+            # Boost score based on match count (prefer venues with more history)
+            match_boost = min(0.1, venue['match_count'] / 100)
+            score += match_boost
+            
+            if score > best_score:
+                best_score = score
+                best_match = venue
+        
+        if best_match and best_score >= min_score_threshold:
+            full_name = f"{best_match['name']}, {best_match['city']}" if best_match['city'] else best_match['name']
+            logger.info(f"Fuzzy venue match (score={best_score:.2f}): '{api_venue}' -> {best_match['venue_id']}: {full_name}")
+            return best_match['venue_id'], full_name
+        
+        # Step 3: City-based fallback - find most popular venue in matching city
+        city_part = api_venue.split(',')[-1].strip() if ',' in api_venue else None
+        if city_part:
+            conn = get_connection()
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT v.venue_id, v.name, v.city, COUNT(m.match_id) as match_count
+                FROM venues v
+                JOIN matches m ON m.venue_id = v.venue_id
+                WHERE LOWER(v.city) = LOWER(?) AND m.gender = ?
+                GROUP BY v.venue_id
+                ORDER BY match_count DESC
+                LIMIT 1
+            """, (city_part, gender))
+            result = cursor.fetchone()
+            conn.close()
+            
+            if result:
+                full_name = f"{result['name']}, {result['city']}" if result['city'] else result['name']
+                logger.info(f"City fallback venue match: '{api_venue}' -> {result['venue_id']}: {full_name} (city={city_part})")
+                return result['venue_id'], full_name
+        
+        logger.warning(f"Could not match venue: '{api_venue}' (best score was {best_score:.2f})")
         return None, None
     
     def get_upcoming_fixtures(self, limit: int = 10, gender: str = 'female') -> List[WBBLMatch]:
