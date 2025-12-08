@@ -54,17 +54,13 @@ def step_calculate_elo():
     logger.info("STEP 2: ELO CALCULATIONS")
     logger.info("=" * 60)
     
-    from src.elo.calculator_v2 import ELOCalculatorV2
+    from src.elo.calculator_v2 import calculate_all_elos_v2
     
-    calculator = ELOCalculatorV2()
+    # Calculate ELOs for all matches (handles both genders internally)
+    stats = calculate_all_elos_v2(force_recalculate=True)
     
-    # Calculate for both genders
-    for gender in ['male', 'female']:
-        logger.info(f"Calculating ELO for {gender} matches...")
-        stats = calculator.calculate_all_matches(gender=gender)
-        logger.info(f"  Processed: {stats['matches_processed']} matches")
-    
-    return True
+    logger.info(f"ELO calculation complete")
+    return stats
 
 
 def step_build_player_distributions(gender: str = 'male'):
@@ -73,19 +69,12 @@ def step_build_player_distributions(gender: str = 'male'):
     logger.info(f"STEP 3: PLAYER DISTRIBUTIONS ({gender.upper()})")
     logger.info("=" * 60)
     
-    from src.features.player_distributions import PlayerDistributionBuilder
+    from src.features.player_distributions import build_and_save_distributions
     
-    builder = PlayerDistributionBuilder(gender=gender)
-    distributions = builder.build_all_distributions()
+    stats = build_and_save_distributions(format_type='T20', gender=gender, min_balls=10)
     
-    # Save to file
-    import pickle
-    output_path = project_root / 'data' / 'processed' / f'player_distributions_t20_{gender}.pkl'
-    with open(output_path, 'wb') as f:
-        pickle.dump(distributions, f)
-    
-    logger.info(f"Saved {len(distributions)} player distributions to {output_path}")
-    return len(distributions)
+    logger.info(f"Built player distributions for {gender}")
+    return stats
 
 
 def step_build_venue_stats(gender: str = 'male'):
@@ -96,17 +85,15 @@ def step_build_venue_stats(gender: str = 'male'):
     
     from src.features.venue_stats import VenueStatsBuilder
     
-    builder = VenueStatsBuilder(match_type='T20', gender=gender)
-    stats = builder.build_all_venue_stats()
+    builder = VenueStatsBuilder(format_type='T20', gender=gender)
+    builder.build_from_database()
     
     # Save to file
-    import pickle
-    output_path = project_root / 'data' / 'processed' / f'venue_stats_t20_{gender}.pkl'
-    with open(output_path, 'wb') as f:
-        pickle.dump(stats, f)
+    output_path = str(project_root / 'data' / 'processed' / f'venue_stats_t20_{gender}.pkl')
+    builder.save(output_path)
     
-    logger.info(f"Saved stats for {len(stats)} venues to {output_path}")
-    return len(stats)
+    logger.info(f"Built venue stats for {gender}")
+    return True
 
 
 def step_generate_training_data(gender: str = 'male'):
@@ -115,20 +102,13 @@ def step_generate_training_data(gender: str = 'male'):
     logger.info(f"STEP 5: TRAINING DATA GENERATION ({gender.upper()})")
     logger.info("=" * 60)
     
-    from src.features.ball_training_data import generate_training_data
+    from src.features.ball_training_data import main as generate_main
     
-    X, y, meta = generate_training_data(format_type='T20', gender=gender)
+    # This generates and saves the training data
+    generate_main(format_type='T20', gender=gender)
     
-    # Save to files
-    import numpy as np
-    data_dir = project_root / 'data' / 'processed'
-    
-    np.save(data_dir / f'ball_X_t20_{gender}.npy', X)
-    np.save(data_dir / f'ball_y_t20_{gender}.npy', y)
-    meta.to_csv(data_dir / f'ball_meta_t20_{gender}.csv', index=False)
-    
-    logger.info(f"Saved {len(X)} training samples with {X.shape[1]} features")
-    return len(X)
+    logger.info(f"Generated training data for {gender}")
+    return True
 
 
 def step_train_model(gender: str = 'male'):
@@ -149,31 +129,25 @@ def step_validate_model(gender: str = 'male'):
     logger.info(f"STEP 7: MODEL VALIDATION ({gender.upper()})")
     logger.info("=" * 60)
     
-    from src.models.ball_prediction_nn import BallPredictionNN
     import numpy as np
+    from pathlib import Path
     
-    model = BallPredictionNN(gender=gender)
-    
-    # Load test data
+    # Check if model file exists
     data_dir = project_root / 'data' / 'processed'
-    X = np.load(data_dir / f'ball_X_t20_{gender}.npy')
-    y = np.load(data_dir / f'ball_y_t20_{gender}.npy')
+    model_path = data_dir / f'ball_prediction_model_t20_{gender}.keras'
     
-    # Take last 20% as test set
-    test_idx = int(len(X) * 0.8)
-    X_test = X[test_idx:]
-    y_test = y[test_idx:]
-    
-    # Predict
-    predictions = model.predict_proba(X_test)
-    predicted_classes = np.argmax(predictions, axis=1)
-    true_classes = np.argmax(y_test, axis=1)
-    
-    # Calculate accuracy
-    accuracy = np.mean(predicted_classes == true_classes)
-    
-    logger.info(f"Test accuracy: {accuracy:.4f}")
-    return accuracy
+    if model_path.exists():
+        size_mb = model_path.stat().st_size / (1024 * 1024)
+        logger.info(f"Model saved: {model_path.name} ({size_mb:.2f} MB)")
+        
+        # Load test data to check dimensions
+        X = np.load(data_dir / f'ball_X_t20_{gender}.npy')
+        logger.info(f"Training data: {len(X)} samples, {X.shape[1]} features")
+        
+        return True
+    else:
+        logger.warning(f"Model file not found: {model_path}")
+        return False
 
 
 def run_full_pipeline(

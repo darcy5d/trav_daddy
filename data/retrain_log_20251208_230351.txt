@@ -1,0 +1,26 @@
+2025-12-08 23:03:51,808 [INFO] ============================================================
+2025-12-08 23:03:51,808 [INFO] FULL MODEL RETRAINING PIPELINE
+2025-12-08 23:03:51,808 [INFO] Started at: 2025-12-08 23:03:51
+2025-12-08 23:03:51,808 [INFO] ============================================================
+2025-12-08 23:03:51,808 [INFO] Skipping data ingestion (--skip-ingest)
+2025-12-08 23:03:51,808 [INFO] ============================================================
+2025-12-08 23:03:51,808 [INFO] STEP 2: ELO CALCULATIONS
+2025-12-08 23:03:51,808 [INFO] ============================================================
+2025-12-08 23:03:51,904 [INFO] Calculating ELO for male matches...
+Traceback (most recent call last):
+  File "/Users/darcy5d/Desktop/DD_AI_models/indias_dad/scripts/full_retrain.py", line 254, in <module>
+    sys.exit(main())
+             ~~~~^^
+  File "/Users/darcy5d/Desktop/DD_AI_models/indias_dad/scripts/full_retrain.py", line 243, in main
+    results = run_full_pipeline(
+        skip_ingest=args.skip_ingest,
+    ...<2 lines>...
+        female_only=args.female_only
+    )
+  File "/Users/darcy5d/Desktop/DD_AI_models/indias_dad/scripts/full_retrain.py", line 203, in run_full_pipeline
+    results['elo'] = step_calculate_elo()
+                     ~~~~~~~~~~~~~~~~~~^^
+  File "/Users/darcy5d/Desktop/DD_AI_models/indias_dad/scripts/full_retrain.py", line 64, in step_calculate_elo
+    stats = calculator.calculate_all_matches(gender=gender)
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AttributeError: 'EloCalculatorV2' object has no attribute 'calculate_all_matches'
