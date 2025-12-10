@@ -1001,7 +1001,9 @@
         const teamId = document.getElementById(`team${teamNum}-select`).value;
         if (!teamId) return;
         
-        const response = await fetch(`/api/players/${teamId}?gender=${currentGender}`);
+        // Use the team-specific gender filter, not the global currentGender
+        const gender = teamFilters[teamNum].gender;
+        const response = await fetch(`/api/players/${teamId}?gender=${gender}`);
         const data = await response.json();
         
         if (data.success) {
