@@ -292,6 +292,7 @@
             <li><a href="/predict" class="{% if request.path == '/predict' %}active{% endif %}">Predict</a></li>
             <li><a href="/rankings" class="{% if request.path == '/rankings' %}active{% endif %}">Rankings</a></li>
         </ul>
+        {% block navbar_extra %}{% endblock %}
     </nav>
     
     <main class="container">

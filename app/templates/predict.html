@@ -2,6 +2,21 @@
 
 {% block title %}Match Prediction - Cricket Predictor{% endblock %}
 
+{% block navbar_extra %}
+<div class="timezone-selector">
+    <label for="timezone-select">🕐 TZ:</label>
+    <select id="timezone-select" onchange="setTimezone(this.value)">
+        <option value="Australia/Melbourne">Melbourne (AEDT)</option>
+        <option value="Australia/Sydney">Sydney (AEDT)</option>
+        <option value="Asia/Kolkata">India (IST)</option>
+        <option value="Asia/Dubai">Dubai (GST)</option>
+        <option value="Europe/London">London (GMT)</option>
+        <option value="America/New_York">New York (EST)</option>
+        <option value="UTC">UTC/GMT</option>
+    </select>
+</div>
+{% endblock %}
+
 {% block content %}
 <style>
     /* Segmented Control Styles */
@@ -51,17 +66,8 @@
         display: block;
     }
     
-    /* Timezone Selector */
+    /* Timezone Selector (in navbar) */
     .timezone-selector {
-        position: fixed;
-        top: 70px;
-        right: 20px;
-        z-index: 1000;
-        background: var(--bg-secondary);
-        padding: 0.5rem 0.75rem;
-        border-radius: 8px;
-        border: 1px solid var(--border-color);
-        box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
         display: flex;
         align-items: center;
         gap: 0.5rem;
@@ -89,20 +95,6 @@
         border-color: var(--accent-primary);
     }
 </style>
-
-<!-- Timezone Selector (Fixed Position) -->
-<div class="timezone-selector">
-    <label for="timezone-select">🕐 TZ:</label>
-    <select id="timezone-select" onchange="setTimezone(this.value)">
-        <option value="Australia/Melbourne">Melbourne (AEDT)</option>
-        <option value="Australia/Sydney">Sydney (AEDT)</option>
-        <option value="Asia/Kolkata">India (IST)</option>
-        <option value="Asia/Dubai">Dubai (GST)</option>
-        <option value="Europe/London">London (GMT)</option>
-        <option value="America/New_York">New York (EST)</option>
-        <option value="UTC">UTC/GMT</option>
-    </select>
-</div>
 
 <div class="hero" style="padding: 2rem;">
     <h1>Match Prediction</h1>
