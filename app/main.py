@@ -209,6 +209,110 @@ def get_teams():
         return jsonify({'success': False, 'error': str(e)}), 500
 
 
+@app.route('/api/team/<int:team_id>/recent-lineup', methods=['GET'])
+def get_team_recent_lineup(team_id):
+    """
+    Get the most recent playing XI for a team from our database.
+    
+    This is used as a fallback when ESPN doesn't have squad data.
+    """
+    try:
+        gender = request.args.get('gender', 'male')
+        
+        conn = get_connection()
+        cursor = conn.cursor()
+        
+        # Get the most recent match for this team
+        cursor.execute("""
+            SELECT m.match_id, m.date, m.team1_id, m.team2_id
+            FROM matches m
+            WHERE (m.team1_id = ? OR m.team2_id = ?)
+              AND m.match_type = 'T20'
+              AND m.gender = ?
+            ORDER BY m.date DESC
+            LIMIT 1
+        """, (team_id, team_id, gender))
+        
+        recent_match = cursor.fetchone()
+        
+        if not recent_match:
+            conn.close()
+            return jsonify({
+                'success': False,
+                'error': 'No recent matches found for this team'
+            })
+        
+        match_id = recent_match['match_id']
+        match_date = recent_match['date']
+        
+        # Get the players who played in that match for this team
+        # First get the innings for this team
+        cursor.execute("""
+            SELECT innings_id, batting_team_id
+            FROM innings
+            WHERE match_id = ?
+              AND (batting_team_id = ? OR bowling_team_id = ?)
+        """, (match_id, team_id, team_id))
+        
+        innings_rows = cursor.fetchall()
+        
+        # Get unique players from deliveries
+        player_ids = set()
+        for inn in innings_rows:
+            innings_id = inn['innings_id']
+            batting_team = inn['batting_team_id']
+            
+            if batting_team == team_id:
+                # Get batters from this innings
+                cursor.execute("""
+                    SELECT DISTINCT batter_id FROM deliveries WHERE innings_id = ?
+                    UNION
+                    SELECT DISTINCT non_striker_id FROM deliveries WHERE innings_id = ? AND non_striker_id IS NOT NULL
+                """, (innings_id, innings_id))
+            else:
+                # Get bowlers from this innings (we were bowling)
+                cursor.execute("""
+                    SELECT DISTINCT bowler_id FROM deliveries WHERE innings_id = ?
+                """, (innings_id,))
+            
+            for row in cursor.fetchall():
+                if row[0]:
+                    player_ids.add(row[0])
+        
+        # Get player details
+        if player_ids:
+            placeholders = ','.join('?' * len(player_ids))
+            cursor.execute(f"""
+                SELECT player_id, name, batting_style, bowling_style
+                FROM players
+                WHERE player_id IN ({placeholders})
+                ORDER BY name
+            """, list(player_ids))
+            players = [dict(row) for row in cursor.fetchall()]
+        else:
+            players = []
+        
+        # Get team name
+        cursor.execute("SELECT name FROM teams WHERE team_id = ?", (team_id,))
+        team_row = cursor.fetchone()
+        team_name = team_row['name'] if team_row else 'Unknown'
+        
+        conn.close()
+        
+        return jsonify({
+            'success': True,
+            'team_id': team_id,
+            'team_name': team_name,
+            'recent_match_date': match_date,
+            'recent_xi': players,
+            'player_count': len(players)
+        })
+    
+    except Exception as e:
+        logger.error(f"Error fetching recent lineup for team {team_id}: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
 @app.route('/api/venues', methods=['GET'])
 def get_venues():
     """
@@ -1464,6 +1568,383 @@ def get_wbbl_match(match_id):
     
     except Exception as e:
         logger.error(f"Error fetching WBBL match: {e}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+# ============================================================================
+# ESPN Cricinfo Endpoints (Web Scraping)
+# ============================================================================
+
+_espn_scraper = None
+_espn_cache = {}  # Simple in-memory cache
+_espn_cache_time = {}
+
+ESPN_CACHE_TTL = 30 * 60  # 30 minutes
+
+
+def get_espn_scraper():
+    """Get or initialize the ESPN scraper."""
+    global _espn_scraper
+    if _espn_scraper is None:
+        from src.api.espn_scraper import ESPNCricInfoScraper
+        _espn_scraper = ESPNCricInfoScraper(request_delay=1.0)
+        logger.info("ESPN Cricinfo scraper initialized")
+    return _espn_scraper
+
+
+def _is_cache_valid(cache_key: str) -> bool:
+    """Check if cache entry is still valid."""
+    if cache_key not in _espn_cache_time:
+        return False
+    return (datetime.now().timestamp() - _espn_cache_time[cache_key]) < ESPN_CACHE_TTL
+
+
+@app.route('/api/espn/upcoming', methods=['GET'])
+def get_espn_upcoming():
+    """
+    Get upcoming T20 matches from ESPN Cricinfo.
+    
+    Query params:
+        hours_ahead: How many hours ahead to include (default 24)
+        refresh: Set to 'true' to bypass cache
+        
+    Returns:
+        List of upcoming T20 matches with basic info
+    """
+    try:
+        hours_ahead = int(request.args.get('hours_ahead', 24))
+        force_refresh = request.args.get('refresh', '').lower() == 'true'
+        cache_key = f'espn_schedule_{hours_ahead}'
+        
+        # Check cache (skip if force refresh)
+        if not force_refresh and _is_cache_valid(cache_key):
+            logger.info("Using cached ESPN schedule")
+            return jsonify(_espn_cache[cache_key])
+        
+        scraper = get_espn_scraper()
+        matches = scraper.get_t20_schedule(hours_ahead=hours_ahead)
+        
+        # Group by series
+        series_dict = {}
+        for m in matches:
+            if m.series_name not in series_dict:
+                series_dict[m.series_name] = {
+                    'series_name': m.series_name,
+                    'series_id': m.series_id,
+                    'gender': m.gender,
+                    'matches': []
+                }
+            
+            series_dict[m.series_name]['matches'].append({
+                'espn_id': m.espn_id,
+                'title': m.title,
+                'team1': m.team1_name,
+                'team2': m.team2_name,
+                'match_type': m.match_type,
+                'slug': m.slug,
+                'status': m.status,
+                'start_date': m.start_date,  # YYYY-MM-DD
+                'start_time': m.start_time,  # Local time string
+                'date_time_gmt': m.date_time_gmt,  # ISO format GMT
+                'venue_city': m.venue_city,  # City name from schedule
+                'match_url': m.match_url,
+                'gender': m.gender
+            })
+        
+        result = {
+            'success': True,
+            'source': 'espn_cricinfo',
+            'matches_by_series': list(series_dict.values()),
+            'total_matches': len(matches),
+            'hours_ahead': hours_ahead
+        }
+        
+        # Cache result
+        _espn_cache[cache_key] = result
+        _espn_cache_time[cache_key] = datetime.now().timestamp()
+        
+        return jsonify(result)
+    
+    except Exception as e:
+        logger.error(f"Error fetching ESPN upcoming matches: {e}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/espn/match', methods=['GET'])
+def get_espn_match():
+    """
+    Get full match details from ESPN Cricinfo including venue and squads.
+    
+    Query params:
+        url: The match-preview URL from ESPN
+        
+    Returns:
+        Match details with venue and squad data, matched to database
+    """
+    try:
+        match_url = request.args.get('url')
+        if not match_url:
+            return jsonify({'success': False, 'error': 'url parameter required'}), 400
+        
+        cache_key = f'espn_match_{match_url}'
+        
+        # Check cache (longer TTL for match details)
+        if cache_key in _espn_cache and _is_cache_valid(cache_key):
+            logger.info(f"Using cached ESPN match data")
+            return jsonify(_espn_cache[cache_key])
+        
+        scraper = get_espn_scraper()
+        match = scraper.get_match_details(match_url)
+        
+        if not match:
+            return jsonify({'success': False, 'error': 'Failed to fetch match from ESPN'}), 404
+        
+        # Match venue to database
+        venue_db = None
+        if match.venue:
+            venue_match = scraper.match_venue_to_db(match.venue, match.gender)
+            if venue_match:
+                venue_db = {'venue_id': venue_match[0], 'name': venue_match[1]}
+        
+        # Match teams to database
+        team1_db = None
+        team2_db = None
+        if match.team1:
+            team_match = scraper.match_team_to_db(match.team1, match.gender)
+            if team_match:
+                team1_db = {'team_id': team_match[0], 'name': team_match[1]}
+                # Match players
+                scraper.match_players_to_db(match.team1, team_match[1], match.gender)
+        
+        if match.team2:
+            team_match = scraper.match_team_to_db(match.team2, match.gender)
+            if team_match:
+                team2_db = {'team_id': team_match[0], 'name': team_match[1]}
+                # Match players
+                scraper.match_players_to_db(match.team2, team_match[1], match.gender)
+        
+        def team_to_dict(team):
+            if not team:
+                return None
+            return {
+                'espn_id': team.espn_id,
+                'name': team.name,
+                'long_name': team.long_name,
+                'abbreviation': team.abbreviation,
+                'db_team_id': team.db_team_id,
+                'players': [
+                    {
+                        'espn_id': p.espn_id,
+                        'name': p.name,
+                        'long_name': p.long_name,
+                        'role': p.role,
+                        'playing_roles': p.playing_roles,
+                        'batting_styles': p.batting_styles,
+                        'bowling_styles': p.bowling_styles,
+                        'is_overseas': p.is_overseas,
+                        'db_player_id': p.db_player_id
+                    }
+                    for p in team.players
+                ]
+            }
+        
+        result = {
+            'success': True,
+            'source': 'espn_cricinfo',
+            'match': {
+                'espn_id': match.espn_id,
+                'title': match.title,
+                'series_name': match.series_name,
+                'series_id': match.series_id,
+                'status': match.status,
+                'start_date': match.start_date,
+                'start_time': match.start_time,
+                'date_time_gmt': match.date_time_gmt,
+                'gender': match.gender,
+                'has_squads': match.has_squads,
+                'venue': {
+                    'name': match.venue.name if match.venue else None,
+                    'town': match.venue.town if match.venue else None,
+                    'country': match.venue.country if match.venue else None,
+                    'db_venue_id': venue_db['venue_id'] if venue_db else None,
+                    'db_venue_name': venue_db['name'] if venue_db else None
+                } if match.venue else None,
+                'team1': team_to_dict(match.team1),
+                'team2': team_to_dict(match.team2),
+                'team1_db': team1_db,
+                'team2_db': team2_db
+            }
+        }
+        
+        # Cache result
+        _espn_cache[cache_key] = result
+        _espn_cache_time[cache_key] = datetime.now().timestamp()
+        
+        return jsonify(result)
+    
+    except Exception as e:
+        logger.error(f"Error fetching ESPN match: {e}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/espn/prefetch', methods=['POST'])
+def prefetch_espn_matches():
+    """
+    Pre-fetch all match details for upcoming matches and cache them.
+    Returns status of each match (venue found, squad availability).
+    """
+    try:
+        hours_ahead = int(request.args.get('hours_ahead', 24))
+        
+        scraper = get_espn_scraper()
+        matches = scraper.get_t20_schedule(hours_ahead=hours_ahead)
+        
+        results = []
+        for m in matches:
+            match_status = {
+                'espn_id': m.espn_id,
+                'title': f"{m.team1_name} vs {m.team2_name}",
+                'match_url': m.match_url,
+                'venue_found': False,
+                'venue_name': None,
+                'team1_squad': False,
+                'team1_count': 0,
+                'team2_squad': False,
+                'team2_count': 0,
+                'cached': False
+            }
+            
+            # Check if already cached
+            cache_key = f'espn_match_{m.match_url}'
+            if _is_cache_valid(cache_key):
+                cached_data = _espn_cache.get(cache_key, {})
+                match_data = cached_data.get('match', {})
+                venue = match_data.get('venue', {})
+                team1 = match_data.get('team1', {})
+                team2 = match_data.get('team2', {})
+                
+                match_status['cached'] = True
+                match_status['venue_found'] = venue.get('db_venue_id') is not None
+                match_status['venue_name'] = venue.get('name')
+                match_status['team1_squad'] = len(team1.get('players', [])) > 0
+                match_status['team1_count'] = len(team1.get('players', []))
+                match_status['team2_squad'] = len(team2.get('players', [])) > 0
+                match_status['team2_count'] = len(team2.get('players', []))
+            else:
+                # Fetch and cache the match details
+                try:
+                    details = scraper.get_match_details(m.match_url)
+                    if details:
+                        # Match venue to database
+                        venue_db = None
+                        if details.venue:
+                            venue_match = scraper.match_venue_to_db(details.venue, details.gender)
+                            if venue_match:
+                                venue_db = {'venue_id': venue_match[0], 'name': venue_match[1]}
+                        
+                        # Match teams to database
+                        team1_db = None
+                        team2_db = None
+                        if details.team1:
+                            team_match = scraper.match_team_to_db(details.team1, details.gender)
+                            if team_match:
+                                team1_db = {'team_id': team_match[0], 'name': team_match[1]}
+                                scraper.match_players_to_db(details.team1, team_match[1], details.gender)
+                        
+                        if details.team2:
+                            team_match = scraper.match_team_to_db(details.team2, details.gender)
+                            if team_match:
+                                team2_db = {'team_id': team_match[0], 'name': team_match[1]}
+                                scraper.match_players_to_db(details.team2, team_match[1], details.gender)
+                        
+                        # Build cache entry (same as get_espn_match)
+                        def team_to_dict(team):
+                            if not team:
+                                return None
+                            return {
+                                'espn_id': team.espn_id,
+                                'name': team.name,
+                                'long_name': team.long_name,
+                                'abbreviation': team.abbreviation,
+                                'db_team_id': team.db_team_id,
+                                'players': [
+                                    {
+                                        'espn_id': p.espn_id,
+                                        'name': p.name,
+                                        'long_name': p.long_name,
+                                        'role': p.role,
+                                        'playing_roles': p.playing_roles,
+                                        'batting_styles': p.batting_styles,
+                                        'bowling_styles': p.bowling_styles,
+                                        'is_overseas': p.is_overseas,
+                                        'db_player_id': p.db_player_id
+                                    }
+                                    for p in team.players
+                                ]
+                            }
+                        
+                        cache_result = {
+                            'success': True,
+                            'source': 'espn_cricinfo',
+                            'match': {
+                                'espn_id': details.espn_id,
+                                'title': details.title,
+                                'series_name': details.series_name,
+                                'series_id': details.series_id,
+                                'status': details.status,
+                                'start_date': details.start_date,
+                                'start_time': details.start_time,
+                                'date_time_gmt': details.date_time_gmt,
+                                'gender': details.gender,
+                                'has_squads': details.has_squads,
+                                'venue': {
+                                    'name': details.venue.name if details.venue else None,
+                                    'town': details.venue.town if details.venue else None,
+                                    'country': details.venue.country if details.venue else None,
+                                    'db_venue_id': venue_db['venue_id'] if venue_db else None,
+                                    'db_venue_name': venue_db['name'] if venue_db else None
+                                } if details.venue else None,
+                                'team1': team_to_dict(details.team1),
+                                'team2': team_to_dict(details.team2),
+                                'team1_db': team1_db,
+                                'team2_db': team2_db
+                            }
+                        }
+                        
+                        # Cache it
+                        _espn_cache[cache_key] = cache_result
+                        _espn_cache_time[cache_key] = datetime.now().timestamp()
+                        
+                        # Update status
+                        match_status['cached'] = True
+                        match_status['venue_found'] = venue_db is not None
+                        match_status['venue_name'] = details.venue.name if details.venue else None
+                        match_status['team1_squad'] = details.team1 and len(details.team1.players) > 0
+                        match_status['team1_count'] = len(details.team1.players) if details.team1 else 0
+                        match_status['team2_squad'] = details.team2 and len(details.team2.players) > 0
+                        match_status['team2_count'] = len(details.team2.players) if details.team2 else 0
+                        
+                        logger.info(f"Pre-fetched: {match_status['title']} - Venue: {match_status['venue_found']}, T1: {match_status['team1_count']}, T2: {match_status['team2_count']}")
+                except Exception as e:
+                    logger.error(f"Error pre-fetching {m.match_url}: {e}")
+            
+            results.append(match_status)
+        
+        return jsonify({
+            'success': True,
+            'matches': results,
+            'total': len(results),
+            'cached_count': sum(1 for r in results if r['cached'])
+        })
+    
+    except Exception as e:
+        logger.error(f"Error in prefetch: {e}")
         import traceback
         traceback.print_exc()
         return jsonify({'success': False, 'error': str(e)}), 500

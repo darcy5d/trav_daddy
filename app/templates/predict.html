@@ -50,7 +50,59 @@
         margin-bottom: 0.25rem;
         display: block;
     }
+    
+    /* Timezone Selector */
+    .timezone-selector {
+        position: fixed;
+        top: 70px;
+        right: 20px;
+        z-index: 1000;
+        background: var(--bg-secondary);
+        padding: 0.5rem 0.75rem;
+        border-radius: 8px;
+        border: 1px solid var(--border-color);
+        box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
+        display: flex;
+        align-items: center;
+        gap: 0.5rem;
+    }
+    
+    .timezone-selector label {
+        font-size: 0.75rem;
+        color: var(--text-muted);
+        text-transform: uppercase;
+        letter-spacing: 0.5px;
+    }
+    
+    .timezone-selector select {
+        background: var(--bg-tertiary);
+        color: var(--text-primary);
+        border: 1px solid var(--border-color);
+        border-radius: 4px;
+        padding: 0.35rem 0.5rem;
+        font-size: 0.85rem;
+        cursor: pointer;
+    }
+    
+    .timezone-selector select:focus {
+        outline: none;
+        border-color: var(--accent-primary);
+    }
 </style>
+
+<!-- Timezone Selector (Fixed Position) -->
+<div class="timezone-selector">
+    <label for="timezone-select">🕐 TZ:</label>
+    <select id="timezone-select" onchange="setTimezone(this.value)">
+        <option value="Australia/Melbourne">Melbourne (AEDT)</option>
+        <option value="Australia/Sydney">Sydney (AEDT)</option>
+        <option value="Asia/Kolkata">India (IST)</option>
+        <option value="Asia/Dubai">Dubai (GST)</option>
+        <option value="Europe/London">London (GMT)</option>
+        <option value="America/New_York">New York (EST)</option>
+        <option value="UTC">UTC/GMT</option>
+    </select>
+</div>
 
 <div class="hero" style="padding: 2rem;">
     <h1>Match Prediction</h1>
@@ -61,11 +113,29 @@
 <div id="upcoming-matches" class="card" style="margin-bottom: 1.5rem; border: 2px solid var(--accent-primary);">
     <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 1rem;">
         <h2 class="card-title" style="margin: 0; display: flex; align-items: center; gap: 0.5rem;">
-            <span style="font-size: 1.5rem;">🏏</span> Upcoming Matches (Next 24 Hours)
+            <span style="font-size: 1.5rem;">🏏</span> Upcoming Matches
         </h2>
-        <button class="btn" onclick="loadUpcomingMatches()" style="padding: 0.5rem 1rem;">
-            🔄 Refresh
-        </button>
+        <div style="display: flex; gap: 0.5rem; align-items: center;">
+            <button class="btn" onclick="loadUpcomingMatches(true)" style="padding: 0.5rem 1rem;">
+                🔄 Refresh
+            </button>
+            <button class="btn" id="prefetch-btn" onclick="prefetchAllMatches()" style="padding: 0.5rem 1rem;">
+                📥 Pre-fetch Data
+            </button>
+            <span id="prefetch-status" style="font-size: 0.8rem; color: var(--text-muted);"></span>
+        </div>
+    </div>
+    
+    <!-- Data Source Toggle -->
+    <div style="margin-bottom: 1rem;">
+        <span class="team-filter-label">Data Source</span>
+        <div class="segmented-control" id="data-source-control">
+            <button class="active" data-value="espn" onclick="setDataSource('espn')">ESPN Cricinfo (All T20s)</button>
+            <button data-value="api" onclick="setDataSource('api')">Cricket Data API</button>
+        </div>
+        <small id="source-info" style="color: var(--text-muted); display: block; margin-top: 0.25rem;">
+            ESPN Cricinfo provides comprehensive coverage of all T20 matches worldwide
+        </small>
     </div>
     
     <div id="matches-loading" style="text-align: center; padding: 2rem;">
@@ -445,6 +515,12 @@
     let currentSeriesId = '';
     let currentSeriesName = '';
     
+    // Data source: 'espn' or 'api'
+    let currentDataSource = 'espn';
+    
+    // Timezone: default to Melbourne
+    let currentTimezone = localStorage.getItem('cricket_timezone') || 'Australia/Melbourne';
+    
     // Team filter state (for manual selection)
     const teamFilters = {
         1: { gender: 'male', type: 'all' },
@@ -453,11 +529,119 @@
     
     // Initialize on page load
     document.addEventListener('DOMContentLoaded', () => {
+        // Set timezone dropdown to saved value
+        const tzSelect = document.getElementById('timezone-select');
+        if (tzSelect) {
+            tzSelect.value = currentTimezone;
+        }
+        
         loadTeamsForTeam(1);
         loadTeamsForTeam(2);
         loadVenues();
-        loadUpcomingMatches();  // Load upcoming matches for next 24h
+        loadUpcomingMatches();  // Load upcoming matches
     });
+    
+    // Set timezone and refresh display
+    function setTimezone(tz) {
+        currentTimezone = tz;
+        localStorage.setItem('cricket_timezone', tz);
+        // Reload matches to update displayed times
+        loadUpcomingMatches();
+    }
+    
+    // Format a GMT ISO datetime string in the selected timezone
+    function formatTimeInTimezone(gmtIsoString) {
+        if (!gmtIsoString) return null;
+        
+        try {
+            const dt = new Date(gmtIsoString.endsWith('Z') ? gmtIsoString : gmtIsoString + 'Z');
+            if (isNaN(dt.getTime())) return null;
+            
+            return dt.toLocaleString('en-AU', {
+                timeZone: currentTimezone,
+                weekday: 'short',
+                day: 'numeric',
+                month: 'short',
+                hour: '2-digit',
+                minute: '2-digit',
+                hour12: true
+            });
+        } catch (e) {
+            console.error('Error formatting time:', e);
+            return null;
+        }
+    }
+    
+    // Get short timezone abbreviation
+    function getTimezoneAbbr() {
+        try {
+            const dt = new Date();
+            const parts = dt.toLocaleString('en-AU', {
+                timeZone: currentTimezone,
+                timeZoneName: 'short'
+            }).split(' ');
+            return parts[parts.length - 1];
+        } catch (e) {
+            return '';
+        }
+    }
+    
+    // Calculate countdown from GMT time
+    function calculateCountdown(gmtIsoString) {
+        if (!gmtIsoString) return null;
+        
+        try {
+            const dt = new Date(gmtIsoString.endsWith('Z') ? gmtIsoString : gmtIsoString + 'Z');
+            if (isNaN(dt.getTime())) return null;
+            
+            const now = Date.now();
+            const diff = dt.getTime() - now;
+            const absDiff = Math.abs(diff);
+            const hours = Math.floor(absDiff / (1000 * 60 * 60));
+            const mins = Math.floor((absDiff % (1000 * 60 * 60)) / (1000 * 60));
+            
+            let color = '#4caf50'; // Green
+            let text = '';
+            
+            if (diff < 0) {
+                // Match started (negative)
+                color = '#f44336'; // Red
+                text = '-' + hours + 'h ' + mins + 'm';
+            } else if (diff < 60 * 60 * 1000) {
+                // Within 1 hour
+                color = '#ff9800'; // Orange
+                text = hours + 'h ' + mins + 'm';
+            } else {
+                text = hours + 'h ' + mins + 'm';
+            }
+            
+            return { text, color, timestamp: dt.getTime() };
+        } catch (e) {
+            return null;
+        }
+    }
+    
+    // Set data source and reload matches
+    function setDataSource(source) {
+        currentDataSource = source;
+        
+        // Update button states
+        const control = document.getElementById('data-source-control');
+        control.querySelectorAll('button').forEach(btn => {
+            btn.classList.toggle('active', btn.dataset.value === source);
+        });
+        
+        // Update info text
+        const info = document.getElementById('source-info');
+        if (source === 'espn') {
+            info.textContent = 'ESPN Cricinfo provides comprehensive coverage of all T20 matches worldwide';
+        } else {
+            info.textContent = 'Cricket Data API - requires API key, covers major tournaments only';
+        }
+        
+        // Reload matches
+        loadUpcomingMatches();
+    }
     
     // Set team filter and reload teams
     function setTeamFilter(teamNum, filterType, value) {
@@ -519,7 +703,7 @@
     }
     
     // Upcoming Matches Functions
-    async function loadUpcomingMatches() {
+    async function loadUpcomingMatches(forceRefresh = false) {
         const loadingEl = document.getElementById('matches-loading');
         const listEl = document.getElementById('matches-list');
         const emptyEl = document.getElementById('matches-empty');
@@ -529,7 +713,17 @@
         emptyEl.style.display = 'none';
         
         try {
-            const response = await fetch('/api/t20/upcoming');
+            // Choose endpoint based on data source
+            let endpoint = currentDataSource === 'espn' 
+                ? '/api/espn/upcoming'
+                : '/api/t20/upcoming';
+            
+            // Add refresh parameter if forcing
+            if (forceRefresh && currentDataSource === 'espn') {
+                endpoint += '?refresh=true';
+            }
+            
+            const response = await fetch(endpoint);
             const data = await response.json();
             
             loadingEl.style.display = 'none';
@@ -549,82 +743,75 @@
                             </h3>
                             <div style="display: flex; flex-direction: column; gap: 0.5rem;">
                                 ${series.matches.map(m => {
-                                    // Convert UTC to local time and format date
-                                    let localTime = m.status || 'TBD';
-                                    let localDate = '';
+                                    // Use timezone-aware formatting
+                                    let displayDateTime = '';
                                     let countdownHtml = '';
                                     let matchTimestamp = 0;
                                     
                                     if (m.date_time_gmt) {
-                                        try {
-                                            const utcString = m.date_time_gmt.endsWith('Z') ? m.date_time_gmt : m.date_time_gmt + 'Z';
-                                            const dt = new Date(utcString);
-                                            matchTimestamp = dt.getTime();
-                                            
-                                            // Format time
-                                            localTime = dt.toLocaleTimeString('en-US', {
-                                                hour: '2-digit', 
-                                                minute: '2-digit', 
-                                                timeZoneName: 'short'
-                                            });
-                                            
-                                            // Format date (e.g., "Mon 1st December")
-                                            const days = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
-                                            const months = ['January', 'February', 'March', 'April', 'May', 'June', 
-                                                           'July', 'August', 'September', 'October', 'November', 'December'];
-                                            const dayOfWeek = days[dt.getDay()];
-                                            const dayNum = dt.getDate();
-                                            const month = months[dt.getMonth()];
-                                            
-                                            // Add ordinal suffix (1st, 2nd, 3rd, etc.)
-                                            const ordinal = (n) => {
-                                                const s = ['th', 'st', 'nd', 'rd'];
-                                                const v = n % 100;
-                                                return n + (s[(v - 20) % 10] || s[v] || s[0]);
-                                            };
-                                            localDate = dayOfWeek + ' ' + ordinal(dayNum) + ' ' + month;
-                                            
-                                            // Calculate countdown
-                                            const now = Date.now();
-                                            const diff = matchTimestamp - now;
-                                            const absDiff = Math.abs(diff);
-                                            const hours = Math.floor(absDiff / (1000 * 60 * 60));
-                                            const mins = Math.floor((absDiff % (1000 * 60 * 60)) / (1000 * 60));
-                                            
-                                            let countdownColor = '#4caf50'; // Green by default
-                                            let countdownText = '';
-                                            
-                                            if (diff < 0) {
-                                                // Match has started (negative countdown)
-                                                countdownColor = '#f44336'; // Red
-                                                countdownText = '-' + hours + 'h ' + mins + 'm';
-                                            } else if (diff < 60 * 60 * 1000) {
-                                                // Within 1 hour
-                                                countdownColor = '#ff9800'; // Orange
-                                                countdownText = hours + 'h ' + mins + 'm';
-                                            } else {
-                                                // More than 1 hour away
-                                                countdownText = hours + 'h ' + mins + 'm';
-                                            }
-                                            
-                                            countdownHtml = '<span class="countdown-timer" data-timestamp="' + matchTimestamp + '" style="font-weight: 600; color: ' + countdownColor + '; font-size: 0.85rem; min-width: 70px; text-align: right;">' + countdownText + '</span>';
-                                        } catch (e) {
-                                            console.error('Error parsing date:', e);
+                                        // Format in selected timezone
+                                        const formatted = formatTimeInTimezone(m.date_time_gmt);
+                                        if (formatted) {
+                                            displayDateTime = formatted;
+                                        }
+                                        
+                                        // Calculate countdown
+                                        const countdown = calculateCountdown(m.date_time_gmt);
+                                        if (countdown) {
+                                            matchTimestamp = countdown.timestamp;
+                                            countdownHtml = '<span class="countdown-timer" data-timestamp="' + matchTimestamp + '" style="font-weight: 600; color: ' + countdown.color + '; font-size: 0.85rem; min-width: 70px; text-align: right;">' + countdown.text + '</span>';
                                         }
                                     }
+                                    
+                                    // Fallback if no parsed datetime
+                                    if (!displayDateTime) {
+                                        displayDateTime = m.start_time ? m.start_time : (m.status || 'TBD');
+                                    }
+                                    
+                                    // Handle both ESPN and API data formats
+                                    let matchTitle;
+                                    if (m.team1 && m.team2) {
+                                        matchTitle = m.team1 + ' vs ' + m.team2;
+                                    } else {
+                                        matchTitle = m.title || 'TBD vs TBD';
+                                    }
+                                    const matchType = m.match_type || '';
+                                    // Use venue_city from schedule, fallback to venue
+                                    const matchVenue = m.venue_city || m.venue || '';
+                                    const matchId = m.match_id || m.espn_id || '';
+                                    const matchUrl = m.match_url || '';
+                                    const hasSquad = m.has_squad || m.has_squads || false;
+                                    const isEspn = currentDataSource === 'espn';
+                                    
+                                    // Get prefetch status if available
+                                    const prefetchStatus = prefetchData[matchUrl] || {};
+                                    let statusIcons = '';
+                                    if (prefetchStatus.venue_found) {
+                                        statusIcons += '<span style="color: #4caf50;" title="Venue matched to DB">📍✓</span>';
+                                    } else if (prefetchStatus.venue_name) {
+                                        statusIcons += '<span style="color: #ff9800;" title="Venue: ' + prefetchStatus.venue_name + ' (not in DB)">📍?</span>';
+                                    }
+                                    if (prefetchStatus.team1_squad) {
+                                        statusIcons += '<span style="color: #4caf50;" title="Team 1: ' + prefetchStatus.team1_count + ' players"> T1✓</span>';
+                                    }
+                                    if (prefetchStatus.team2_squad) {
+                                        statusIcons += '<span style="color: #4caf50;" title="Team 2: ' + prefetchStatus.team2_count + ' players"> T2✓</span>';
+                                    }
+                                    
                                     return `
-                                    <div style="display: flex; justify-content: space-between; align-items: center; padding: 0.75rem 1rem; background: var(--bg-tertiary); border-radius: 8px; border-left: 3px solid ${series.gender === 'female' ? '#e91e63' : '#2196f3'};">
+                                    <div style="display: flex; justify-content: space-between; align-items: center; padding: 0.75rem 1rem; background: var(--bg-tertiary); border-radius: 8px; border-left: 3px solid ${series.gender === 'female' ? '#e91e63' : '#2196f3'};" data-match-url="${matchUrl}">
                                         <div style="flex: 1;">
-                                            <div style="font-weight: 500;">${m.team1} vs ${m.team2}</div>
+                                            <div style="font-weight: 500;">${matchTitle}${matchType ? ' <span style="font-weight: 400; color: var(--text-muted); font-size: 0.85rem;">(' + matchType + ')</span>' : ''}</div>
                                             <div style="font-size: 0.8rem; color: var(--text-muted);">
-                                                <span style="color: var(--text-secondary);">${localDate}</span>, ${localTime} • ${m.venue}
-                                                ${m.has_squad ? '<span style="color: var(--accent-primary);"> ✓ Squad</span>' : ''}
+                                                <span style="color: var(--text-secondary);">${displayDateTime}</span>${matchVenue ? ' • ' + matchVenue : ''}
+                                                <span class="prefetch-status" style="margin-left: 0.5rem;">${statusIcons}</span>
+                                                ${isEspn ? '<span style="color: #ff9800; margin-left: 0.5rem;">ESPNcricinfo</span>' : ''}
                                             </div>
                                         </div>
                                         <div style="display: flex; align-items: center; gap: 0.75rem;">
                                             ${countdownHtml}
                                             <button class="btn btn-primary" style="padding: 0.4rem 1rem; font-size: 0.85rem;" 
-                                                    onclick="selectMatch('${m.match_id}', '${series.gender}')">
+                                                    onclick="selectMatch('${isEspn ? matchUrl : matchId}', '${series.gender}', ${isEspn})">
                                                 Select
                                             </button>
                                         </div>
@@ -641,6 +828,9 @@
                 
                 // Start the countdown timer updater
                 startCountdownUpdater();
+                
+                // Update prefetch status display from cached data
+                updatePrefetchStatusDisplay();
             } else {
                 emptyEl.style.display = 'block';
             }
@@ -649,6 +839,86 @@
             loadingEl.style.display = 'none';
             emptyEl.innerHTML = '<p style="color: var(--danger);">Error loading matches. Please try again.</p>';
             emptyEl.style.display = 'block';
+        }
+    }
+    
+    // Store prefetch status data
+    let prefetchData = {};
+    
+    // Pre-fetch all match data
+    async function prefetchAllMatches() {
+        const btn = document.getElementById('prefetch-btn');
+        const status = document.getElementById('prefetch-status');
+        
+        btn.disabled = true;
+        btn.textContent = '⏳ Fetching...';
+        status.textContent = 'Loading match details...';
+        
+        try {
+            const response = await fetch('/api/espn/prefetch?hours_ahead=24', { method: 'POST' });
+            const data = await response.json();
+            
+            if (data.success) {
+                // Store the prefetch data
+                prefetchData = {};
+                data.matches.forEach(m => {
+                    prefetchData[m.match_url] = m;
+                });
+                
+                // Update display
+                const withVenue = data.matches.filter(m => m.venue_found).length;
+                const withSquads = data.matches.filter(m => m.team1_squad || m.team2_squad).length;
+                
+                status.innerHTML = `<span style="color: var(--success);">✓ ${data.cached_count}/${data.total} cached</span> | Venues: ${withVenue} | Squads: ${withSquads}`;
+                
+                // Reload matches to show updated status indicators
+                await loadUpcomingMatches(false);
+                
+                console.log('Prefetch complete:', data);
+            } else {
+                status.innerHTML = `<span style="color: var(--danger);">✗ ${data.error}</span>`;
+            }
+        } catch (error) {
+            console.error('Prefetch error:', error);
+            status.innerHTML = `<span style="color: var(--danger);">✗ Error</span>`;
+        } finally {
+            btn.disabled = false;
+            btn.textContent = '📥 Pre-fetch Data';
+        }
+    }
+    
+    // Update match cards with prefetch status indicators
+    function updateMatchCardsWithPrefetchStatus() {
+        // Find all match cards and update their status indicators
+        const cards = document.querySelectorAll('#matches-list [data-match-url]');
+        cards.forEach(card => {
+            const url = card.dataset.matchUrl;
+            const status = prefetchData[url];
+            if (status) {
+                const statusEl = card.querySelector('.prefetch-status');
+                if (statusEl) {
+                    let html = '';
+                    if (status.venue_found) {
+                        html += '<span style="color: #4caf50;" title="Venue matched">📍✓</span>';
+                    } else if (status.venue_name) {
+                        html += '<span style="color: #ff9800;" title="Venue not in DB">📍?</span>';
+                    }
+                    if (status.team1_squad) {
+                        html += `<span style="color: #4caf50;" title="${status.team1_count} players">👥✓</span>`;
+                    }
+                    if (status.team2_squad) {
+                        html += `<span style="color: #4caf50;" title="${status.team2_count} players">👥✓</span>`;
+                    }
+                    statusEl.innerHTML = html;
+                }
+            }
+        });
+    }
+    
+    // Update status display after loading matches (for cached data)
+    function updatePrefetchStatusDisplay() {
+        if (Object.keys(prefetchData).length > 0) {
+            updateMatchCardsWithPrefetchStatus();
         }
     }
     
@@ -702,7 +972,7 @@
         });
     }
     
-    async function selectMatch(matchId, gender) {
+    async function selectMatch(matchIdOrUrl, gender, isEspn = false) {
         // Set the gender for correct model selection
         currentGender = gender;
         
@@ -729,8 +999,197 @@
         await loadTeams();
         await loadVenues();
         
-        // Load the match
-        await loadT20MatchById(matchId);
+        // Load the match - use ESPN or API endpoint based on source
+        if (isEspn) {
+            await loadEspnMatch(matchIdOrUrl);
+        } else {
+            await loadT20MatchById(matchIdOrUrl);
+        }
+    }
+    
+    async function loadEspnMatch(matchUrl) {
+        if (!matchUrl) {
+            alert('Invalid match URL');
+            return;
+        }
+        
+        // Show loading
+        document.getElementById('t20-loading').style.display = 'block';
+        document.getElementById('t20-match-info').style.display = 'none';
+        
+        try {
+            const response = await fetch(`/api/espn/match?url=${encodeURIComponent(matchUrl)}`);
+            const data = await response.json();
+            
+            document.getElementById('t20-loading').style.display = 'none';
+            
+            if (data.success && data.match) {
+                const match = data.match;
+                
+                // Show match info
+                const team1Name = match.team1?.long_name || match.team1_db?.name || 'Team 1';
+                const team2Name = match.team2?.long_name || match.team2_db?.name || 'Team 2';
+                document.getElementById('t20-match-name').textContent = `${team1Name} vs ${team2Name}`;
+                document.getElementById('t20-match-date').textContent = `${match.start_date} ${match.start_time || ''}`;
+                
+                const team1Players = match.team1?.players?.length || 0;
+                const team2Players = match.team2?.players?.length || 0;
+                const team1Matched = match.team1?.players?.filter(p => p.db_player_id)?.length || 0;
+                const team2Matched = match.team2?.players?.filter(p => p.db_player_id)?.length || 0;
+                
+                document.getElementById('t20-team1-info').textContent = `${team1Matched}/${team1Players} matched`;
+                document.getElementById('t20-team2-info').textContent = `${team2Matched}/${team2Players} matched`;
+                document.getElementById('t20-match-info').style.display = 'block';
+                
+                console.log(`ESPN match loaded: ${team1Name} vs ${team2Name}`);
+                console.log(`  Venue: ${match.venue?.name} -> DB: ${match.venue?.db_venue_name}`);
+                
+                // Auto-fill teams from ESPN data
+                if (match.team1_db) {
+                    await autoFillTeamFromEspn(1, match.team1_db.name, match.team1);
+                }
+                if (match.team2_db) {
+                    await autoFillTeamFromEspn(2, match.team2_db.name, match.team2);
+                }
+                
+                // Auto-select venue if matched
+                if (match.venue?.db_venue_id) {
+                    const venueSelect = document.getElementById('venue-select');
+                    venueSelect.value = match.venue.db_venue_id;
+                    console.log(`Auto-selected venue: ${match.venue.db_venue_name} (ID: ${match.venue.db_venue_id})`);
+                }
+                
+                // Enable toss simulation
+                document.getElementById('use-toss').checked = true;
+                
+            } else {
+                alert('Error loading ESPN match: ' + (data.error || 'Unknown error'));
+            }
+        } catch (error) {
+            document.getElementById('t20-loading').style.display = 'none';
+            console.error('Error loading ESPN match:', error);
+            alert('Error loading match data from ESPN');
+        }
+    }
+    
+    async function autoFillTeamFromEspn(teamNum, dbTeamName, espnTeam) {
+        // Find and select the team by name
+        const teamSelect = document.getElementById(`team${teamNum}-select`);
+        let teamFound = false;
+        let teamId = null;
+        
+        for (let opt of teamSelect.options) {
+            if (opt.textContent === dbTeamName) {
+                teamSelect.value = opt.value;
+                teamId = opt.value;
+                teamFound = true;
+                break;
+            }
+        }
+        
+        if (!teamFound) {
+            console.warn(`Team not found in dropdown: ${dbTeamName}`);
+            return;
+        }
+        
+        // Load players for this team
+        await loadPlayers(teamNum);
+        
+        // Small delay to ensure DOM is updated
+        await new Promise(resolve => setTimeout(resolve, 100));
+        
+        // Get matched player IDs from ESPN data
+        const matchedPlayerIds = espnTeam?.players
+            ?.filter(p => p.db_player_id)
+            ?.map(p => p.db_player_id) || [];
+        
+        // If ESPN has no squad, fall back to recent lineup from our database
+        if (matchedPlayerIds.length === 0) {
+            console.log(`Team ${teamNum} (${dbTeamName}): No ESPN squad, loading recent lineup from database...`);
+            await loadRecentLineupForTeam(teamNum, teamId);
+            return;
+        }
+        
+        // Select matched players
+        const battersSelect = document.getElementById(`team${teamNum}-batters`);
+        const bowlersSelect = document.getElementById(`team${teamNum}-bowlers`);
+        
+        // Clear current selections
+        for (let opt of battersSelect.options) opt.selected = false;
+        for (let opt of bowlersSelect.options) opt.selected = false;
+        
+        let battersSelected = 0;
+        let bowlersSelected = 0;
+        
+        // Select matched players from ESPN squad
+        for (let playerId of matchedPlayerIds) {
+            // Try batters first
+            for (let opt of battersSelect.options) {
+                if (parseInt(opt.value) === playerId && !opt.selected) {
+                    opt.selected = true;
+                    battersSelected++;
+                    break;
+                }
+            }
+            // Also try bowlers
+            for (let opt of bowlersSelect.options) {
+                if (parseInt(opt.value) === playerId && !opt.selected) {
+                    opt.selected = true;
+                    bowlersSelected++;
+                    break;
+                }
+            }
+        }
+        
+        console.log(`Team ${teamNum} (${dbTeamName}): Selected ${battersSelected} batters, ${bowlersSelected} bowlers from ESPN`);
+    }
+    
+    async function loadRecentLineupForTeam(teamNum, teamId) {
+        // Fetch recent lineup from our database
+        try {
+            const response = await fetch(`/api/team/${teamId}/recent-lineup?gender=${currentGender}`);
+            const data = await response.json();
+            
+            if (data.success && data.recent_xi && data.recent_xi.length > 0) {
+                const battersSelect = document.getElementById(`team${teamNum}-batters`);
+                const bowlersSelect = document.getElementById(`team${teamNum}-bowlers`);
+                
+                // Clear current selections
+                for (let opt of battersSelect.options) opt.selected = false;
+                for (let opt of bowlersSelect.options) opt.selected = false;
+                
+                let battersSelected = 0;
+                let bowlersSelected = 0;
+                
+                // Select players from recent XI
+                for (let player of data.recent_xi) {
+                    const playerId = player.player_id;
+                    
+                    // Try batters first
+                    for (let opt of battersSelect.options) {
+                        if (parseInt(opt.value) === playerId && !opt.selected) {
+                            opt.selected = true;
+                            battersSelected++;
+                            break;
+                        }
+                    }
+                    // Also try bowlers
+                    for (let opt of bowlersSelect.options) {
+                        if (parseInt(opt.value) === playerId && !opt.selected) {
+                            opt.selected = true;
+                            bowlersSelected++;
+                            break;
+                        }
+                    }
+                }
+                
+                console.log(`Team ${teamNum}: Loaded ${battersSelected} batters, ${bowlersSelected} bowlers from recent DB lineup`);
+            } else {
+                console.warn(`Team ${teamNum}: No recent lineup found in database`);
+            }
+        } catch (error) {
+            console.error(`Error loading recent lineup for team ${teamNum}:`, error);
+        }
     }
     
     async function loadT20MatchById(matchId) {
