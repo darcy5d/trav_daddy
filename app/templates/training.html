@@ -398,7 +398,15 @@ function formatDuration(seconds) {
 }
 
 function formatDate(dateStr) {
-    const date = new Date(dateStr);
+    // Database stores timestamps in UTC without timezone indicator
+    // Add 'Z' suffix to parse as UTC
+    let isoString = dateStr;
+    if (!dateStr.includes('Z') && !dateStr.includes('+') && !dateStr.includes('-', 10)) {
+        // Convert "2025-12-18 02:11:59" to "2025-12-18T02:11:59Z"
+        isoString = dateStr.replace(' ', 'T') + 'Z';
+    }
+    
+    const date = new Date(isoString);
     
     // Use the global timezone from base.html (defaults to Melbourne)
     const timezone = currentTimezone || 'Australia/Melbourne';
