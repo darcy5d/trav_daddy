@@ -1,4 +1,1 @@
-"""
-Utility functions module.
-"""
-
+"""Utility modules."""

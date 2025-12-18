@@ -150,6 +150,143 @@ def step_validate_model(gender: str = 'male'):
         return False
 
 
+def save_model_version_metadata(gender: str, start_time: datetime, end_time: datetime) -> bool:
+    """
+    Save model version metadata to database and JSON file.
+    
+    Args:
+        gender: 'male' or 'female'
+        start_time: Training start time
+        end_time: Training end time
+        
+    Returns:
+        True if successful
+    """
+    try:
+        import json
+        import numpy as np
+        from src.data.database import save_model_version, init_model_versions_table, get_connection
+        
+        logger.info("=" * 60)
+        logger.info(f"SAVING MODEL VERSION METADATA ({gender.upper()})")
+        logger.info("=" * 60)
+        
+        # Ensure model_versions table exists
+        init_model_versions_table()
+        
+        # Generate model name
+        timestamp = end_time.strftime("%Y%m%d_%H%M%S")
+        model_name = f"{gender}_t20_{timestamp}"
+        
+        # Get file paths
+        data_dir = project_root / 'data' / 'processed'
+        model_path = str(data_dir / f'ball_prediction_model_t20_{gender}.keras')
+        normalizer_path = str(data_dir / f'ball_prediction_model_t20_{gender}_normalizer.pkl')
+        
+        # Get model file size
+        model_size_mb = Path(model_path).stat().st_size / (1024 * 1024) if Path(model_path).exists() else None
+        
+        # Get training samples count
+        X_path = data_dir / f'ball_X_t20_{gender}.npy'
+        training_samples = len(np.load(X_path)) if X_path.exists() else None
+        
+        # Get data date range from database
+        conn = get_connection()
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT MIN(date) as earliest, MAX(date) as latest
+            FROM matches
+            WHERE match_type = 'T20' AND gender = ?
+        """, (gender,))
+        row = cursor.fetchone()
+        data_earliest_date = row['earliest'] if row else None
+        data_latest_date = row['latest'] if row else None
+        conn.close()
+        
+        # Calculate training duration
+        training_duration_seconds = int((end_time - start_time).total_seconds())
+        
+        # Load accuracy metrics if available
+        meta_path = data_dir / f'ball_meta_t20_{gender}.csv'
+        accuracy_metrics = None
+        if meta_path.exists():
+            import pandas as pd
+            try:
+                meta_df = pd.read_csv(meta_path)
+                if not meta_df.empty and 'f1-score' in meta_df.columns:
+                    # Calculate weighted average F1 score
+                    avg_f1 = meta_df['f1-score'].mean()
+                    accuracy_metrics = json.dumps({
+                        'avg_f1_score': float(avg_f1),
+                        'per_outcome': meta_df.to_dict('records')
+                    })
+            except Exception as e:
+                logger.warning(f"Could not load accuracy metrics: {e}")
+        
+        # Save to database
+        model_id = save_model_version(
+            model_name=model_name,
+            gender=gender,
+            format_type='T20',
+            model_path=model_path,
+            normalizer_path=normalizer_path,
+            data_earliest_date=data_earliest_date,
+            data_latest_date=data_latest_date,
+            training_samples=training_samples,
+            training_duration_seconds=training_duration_seconds,
+            model_size_mb=model_size_mb,
+            accuracy_metrics=accuracy_metrics,
+            is_active=True,
+            notes=f"Trained via full_retrain.py on {end_time.strftime('%Y-%m-%d %H:%M:%S')}"
+        )
+        
+        logger.info(f"Saved model version to database: {model_name} (ID: {model_id})")
+        
+        # Also save to JSON file for backup
+        json_file = project_root / 'data' / 'model_versions.json'
+        
+        # Load existing versions
+        versions = []
+        if json_file.exists():
+            try:
+                with open(json_file, 'r') as f:
+                    versions = json.load(f)
+            except:
+                versions = []
+        
+        # Add new version
+        versions.append({
+            'id': model_id,
+            'model_name': model_name,
+            'gender': gender,
+            'format_type': 'T20',
+            'created_at': end_time.isoformat(),
+            'model_path': model_path,
+            'normalizer_path': normalizer_path,
+            'data_earliest_date': data_earliest_date,
+            'data_latest_date': data_latest_date,
+            'training_samples': training_samples,
+            'training_duration_seconds': training_duration_seconds,
+            'model_size_mb': model_size_mb,
+            'accuracy_metrics': accuracy_metrics,
+            'is_active': True
+        })
+        
+        # Save JSON
+        with open(json_file, 'w') as f:
+            json.dump(versions, f, indent=2)
+        
+        logger.info(f"Saved model version to JSON: {json_file}")
+        
+        return True
+        
+    except Exception as e:
+        logger.error(f"Failed to save model version metadata: {e}")
+        import traceback
+        traceback.print_exc()
+        return False
+
+
 def run_full_pipeline(
     skip_ingest: bool = False,
     skip_elo: bool = False,
@@ -188,12 +325,20 @@ def run_full_pipeline(
     for gender in genders:
         logger.info(f"\n*** Processing {gender.upper()} data ***\n")
         
+        # Track start time for this gender's training
+        gender_start_time = time.time()
+        
         # Steps 3-7 for each gender
         results[f'player_dist_{gender}'] = step_build_player_distributions(gender)
         results[f'venue_stats_{gender}'] = step_build_venue_stats(gender)
         results[f'training_data_{gender}'] = step_generate_training_data(gender)
         results[f'train_{gender}'] = step_train_model(gender)
         results[f'validate_{gender}'] = step_validate_model(gender)
+        
+        # Save model version metadata
+        gender_end_time = datetime.now()
+        gender_start_datetime = datetime.fromtimestamp(gender_start_time)
+        results[f'version_{gender}'] = save_model_version_metadata(gender, gender_start_datetime, gender_end_time)
     
     elapsed = time.time() - start_time
     

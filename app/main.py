@@ -2006,6 +2006,295 @@ def prefetch_espn_matches():
 
 
 # ============================================================================
+# Training / Data Management API Routes
+# ============================================================================
+
+@app.route('/training')
+def training_page():
+    """Data and training management page."""
+    return render_template('training.html')
+
+
+@app.route('/api/training/db-status', methods=['GET'])
+def get_db_status():
+    """
+    Get database status including match counts and date ranges.
+    
+    Returns:
+        JSON with database statistics by gender and format
+    """
+    try:
+        conn = get_connection()
+        cursor = conn.cursor()
+        
+        # Get T20 match statistics by gender
+        cursor.execute("""
+            SELECT 
+                gender,
+                COUNT(*) as total_matches,
+                MIN(date) as earliest_date,
+                MAX(date) as latest_date
+            FROM matches
+            WHERE match_type = 'T20'
+            GROUP BY gender
+        """)
+        
+        match_stats = {}
+        for row in cursor.fetchall():
+            gender = row['gender']
+            match_stats[gender] = {
+                'total_matches': row['total_matches'],
+                'earliest_date': row['earliest_date'],
+                'latest_date': row['latest_date'],
+                'days_since_latest': (datetime.now().date() - datetime.strptime(row['latest_date'], '%Y-%m-%d').date()).days if row['latest_date'] else None
+            }
+        
+        # Get overall statistics
+        cursor.execute("SELECT COUNT(DISTINCT player_id) FROM player_match_stats")
+        total_players = cursor.fetchone()[0]
+        
+        cursor.execute("SELECT COUNT(DISTINCT team_id) FROM teams")
+        total_teams = cursor.fetchone()[0]
+        
+        cursor.execute("SELECT COUNT(*) FROM deliveries")
+        total_deliveries = cursor.fetchone()[0]
+        
+        conn.close()
+        
+        return jsonify({
+            'success': True,
+            'match_stats': match_stats,
+            'total_players': total_players,
+            'total_teams': total_teams,
+            'total_deliveries': total_deliveries
+        })
+        
+    except Exception as e:
+        logger.error(f"Error getting DB status: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/training/models', methods=['GET'])
+def get_models():
+    """
+    Get all model versions and currently active models.
+    
+    Query params:
+        gender: Filter by gender (optional)
+        active_only: Return only active models (optional)
+    
+    Returns:
+        JSON with list of model versions
+    """
+    try:
+        from src.data.database import get_model_versions, init_model_versions_table
+        
+        # Ensure table exists
+        init_model_versions_table()
+        
+        gender = request.args.get('gender')
+        active_only = request.args.get('active_only', 'false').lower() == 'true'
+        
+        models = get_model_versions(
+            gender=gender,
+            format_type='T20',
+            active_only=active_only
+        )
+        
+        return jsonify({
+            'success': True,
+            'models': models
+        })
+        
+    except Exception as e:
+        logger.error(f"Error getting models: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/training/models/<int:model_id>/activate', methods=['POST'])
+def activate_model(model_id):
+    """
+    Set a specific model as active.
+    
+    Args:
+        model_id: Model version ID
+        
+    Returns:
+        JSON with success status
+    """
+    try:
+        from src.data.database import set_active_model
+        
+        success = set_active_model(model_id)
+        
+        if success:
+            return jsonify({'success': True, 'message': f'Model {model_id} activated'})
+        else:
+            return jsonify({'success': False, 'error': 'Failed to activate model'}), 400
+            
+    except Exception as e:
+        logger.error(f"Error activating model: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/training/download', methods=['POST'])
+def start_data_download():
+    """
+    Start background data download from Cricsheet.
+    
+    Request body:
+        {
+            "formats": ["all_male", "all_female"],
+            "force_download": false
+        }
+        
+    Returns:
+        JSON with job ID for tracking progress
+    """
+    try:
+        from src.utils.job_manager import start_job
+        from src.data.downloader import download_cricsheet_data
+        from src.data.ingest import ingest_matches
+        
+        data = request.get_json() or {}
+        formats = data.get('formats', ['all_male', 'all_female'])
+        force_download = data.get('force_download', False)
+        
+        def download_and_ingest():
+            """Download and ingest data."""
+            logger.info(f"Starting data download for formats: {formats}")
+            
+            # Download
+            download_result = download_cricsheet_data(formats=formats, force_download=force_download)
+            
+            # Ingest
+            logger.info("Starting data ingestion...")
+            ingest_result = ingest_matches(formats=formats)
+            
+            return {
+                'download': download_result,
+                'ingest': ingest_result
+            }
+        
+        job_id = start_job(
+            name=f"Data Download ({', '.join(formats)})",
+            func=download_and_ingest
+        )
+        
+        return jsonify({
+            'success': True,
+            'job_id': job_id,
+            'message': 'Data download started'
+        })
+        
+    except Exception as e:
+        logger.error(f"Error starting download: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/training/retrain', methods=['POST'])
+def start_model_retrain():
+    """
+    Start background model retraining.
+    
+    Request body:
+        {
+            "mode": "full" or "quick",
+            "genders": ["male", "female"]
+        }
+        
+    Returns:
+        JSON with job ID for tracking progress
+    """
+    try:
+        from src.utils.job_manager import start_job
+        import sys
+        from pathlib import Path
+        
+        # Add scripts to path
+        scripts_dir = Path(__file__).resolve().parent.parent / 'scripts'
+        sys.path.insert(0, str(scripts_dir))
+        
+        from full_retrain import run_full_pipeline
+        
+        data = request.get_json() or {}
+        mode = data.get('mode', 'quick')
+        genders = data.get('genders', ['male', 'female'])
+        
+        def retrain_models():
+            """Retrain models based on mode."""
+            logger.info(f"Starting model retrain: mode={mode}, genders={genders}")
+            
+            skip_ingest = (mode == 'quick')
+            skip_elo = (mode == 'quick')
+            male_only = ('male' in genders and 'female' not in genders)
+            female_only = ('female' in genders and 'male' not in genders)
+            
+            result = run_full_pipeline(
+                skip_ingest=skip_ingest,
+                skip_elo=skip_elo,
+                male_only=male_only,
+                female_only=female_only
+            )
+            
+            return result
+        
+        job_id = start_job(
+            name=f"Model Retrain ({mode}, {', '.join(genders)})",
+            func=retrain_models
+        )
+        
+        return jsonify({
+            'success': True,
+            'job_id': job_id,
+            'message': 'Model retraining started'
+        })
+        
+    except Exception as e:
+        logger.error(f"Error starting retrain: {e}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/training/job/<job_id>', methods=['GET'])
+def get_job_status(job_id):
+    """
+    Get status of a background job.
+    
+    Args:
+        job_id: Job ID returned from start_data_download or start_model_retrain
+        
+    Returns:
+        JSON with job status and progress
+    """
+    try:
+        from src.utils.job_manager import get_job_status as get_status
+        
+        job_info = get_status(job_id)
+        
+        if job_info is None:
+            return jsonify({'success': False, 'error': 'Job not found'}), 404
+        
+        # Return recent logs only (last 100 lines)
+        logs = job_info.get('logs', [])
+        recent_logs = logs[-100:] if len(logs) > 100 else logs
+        
+        return jsonify({
+            'success': True,
+            'job': {
+                **job_info,
+                'logs': recent_logs,
+                'total_log_lines': len(logs)
+            }
+        })
+        
+    except Exception as e:
+        logger.error(f"Error getting job status: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+# ============================================================================
 # Error Handlers
 # ============================================================================
 

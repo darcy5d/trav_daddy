@@ -322,6 +322,196 @@ class DatabaseManager:
         return cursor.fetchone() is not None
 
 
+def init_model_versions_table(db_path: Optional[Path] = None) -> bool:
+    """
+    Initialize the model_versions table.
+    
+    Args:
+        db_path: Optional path to database file.
+        
+    Returns:
+        True if successful, False otherwise
+    """
+    if db_path is None:
+        db_path = DATABASE_PATH
+    
+    try:
+        schema_path = Path(__file__).parent / "schema_model_versions.sql"
+        
+        if not schema_path.exists():
+            logger.error(f"Schema file not found: {schema_path}")
+            return False
+        
+        schema_sql = schema_path.read_text()
+        
+        with get_db_connection(db_path) as conn:
+            conn.executescript(schema_sql)
+            logger.info("Model versions table initialized")
+        
+        return True
+        
+    except Exception as e:
+        logger.error(f"Failed to initialize model_versions table: {e}")
+        return False
+
+
+def get_model_versions(
+    db_path: Optional[Path] = None,
+    gender: Optional[str] = None,
+    format_type: Optional[str] = None,
+    active_only: bool = False
+) -> list:
+    """
+    Get model versions from the database.
+    
+    Args:
+        db_path: Optional path to database file.
+        gender: Filter by gender ('male' or 'female').
+        format_type: Filter by format ('T20' or 'ODI').
+        active_only: If True, only return active models.
+        
+    Returns:
+        List of model version dictionaries
+    """
+    with get_db_connection(db_path) as conn:
+        cursor = conn.cursor()
+        
+        query = "SELECT * FROM model_versions WHERE 1=1"
+        params = []
+        
+        if gender:
+            query += " AND gender = ?"
+            params.append(gender)
+        
+        if format_type:
+            query += " AND format_type = ?"
+            params.append(format_type)
+        
+        if active_only:
+            query += " AND is_active = 1"
+        
+        query += " ORDER BY created_at DESC"
+        
+        cursor.execute(query, params)
+        rows = cursor.fetchall()
+        
+        return [dict(row) for row in rows]
+
+
+def save_model_version(
+    model_name: str,
+    gender: str,
+    format_type: str,
+    model_path: str,
+    normalizer_path: str,
+    data_earliest_date: Optional[str] = None,
+    data_latest_date: Optional[str] = None,
+    training_samples: Optional[int] = None,
+    training_duration_seconds: Optional[int] = None,
+    model_size_mb: Optional[float] = None,
+    accuracy_metrics: Optional[str] = None,
+    is_active: bool = False,
+    notes: Optional[str] = None,
+    db_path: Optional[Path] = None
+) -> int:
+    """
+    Save a new model version to the database.
+    
+    Args:
+        model_name: Unique name for the model version
+        gender: 'male' or 'female'
+        format_type: 'T20' or 'ODI'
+        model_path: Path to .keras model file
+        normalizer_path: Path to normalizer .pkl file
+        data_earliest_date: Earliest match date in training data
+        data_latest_date: Latest match date in training data
+        training_samples: Number of samples (deliveries) used
+        training_duration_seconds: Training duration in seconds
+        model_size_mb: Model file size in MB
+        accuracy_metrics: JSON string with accuracy metrics
+        is_active: Whether this is the currently active model
+        notes: Optional notes
+        db_path: Optional path to database file
+        
+    Returns:
+        Model version ID
+    """
+    with get_db_connection(db_path) as conn:
+        cursor = conn.cursor()
+        
+        # If setting this as active, deactivate others for the same gender/format
+        if is_active:
+            cursor.execute(
+                "UPDATE model_versions SET is_active = 0 WHERE gender = ? AND format_type = ?",
+                (gender, format_type)
+            )
+        
+        cursor.execute(
+            """INSERT INTO model_versions (
+                model_name, gender, format_type, model_path, normalizer_path,
+                data_earliest_date, data_latest_date, training_samples,
+                training_duration_seconds, model_size_mb, accuracy_metrics,
+                is_active, notes
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                model_name, gender, format_type, model_path, normalizer_path,
+                data_earliest_date, data_latest_date, training_samples,
+                training_duration_seconds, model_size_mb, accuracy_metrics,
+                is_active, notes
+            )
+        )
+        
+        return cursor.lastrowid
+
+
+def set_active_model(model_id: int, db_path: Optional[Path] = None) -> bool:
+    """
+    Set a specific model version as active.
+    
+    Args:
+        model_id: ID of the model to activate
+        db_path: Optional path to database file
+        
+    Returns:
+        True if successful, False otherwise
+    """
+    try:
+        with get_db_connection(db_path) as conn:
+            cursor = conn.cursor()
+            
+            # Get the model's gender and format
+            cursor.execute(
+                "SELECT gender, format_type FROM model_versions WHERE id = ?",
+                (model_id,)
+            )
+            row = cursor.fetchone()
+            
+            if not row:
+                logger.error(f"Model version {model_id} not found")
+                return False
+            
+            gender, format_type = row['gender'], row['format_type']
+            
+            # Deactivate all models for this gender/format
+            cursor.execute(
+                "UPDATE model_versions SET is_active = 0 WHERE gender = ? AND format_type = ?",
+                (gender, format_type)
+            )
+            
+            # Activate the specified model
+            cursor.execute(
+                "UPDATE model_versions SET is_active = 1 WHERE id = ?",
+                (model_id,)
+            )
+            
+            logger.info(f"Set model {model_id} as active for {gender} {format_type}")
+            return True
+            
+    except Exception as e:
+        logger.error(f"Failed to set active model: {e}")
+        return False
+
+
 def main():
     """Initialize the database."""
     logging.basicConfig(

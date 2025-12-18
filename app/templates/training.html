@@ -1,0 +1,779 @@
+{% extends "base.html" %}
+
+{% block title %}Data & Training - Cricket Match Predictor{% endblock %}
+
+{% block head %}
+<style>
+    .status-indicator {
+        display: inline-block;
+        width: 12px;
+        height: 12px;
+        border-radius: 50%;
+        margin-right: 8px;
+    }
+    
+    .status-green { background: var(--accent-primary); }
+    .status-yellow { background: var(--accent-warning); }
+    .status-red { background: #ef4444; }
+    
+    .metric-card {
+        background: var(--bg-tertiary);
+        padding: 1.5rem;
+        border-radius: 12px;
+        border: 1px solid var(--border-color);
+    }
+    
+    .metric-value {
+        font-size: 2rem;
+        font-weight: 700;
+        font-family: 'JetBrains Mono', monospace;
+        color: var(--accent-primary);
+        margin: 0.5rem 0;
+    }
+    
+    .metric-label {
+        color: var(--text-secondary);
+        font-size: 0.875rem;
+        text-transform: uppercase;
+        letter-spacing: 0.5px;
+    }
+    
+    .metric-sublabel {
+        color: var(--text-muted);
+        font-size: 0.75rem;
+        margin-top: 0.25rem;
+    }
+    
+    .progress-bar {
+        width: 100%;
+        height: 24px;
+        background: var(--bg-tertiary);
+        border-radius: 12px;
+        overflow: hidden;
+        margin: 1rem 0;
+        position: relative;
+    }
+    
+    .progress-fill {
+        height: 100%;
+        background: var(--gradient-1);
+        transition: width 0.3s ease;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        font-size: 0.75rem;
+        font-weight: 600;
+        color: white;
+    }
+    
+    .log-output {
+        background: #0a0f1a;
+        border: 1px solid var(--border-color);
+        border-radius: 8px;
+        padding: 1rem;
+        font-family: 'JetBrains Mono', monospace;
+        font-size: 0.75rem;
+        height: 300px;
+        overflow-y: auto;
+        color: var(--text-secondary);
+        white-space: pre-wrap;
+        word-wrap: break-word;
+    }
+    
+    .model-card {
+        background: var(--bg-tertiary);
+        border: 2px solid var(--border-color);
+        border-radius: 12px;
+        padding: 1.5rem;
+        transition: border-color 0.2s;
+    }
+    
+    .model-card.active {
+        border-color: var(--accent-primary);
+    }
+    
+    .model-card h4 {
+        color: var(--accent-primary);
+        margin-bottom: 1rem;
+        display: flex;
+        align-items: center;
+        gap: 0.5rem;
+    }
+    
+    .version-table {
+        width: 100%;
+        margin-top: 1rem;
+    }
+    
+    .version-row {
+        cursor: pointer;
+        transition: background 0.2s;
+    }
+    
+    .version-row:hover {
+        background: var(--bg-tertiary);
+    }
+    
+    .version-row.active {
+        background: rgba(16, 185, 129, 0.1);
+    }
+    
+    .btn-group {
+        display: flex;
+        gap: 0.5rem;
+        margin-bottom: 1rem;
+    }
+    
+    .checkbox-group {
+        display: flex;
+        gap: 1rem;
+        margin: 0.5rem 0;
+    }
+    
+    .checkbox-group label {
+        display: flex;
+        align-items: center;
+        gap: 0.5rem;
+        color: var(--text-primary);
+        cursor: pointer;
+    }
+    
+    .radio-group {
+        display: flex;
+        gap: 1rem;
+        margin: 0.5rem 0;
+    }
+    
+    .radio-group label {
+        display: flex;
+        align-items: center;
+        gap: 0.5rem;
+        color: var(--text-primary);
+        cursor: pointer;
+    }
+    
+    .hidden {
+        display: none;
+    }
+    
+    .spinner-small {
+        display: inline-block;
+        width: 16px;
+        height: 16px;
+        border: 2px solid var(--border-color);
+        border-top-color: var(--accent-primary);
+        border-radius: 50%;
+        animation: spin 1s linear infinite;
+    }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="hero" style="padding: 2rem 0;">
+    <h1 style="font-size: 2.5rem;">Data & Training Management</h1>
+    <p>Monitor database status, download latest data, and retrain prediction models</p>
+</div>
+
+<div class="grid grid-2">
+    <!-- Database Status Section -->
+    <div class="card">
+        <h2 class="card-title">Database Status</h2>
+        <div id="db-status-loading" class="loading">
+            <div class="spinner"></div>
+        </div>
+        <div id="db-status-content" class="hidden">
+            <div class="grid grid-2" style="gap: 1rem;">
+                <div class="metric-card">
+                    <div class="metric-label">Male T20 Matches</div>
+                    <div class="metric-value" id="male-matches">-</div>
+                    <div class="metric-sublabel" id="male-dates">-</div>
+                    <div class="metric-sublabel" id="male-status">
+                        <span class="status-indicator status-green"></span>
+                        <span id="male-days-behind">-</span>
+                    </div>
+                </div>
+                <div class="metric-card">
+                    <div class="metric-label">Female T20 Matches</div>
+                    <div class="metric-value" id="female-matches">-</div>
+                    <div class="metric-sublabel" id="female-dates">-</div>
+                    <div class="metric-sublabel" id="female-status">
+                        <span class="status-indicator status-green"></span>
+                        <span id="female-days-behind">-</span>
+                    </div>
+                </div>
+            </div>
+            <div class="grid grid-3" style="gap: 1rem; margin-top: 1rem;">
+                <div class="metric-card">
+                    <div class="metric-label">Total Players</div>
+                    <div class="metric-value" id="total-players">-</div>
+                </div>
+                <div class="metric-card">
+                    <div class="metric-label">Total Teams</div>
+                    <div class="metric-value" id="total-teams">-</div>
+                </div>
+                <div class="metric-card">
+                    <div class="metric-label">Total Deliveries</div>
+                    <div class="metric-value" id="total-deliveries">-</div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Active Models Section -->
+    <div class="card">
+        <h2 class="card-title">Active Models</h2>
+        <div id="active-models-loading" class="loading">
+            <div class="spinner"></div>
+        </div>
+        <div id="active-models-content" class="hidden">
+            <div class="model-card active" style="margin-bottom: 1rem;">
+                <h4>
+                    <span>⚡</span>
+                    <span>Male T20 Model</span>
+                </h4>
+                <div id="male-model-info">
+                    <p><strong>Model:</strong> <span id="male-model-name">-</span></p>
+                    <p><strong>Training Date:</strong> <span id="male-model-date">-</span></p>
+                    <p><strong>Samples:</strong> <span id="male-model-samples">-</span></p>
+                    <p><strong>Size:</strong> <span id="male-model-size">-</span></p>
+                </div>
+            </div>
+            <div class="model-card active">
+                <h4>
+                    <span>⚡</span>
+                    <span>Female T20 Model</span>
+                </h4>
+                <div id="female-model-info">
+                    <p><strong>Model:</strong> <span id="female-model-name">-</span></p>
+                    <p><strong>Training Date:</strong> <span id="female-model-date">-</span></p>
+                    <p><strong>Samples:</strong> <span id="female-model-samples">-</span></p>
+                    <p><strong>Size:</strong> <span id="female-model-size">-</span></p>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Actions Section -->
+<div class="card" style="margin-top: 1.5rem;">
+    <h2 class="card-title">Actions</h2>
+    
+    <div class="grid grid-2">
+        <div>
+            <h3 style="font-size: 1.1rem; margin-bottom: 1rem;">Download Latest Data</h3>
+            <div class="checkbox-group">
+                <label>
+                    <input type="checkbox" id="download-male" checked>
+                    Male Data
+                </label>
+                <label>
+                    <input type="checkbox" id="download-female" checked>
+                    Female Data
+                </label>
+            </div>
+            <button class="btn btn-primary" onclick="startDownload()" id="download-btn">
+                Download from Cricsheet
+            </button>
+        </div>
+        
+        <div>
+            <h3 style="font-size: 1.1rem; margin-bottom: 1rem;">Retrain Models</h3>
+            <div class="radio-group">
+                <label>
+                    <input type="radio" name="retrain-mode" value="quick" checked>
+                    Quick Retrain
+                </label>
+                <label>
+                    <input type="radio" name="retrain-mode" value="full">
+                    Full Retrain
+                </label>
+            </div>
+            <div class="checkbox-group">
+                <label>
+                    <input type="checkbox" id="retrain-male" checked>
+                    Male Model
+                </label>
+                <label>
+                    <input type="checkbox" id="retrain-female" checked>
+                    Female Model
+                </label>
+            </div>
+            <button class="btn btn-primary" onclick="startRetrain()" id="retrain-btn">
+                Start Training
+            </button>
+        </div>
+    </div>
+    
+    <div id="job-progress" class="hidden" style="margin-top: 2rem;">
+        <h3 style="font-size: 1.1rem; margin-bottom: 1rem;">
+            <span id="job-title">Job in Progress</span>
+            <span class="spinner-small" id="job-spinner"></span>
+        </h3>
+        <div class="progress-bar">
+            <div class="progress-fill" id="progress-fill" style="width: 0%;">
+                <span id="progress-text">0%</span>
+            </div>
+        </div>
+        <p style="color: var(--text-secondary); margin-bottom: 0.5rem;" id="job-step">Initializing...</p>
+        <div class="log-output" id="log-output"></div>
+    </div>
+</div>
+
+<!-- Version History Section -->
+<div class="card" style="margin-top: 1.5rem;">
+    <h2 class="card-title">Model Version History</h2>
+    
+    <div class="btn-group">
+        <button class="btn btn-secondary" onclick="filterVersions('all')" id="filter-all">All</button>
+        <button class="btn btn-secondary" onclick="filterVersions('male')" id="filter-male">Male</button>
+        <button class="btn btn-secondary" onclick="filterVersions('female')" id="filter-female">Female</button>
+    </div>
+    
+    <div id="version-history-loading" class="loading">
+        <div class="spinner"></div>
+    </div>
+    
+    <div id="version-history-content" class="hidden">
+        <table class="table version-table">
+            <thead>
+                <tr>
+                    <th>Model Name</th>
+                    <th>Gender</th>
+                    <th>Training Date</th>
+                    <th>Samples</th>
+                    <th>Size</th>
+                    <th>Duration</th>
+                    <th>Status</th>
+                    <th>Actions</th>
+                </tr>
+            </thead>
+            <tbody id="version-table-body">
+            </tbody>
+        </table>
+    </div>
+</div>
+
+{% endblock %}
+
+{% block scripts %}
+<script>
+let currentJobId = null;
+let pollInterval = null;
+let currentFilter = 'all';
+let allVersions = [];
+
+// Format numbers
+function formatNumber(num) {
+    return num.toLocaleString('en-US');
+}
+
+function formatSize(mb) {
+    if (mb < 1) {
+        return (mb * 1024).toFixed(1) + ' KB';
+    }
+    return mb.toFixed(1) + ' MB';
+}
+
+function formatDuration(seconds) {
+    if (seconds < 60) {
+        return seconds + 's';
+    } else if (seconds < 3600) {
+        return Math.floor(seconds / 60) + 'm ' + (seconds % 60) + 's';
+    } else {
+        const hours = Math.floor(seconds / 3600);
+        const minutes = Math.floor((seconds % 3600) / 60);
+        return hours + 'h ' + minutes + 'm';
+    }
+}
+
+function formatDate(dateStr) {
+    const date = new Date(dateStr);
+    return date.toLocaleDateString('en-US', { 
+        year: 'numeric', 
+        month: 'short', 
+        day: 'numeric',
+        hour: '2-digit',
+        minute: '2-digit'
+    });
+}
+
+// Load database status
+async function loadDatabaseStatus() {
+    try {
+        const response = await fetch('/api/training/db-status');
+        const data = await response.json();
+        
+        if (data.success) {
+            // Male stats
+            const maleStats = data.match_stats.male || {};
+            document.getElementById('male-matches').textContent = formatNumber(maleStats.total_matches || 0);
+            document.getElementById('male-dates').textContent = 
+                `${maleStats.earliest_date || 'N/A'} to ${maleStats.latest_date || 'N/A'}`;
+            
+            const maleDays = maleStats.days_since_latest || 0;
+            const maleIndicator = document.querySelector('#male-status .status-indicator');
+            if (maleDays < 7) {
+                maleIndicator.className = 'status-indicator status-green';
+                document.getElementById('male-days-behind').textContent = `Up to date (${maleDays} days ago)`;
+            } else if (maleDays < 30) {
+                maleIndicator.className = 'status-indicator status-yellow';
+                document.getElementById('male-days-behind').textContent = `${maleDays} days behind`;
+            } else {
+                maleIndicator.className = 'status-indicator status-red';
+                document.getElementById('male-days-behind').textContent = `${maleDays} days behind`;
+            }
+            
+            // Female stats
+            const femaleStats = data.match_stats.female || {};
+            document.getElementById('female-matches').textContent = formatNumber(femaleStats.total_matches || 0);
+            document.getElementById('female-dates').textContent = 
+                `${femaleStats.earliest_date || 'N/A'} to ${femaleStats.latest_date || 'N/A'}`;
+            
+            const femaleDays = femaleStats.days_since_latest || 0;
+            const femaleIndicator = document.querySelector('#female-status .status-indicator');
+            if (femaleDays < 7) {
+                femaleIndicator.className = 'status-indicator status-green';
+                document.getElementById('female-days-behind').textContent = `Up to date (${femaleDays} days ago)`;
+            } else if (femaleDays < 30) {
+                femaleIndicator.className = 'status-indicator status-yellow';
+                document.getElementById('female-days-behind').textContent = `${femaleDays} days behind`;
+            } else {
+                femaleIndicator.className = 'status-indicator status-red';
+                document.getElementById('female-days-behind').textContent = `${femaleDays} days behind`;
+            }
+            
+            // Overall stats
+            document.getElementById('total-players').textContent = formatNumber(data.total_players);
+            document.getElementById('total-teams').textContent = formatNumber(data.total_teams);
+            document.getElementById('total-deliveries').textContent = formatNumber(data.total_deliveries);
+            
+            // Show content
+            document.getElementById('db-status-loading').classList.add('hidden');
+            document.getElementById('db-status-content').classList.remove('hidden');
+        }
+    } catch (error) {
+        console.error('Error loading database status:', error);
+    }
+}
+
+// Load active models
+async function loadActiveModels() {
+    try {
+        const response = await fetch('/api/training/models?active_only=true');
+        const data = await response.json();
+        
+        if (data.success) {
+            const models = data.models;
+            
+            // Find male and female models
+            const maleModel = models.find(m => m.gender === 'male');
+            const femaleModel = models.find(m => m.gender === 'female');
+            
+            // Update male model
+            if (maleModel) {
+                document.getElementById('male-model-name').textContent = maleModel.model_name;
+                document.getElementById('male-model-date').textContent = formatDate(maleModel.created_at);
+                document.getElementById('male-model-samples').textContent = formatNumber(maleModel.training_samples || 0);
+                document.getElementById('male-model-size').textContent = formatSize(maleModel.model_size_mb || 0);
+            } else {
+                document.getElementById('male-model-name').textContent = 'No active model';
+            }
+            
+            // Update female model
+            if (femaleModel) {
+                document.getElementById('female-model-name').textContent = femaleModel.model_name;
+                document.getElementById('female-model-date').textContent = formatDate(femaleModel.created_at);
+                document.getElementById('female-model-samples').textContent = formatNumber(femaleModel.training_samples || 0);
+                document.getElementById('female-model-size').textContent = formatSize(femaleModel.model_size_mb || 0);
+            } else {
+                document.getElementById('female-model-name').textContent = 'No active model';
+            }
+            
+            // Show content
+            document.getElementById('active-models-loading').classList.add('hidden');
+            document.getElementById('active-models-content').classList.remove('hidden');
+        }
+    } catch (error) {
+        console.error('Error loading active models:', error);
+    }
+}
+
+// Load version history
+async function loadVersionHistory() {
+    try {
+        const response = await fetch('/api/training/models');
+        const data = await response.json();
+        
+        if (data.success) {
+            allVersions = data.models;
+            renderVersionHistory();
+            
+            // Show content
+            document.getElementById('version-history-loading').classList.add('hidden');
+            document.getElementById('version-history-content').classList.remove('hidden');
+        }
+    } catch (error) {
+        console.error('Error loading version history:', error);
+    }
+}
+
+function renderVersionHistory() {
+    const tbody = document.getElementById('version-table-body');
+    tbody.innerHTML = '';
+    
+    // Filter versions
+    const filtered = currentFilter === 'all' 
+        ? allVersions 
+        : allVersions.filter(v => v.gender === currentFilter);
+    
+    if (filtered.length === 0) {
+        tbody.innerHTML = '<tr><td colspan="8" style="text-align: center; padding: 2rem; color: var(--text-muted);">No models found</td></tr>';
+        return;
+    }
+    
+    filtered.forEach(model => {
+        const row = document.createElement('tr');
+        row.className = 'version-row' + (model.is_active ? ' active' : '');
+        
+        row.innerHTML = `
+            <td>${model.model_name}</td>
+            <td><span class="badge badge-${model.gender === 'male' ? 'success' : 'warning'}">${model.gender}</span></td>
+            <td>${formatDate(model.created_at)}</td>
+            <td>${formatNumber(model.training_samples || 0)}</td>
+            <td>${formatSize(model.model_size_mb || 0)}</td>
+            <td>${formatDuration(model.training_duration_seconds || 0)}</td>
+            <td>
+                ${model.is_active 
+                    ? '<span class="badge badge-success">Active</span>' 
+                    : '<span class="badge" style="background: rgba(156, 163, 175, 0.2); color: var(--text-secondary);">Inactive</span>'}
+            </td>
+            <td>
+                ${!model.is_active 
+                    ? `<button class="btn btn-secondary" style="padding: 0.25rem 0.75rem; font-size: 0.875rem;" onclick="setActiveModel(${model.id})">Activate</button>`
+                    : ''}
+            </td>
+        `;
+        
+        tbody.appendChild(row);
+    });
+}
+
+function filterVersions(filter) {
+    currentFilter = filter;
+    
+    // Update button states
+    document.getElementById('filter-all').className = filter === 'all' ? 'btn btn-primary' : 'btn btn-secondary';
+    document.getElementById('filter-male').className = filter === 'male' ? 'btn btn-primary' : 'btn btn-secondary';
+    document.getElementById('filter-female').className = filter === 'female' ? 'btn btn-primary' : 'btn btn-secondary';
+    
+    renderVersionHistory();
+}
+
+// Set active model
+async function setActiveModel(modelId) {
+    if (!confirm('Are you sure you want to activate this model? This will deactivate the current active model.')) {
+        return;
+    }
+    
+    try {
+        const response = await fetch(`/api/training/models/${modelId}/activate`, {
+            method: 'POST'
+        });
+        const data = await response.json();
+        
+        if (data.success) {
+            alert('Model activated successfully!');
+            loadActiveModels();
+            loadVersionHistory();
+        } else {
+            alert('Failed to activate model: ' + data.error);
+        }
+    } catch (error) {
+        console.error('Error activating model:', error);
+        alert('Error activating model');
+    }
+}
+
+// Start data download
+async function startDownload() {
+    const downloadMale = document.getElementById('download-male').checked;
+    const downloadFemale = document.getElementById('download-female').checked;
+    
+    if (!downloadMale && !downloadFemale) {
+        alert('Please select at least one data source');
+        return;
+    }
+    
+    const formats = [];
+    if (downloadMale) formats.push('all_male');
+    if (downloadFemale) formats.push('all_female');
+    
+    try {
+        document.getElementById('download-btn').disabled = true;
+        document.getElementById('download-btn').textContent = 'Starting...';
+        
+        const response = await fetch('/api/training/download', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ formats })
+        });
+        const data = await response.json();
+        
+        if (data.success) {
+            currentJobId = data.job_id;
+            showJobProgress(data.job_id, 'Data Download');
+            startPolling();
+        } else {
+            alert('Failed to start download: ' + data.error);
+            document.getElementById('download-btn').disabled = false;
+            document.getElementById('download-btn').textContent = 'Download from Cricsheet';
+        }
+    } catch (error) {
+        console.error('Error starting download:', error);
+        alert('Error starting download');
+        document.getElementById('download-btn').disabled = false;
+        document.getElementById('download-btn').textContent = 'Download from Cricsheet';
+    }
+}
+
+// Start model retrain
+async function startRetrain() {
+    const mode = document.querySelector('input[name="retrain-mode"]:checked').value;
+    const retrainMale = document.getElementById('retrain-male').checked;
+    const retrainFemale = document.getElementById('retrain-female').checked;
+    
+    if (!retrainMale && !retrainFemale) {
+        alert('Please select at least one model to retrain');
+        return;
+    }
+    
+    const genders = [];
+    if (retrainMale) genders.push('male');
+    if (retrainFemale) genders.push('female');
+    
+    const modeText = mode === 'full' ? 'Full retraining' : 'Quick retraining';
+    if (!confirm(`${modeText} for ${genders.join(' and ')} models. This may take a while. Continue?`)) {
+        return;
+    }
+    
+    try {
+        document.getElementById('retrain-btn').disabled = true;
+        document.getElementById('retrain-btn').textContent = 'Starting...';
+        
+        const response = await fetch('/api/training/retrain', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ mode, genders })
+        });
+        const data = await response.json();
+        
+        if (data.success) {
+            currentJobId = data.job_id;
+            showJobProgress(data.job_id, `Model Retrain (${mode})`);
+            startPolling();
+        } else {
+            alert('Failed to start retraining: ' + data.error);
+            document.getElementById('retrain-btn').disabled = false;
+            document.getElementById('retrain-btn').textContent = 'Start Training';
+        }
+    } catch (error) {
+        console.error('Error starting retrain:', error);
+        alert('Error starting retrain');
+        document.getElementById('retrain-btn').disabled = false;
+        document.getElementById('retrain-btn').textContent = 'Start Training';
+    }
+}
+
+function showJobProgress(jobId, title) {
+    document.getElementById('job-title').textContent = title;
+    document.getElementById('job-progress').classList.remove('hidden');
+    document.getElementById('log-output').textContent = '';
+}
+
+function startPolling() {
+    if (pollInterval) {
+        clearInterval(pollInterval);
+    }
+    
+    // Poll every 2 seconds
+    pollInterval = setInterval(pollJobStatus, 2000);
+    pollJobStatus(); // Call immediately
+}
+
+async function pollJobStatus() {
+    if (!currentJobId) return;
+    
+    try {
+        const response = await fetch(`/api/training/job/${currentJobId}`);
+        const data = await response.json();
+        
+        if (data.success) {
+            const job = data.job;
+            
+            // Update progress
+            document.getElementById('progress-fill').style.width = job.progress + '%';
+            document.getElementById('progress-text').textContent = job.progress + '%';
+            
+            // Update step
+            if (job.current_step) {
+                document.getElementById('job-step').textContent = job.current_step;
+            }
+            
+            // Update logs
+            const logOutput = document.getElementById('log-output');
+            if (job.logs && job.logs.length > 0) {
+                logOutput.textContent = job.logs.join('');
+                logOutput.scrollTop = logOutput.scrollHeight;
+            }
+            
+            // Check if complete
+            if (job.status === 'completed') {
+                clearInterval(pollInterval);
+                document.getElementById('job-spinner').style.display = 'none';
+                document.getElementById('progress-fill').style.background = 'var(--gradient-1)';
+                
+                // Re-enable buttons
+                document.getElementById('download-btn').disabled = false;
+                document.getElementById('download-btn').textContent = 'Download from Cricsheet';
+                document.getElementById('retrain-btn').disabled = false;
+                document.getElementById('retrain-btn').textContent = 'Start Training';
+                
+                // Reload data
+                setTimeout(() => {
+                    loadDatabaseStatus();
+                    loadActiveModels();
+                    loadVersionHistory();
+                }, 1000);
+                
+                alert('Job completed successfully!');
+            } else if (job.status === 'failed') {
+                clearInterval(pollInterval);
+                document.getElementById('job-spinner').style.display = 'none';
+                document.getElementById('progress-fill').style.background = 'var(--gradient-2)';
+                
+                // Re-enable buttons
+                document.getElementById('download-btn').disabled = false;
+                document.getElementById('download-btn').textContent = 'Download from Cricsheet';
+                document.getElementById('retrain-btn').disabled = false;
+                document.getElementById('retrain-btn').textContent = 'Start Training';
+                
+                alert('Job failed: ' + (job.error || 'Unknown error'));
+            }
+        }
+    } catch (error) {
+        console.error('Error polling job status:', error);
+    }
+}
+
+// Initialize page
+document.addEventListener('DOMContentLoaded', () => {
+    loadDatabaseStatus();
+    loadActiveModels();
+    loadVersionHistory();
+    
+    // Auto-refresh DB status every 60 seconds
+    setInterval(loadDatabaseStatus, 60000);
+});
+</script>
+{% endblock %}
+
