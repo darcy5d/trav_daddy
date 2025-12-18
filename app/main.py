@@ -2270,11 +2270,25 @@ def get_job_status(job_id):
     """
     try:
         from src.utils.job_manager import get_job_status as get_status
+        from pathlib import Path
         
         job_info = get_status(job_id)
         
         if job_info is None:
             return jsonify({'success': False, 'error': 'Job not found'}), 404
+        
+        # Convert any Path objects to strings for JSON serialization
+        def convert_paths(obj):
+            if isinstance(obj, Path):
+                return str(obj)
+            elif isinstance(obj, dict):
+                return {k: convert_paths(v) for k, v in obj.items()}
+            elif isinstance(obj, list):
+                return [convert_paths(item) for item in obj]
+            else:
+                return obj
+        
+        job_info = convert_paths(job_info)
         
         # Return recent logs only (last 100 lines)
         logs = job_info.get('logs', [])
@@ -2291,6 +2305,8 @@ def get_job_status(job_id):
         
     except Exception as e:
         logger.error(f"Error getting job status: {e}")
+        import traceback
+        traceback.print_exc()
         return jsonify({'success': False, 'error': str(e)}), 500
 
 
