@@ -2334,18 +2334,21 @@ def get_job_status(job_id):
         if job_info is None:
             return jsonify({'success': False, 'error': 'Job not found'}), 404
         
-        # Convert any Path objects to strings for JSON serialization
-        def convert_paths(obj):
+        # Convert any non-JSON-serializable objects for JSON serialization
+        def make_json_serializable(obj):
             if isinstance(obj, Path):
                 return str(obj)
-            elif isinstance(obj, dict):
-                return {k: convert_paths(v) for k, v in obj.items()}
-            elif isinstance(obj, list):
-                return [convert_paths(item) for item in obj]
+            elif isinstance(obj, (dict,)):
+                return {k: make_json_serializable(v) for k, v in obj.items()}
+            elif isinstance(obj, (list, tuple)):
+                return [make_json_serializable(item) for item in obj]
+            elif hasattr(obj, '__dict__'):
+                # Complex object - convert to string representation
+                return str(type(obj).__name__)
             else:
                 return obj
         
-        job_info = convert_paths(job_info)
+        job_info = make_json_serializable(job_info)
         
         # Return recent logs only (last 100 lines)
         logs = job_info.get('logs', [])
