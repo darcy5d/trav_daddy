@@ -258,7 +258,7 @@
 <div class="card" style="margin-top: 1.5rem;">
     <h2 class="card-title">Actions</h2>
     
-    <div class="grid grid-2">
+    <div class="grid grid-3">
         <div>
             <h3 style="font-size: 1.1rem; margin-bottom: 1rem;">Download Latest Data</h3>
             <div class="checkbox-group">
@@ -300,6 +300,16 @@
             </div>
             <button class="btn btn-primary" onclick="startRetrain()" id="retrain-btn">
                 Start Training
+            </button>
+        </div>
+        
+        <div>
+            <h3 style="font-size: 1.1rem; margin-bottom: 1rem;">Reset & Rebuild (Day 0)</h3>
+            <p style="font-size: 0.875rem; color: var(--text-secondary); margin-bottom: 1rem;">
+                Backup current database, then rebuild everything from scratch with fresh ingestion and training.
+            </p>
+            <button class="btn" style="background: var(--gradient-2); color: white;" onclick="startReset()" id="reset-btn">
+                Reset & Rebuild All
             </button>
         </div>
     </div>
@@ -636,6 +646,79 @@ async function startDownload() {
     }
 }
 
+// Start reset and rebuild
+async function startReset() {
+    const confirmed = confirm(
+        '⚠️ RESET & REBUILD DATABASE\n\n' +
+        'This will:\n' +
+        '1. Backup your current database\n' +
+        '2. Delete all data and start fresh\n' +
+        '3. Re-ingest all data from downloaded files\n' +
+        '4. Retrain both male and female models from scratch\n\n' +
+        'This will take 15-30 minutes.\n\n' +
+        'Are you absolutely sure you want to proceed?'
+    );
+    
+    if (!confirmed) return;
+    
+    const doubleCheck = confirm(
+        'Final confirmation: This will create a clean "Day 0" setup.\n\n' +
+        'Continue with database reset?'
+    );
+    
+    if (!doubleCheck) return;
+    
+    try {
+        document.getElementById('reset-btn').disabled = true;
+        document.getElementById('reset-btn').textContent = 'Resetting...';
+        
+        // Step 1: Reset database
+        console.log('Step 1: Resetting database...');
+        const resetResponse = await fetch('/api/training/reset-database', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ confirm: true })
+        });
+        const resetData = await resetResponse.json();
+        
+        if (!resetData.success) {
+            alert('Failed to reset database: ' + resetData.error);
+            document.getElementById('reset-btn').disabled = false;
+            document.getElementById('reset-btn').textContent = 'Reset & Rebuild All';
+            return;
+        }
+        
+        console.log('Database reset complete. Backup:', resetData.backup);
+        
+        // Step 2: Start full retrain with both genders
+        console.log('Step 2: Starting full retrain...');
+        const retrainResponse = await fetch('/api/training/retrain', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ 
+                mode: 'full',
+                genders: ['male', 'female']
+            })
+        });
+        const retrainData = await retrainResponse.json();
+        
+        if (retrainData.success) {
+            currentJobId = retrainData.job_id;
+            showJobProgress(retrainData.job_id, 'Day 0 Rebuild: Full Pipeline');
+            startPolling();
+        } else {
+            alert('Failed to start retraining: ' + retrainData.error);
+            document.getElementById('reset-btn').disabled = false;
+            document.getElementById('reset-btn').textContent = 'Reset & Rebuild All';
+        }
+    } catch (error) {
+        console.error('Error during reset:', error);
+        alert('Error during reset: ' + error.message);
+        document.getElementById('reset-btn').disabled = false;
+        document.getElementById('reset-btn').textContent = 'Reset & Rebuild All';
+    }
+}
+
 // Start model retrain
 async function startRetrain() {
     const mode = document.querySelector('input[name="retrain-mode"]:checked').value;
@@ -737,6 +820,8 @@ async function pollJobStatus() {
                 document.getElementById('download-btn').textContent = 'Download from Cricsheet';
                 document.getElementById('retrain-btn').disabled = false;
                 document.getElementById('retrain-btn').textContent = 'Start Training';
+                document.getElementById('reset-btn').disabled = false;
+                document.getElementById('reset-btn').textContent = 'Reset & Rebuild All';
                 
                 // Reload data
                 setTimeout(() => {
@@ -756,6 +841,8 @@ async function pollJobStatus() {
                 document.getElementById('download-btn').textContent = 'Download from Cricsheet';
                 document.getElementById('retrain-btn').disabled = false;
                 document.getElementById('retrain-btn').textContent = 'Start Training';
+                document.getElementById('reset-btn').disabled = false;
+                document.getElementById('reset-btn').textContent = 'Reset & Rebuild All';
                 
                 alert('Job failed: ' + (job.error || 'Unknown error'));
             }

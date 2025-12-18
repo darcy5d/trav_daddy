@@ -2137,6 +2137,63 @@ def activate_model(model_id):
         return jsonify({'success': False, 'error': str(e)}), 500
 
 
+@app.route('/api/training/reset-database', methods=['POST'])
+def reset_database():
+    """
+    Reset the database (with backup) for a fresh start.
+    
+    Request body:
+        {
+            "confirm": true  # Must be true to proceed
+        }
+        
+    Returns:
+        JSON with success status
+    """
+    try:
+        from pathlib import Path
+        from datetime import datetime
+        import shutil
+        
+        data = request.get_json() or {}
+        
+        if not data.get('confirm'):
+            return jsonify({'success': False, 'error': 'Confirmation required'}), 400
+        
+        db_path = DATABASE_PATH
+        
+        # Create backup
+        backup_name = f"cricket_backup_{datetime.now().strftime('%Y%m%d_%H%M%S')}.db"
+        backup_path = db_path.parent / 'backups' / backup_name
+        backup_path.parent.mkdir(exist_ok=True)
+        
+        shutil.copy2(db_path, backup_path)
+        logger.info(f"Database backed up to {backup_path}")
+        
+        # Delete current database
+        db_path.unlink()
+        logger.info(f"Deleted database: {db_path}")
+        
+        # Reinitialize with fresh schema
+        from src.data.database import init_database, init_model_versions_table
+        init_database()
+        init_model_versions_table()
+        
+        logger.info("Database reset complete")
+        
+        return jsonify({
+            'success': True,
+            'message': 'Database reset successfully',
+            'backup': str(backup_path)
+        })
+        
+    except Exception as e:
+        logger.error(f"Error resetting database: {e}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
 @app.route('/api/training/download', methods=['POST'])
 def start_data_download():
     """
