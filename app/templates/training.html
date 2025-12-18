@@ -399,12 +399,18 @@ function formatDuration(seconds) {
 
 function formatDate(dateStr) {
     const date = new Date(dateStr);
-    return date.toLocaleDateString('en-US', { 
+    
+    // Use the global timezone from base.html (defaults to Melbourne)
+    const timezone = currentTimezone || 'Australia/Melbourne';
+    
+    return date.toLocaleString('en-US', { 
+        timeZone: timezone,
         year: 'numeric', 
         month: 'short', 
         day: 'numeric',
         hour: '2-digit',
-        minute: '2-digit'
+        minute: '2-digit',
+        hour12: true
     });
 }
 
@@ -862,6 +868,13 @@ document.addEventListener('DOMContentLoaded', () => {
     
     // Auto-refresh DB status every 60 seconds
     setInterval(loadDatabaseStatus, 60000);
+});
+
+// Listen for timezone changes from global selector
+window.addEventListener('timezoneChanged', (event) => {
+    // Reload models and version history to update displayed times
+    loadActiveModels();
+    loadVersionHistory();
 });
 </script>
 {% endblock %}
