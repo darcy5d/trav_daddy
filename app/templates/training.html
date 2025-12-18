@@ -349,6 +349,7 @@
                 <tr>
                     <th>Model Name</th>
                     <th>Gender</th>
+                    <th>Match Type</th>
                     <th>Training Date</th>
                     <th>Samples</th>
                     <th>Size</th>
@@ -548,6 +549,7 @@ function renderVersionHistory() {
         row.innerHTML = `
             <td>${model.model_name}</td>
             <td><span class="badge badge-${model.gender === 'male' ? 'success' : 'warning'}">${model.gender}</span></td>
+            <td><span class="badge" style="background: rgba(59, 130, 246, 0.2); color: var(--accent-secondary);">${model.format_type || 'T20'}</span></td>
             <td>${formatDate(model.created_at)}</td>
             <td>${formatNumber(model.training_samples || 0)}</td>
             <td>${formatSize(model.model_size_mb || 0)}</td>

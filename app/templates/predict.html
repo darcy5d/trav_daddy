@@ -2,20 +2,6 @@
 
 {% block title %}Match Prediction - Cricket Predictor{% endblock %}
 
-{% block navbar_extra %}
-<div class="timezone-selector">
-    <label for="timezone-select">🕐 TZ:</label>
-    <select id="timezone-select" onchange="setTimezone(this.value)">
-        <option value="Australia/Melbourne">Melbourne (AEDT)</option>
-        <option value="Australia/Sydney">Sydney (AEDT)</option>
-        <option value="Asia/Kolkata">India (IST)</option>
-        <option value="Asia/Dubai">Dubai (GST)</option>
-        <option value="Europe/London">London (GMT)</option>
-        <option value="America/New_York">New York (EST)</option>
-        <option value="UTC">UTC/GMT</option>
-    </select>
-</div>
-{% endblock %}
 
 {% block content %}
 <style>
@@ -510,9 +496,6 @@
     // Data source: 'espn' or 'api'
     let currentDataSource = 'espn';
     
-    // Timezone: default to Melbourne
-    let currentTimezone = localStorage.getItem('cricket_timezone') || 'Australia/Melbourne';
-    
     // Team filter state (for manual selection)
     const teamFilters = {
         1: { gender: 'male', type: 'all' },
@@ -533,13 +516,11 @@
         loadUpcomingMatches();  // Load upcoming matches
     });
     
-    // Set timezone and refresh display
-    function setTimezone(tz) {
-        currentTimezone = tz;
-        localStorage.setItem('cricket_timezone', tz);
+    // Listen for timezone changes from global selector
+    window.addEventListener('timezoneChanged', (event) => {
         // Reload matches to update displayed times
         loadUpcomingMatches();
-    }
+    });
     
     // Format a GMT ISO datetime string in the selected timezone
     function formatTimeInTimezone(gmtIsoString) {

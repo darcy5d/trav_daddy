@@ -281,6 +281,24 @@
             max-width: 600px;
             margin: 0 auto;
         }
+        
+        .timezone-selector {
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+        }
+        
+        .timezone-selector label {
+            color: var(--text-secondary);
+            font-size: 0.875rem;
+            margin: 0;
+        }
+        
+        .timezone-selector select {
+            width: auto;
+            padding: 0.5rem 0.75rem;
+            font-size: 0.875rem;
+        }
     </style>
     {% block head %}{% endblock %}
 </head>
@@ -289,11 +307,24 @@
         <a href="/" class="logo">Cricket Predictor</a>
         <ul class="nav-links">
             <li><a href="/" class="{% if request.path == '/' %}active{% endif %}">Home</a></li>
+            <li><a href="/training" class="{% if request.path == '/training' %}active{% endif %}">Data & Training</a></li>
             <li><a href="/predict" class="{% if request.path == '/predict' %}active{% endif %}">Predict</a></li>
             <li><a href="/rankings" class="{% if request.path == '/rankings' %}active{% endif %}">Rankings</a></li>
-            <li><a href="/training" class="{% if request.path == '/training' %}active{% endif %}">Data & Training</a></li>
         </ul>
-        {% block navbar_extra %}{% endblock %}
+        <div class="timezone-selector">
+            <label for="timezone-select">🌍</label>
+            <select id="timezone-select" onchange="setTimezone(this.value)">
+                <option value="Australia/Melbourne">Melbourne</option>
+                <option value="Australia/Sydney">Sydney</option>
+                <option value="Australia/Brisbane">Brisbane</option>
+                <option value="Australia/Perth">Perth</option>
+                <option value="Asia/Kolkata">India</option>
+                <option value="Europe/London">London</option>
+                <option value="America/New_York">New York</option>
+                <option value="Asia/Dubai">Dubai</option>
+                <option value="Pacific/Auckland">Auckland</option>
+            </select>
+        </div>
     </nav>
     
     <main class="container">
@@ -325,6 +356,24 @@
         function formatPercent(num) {
             return (num * 100).toFixed(1) + '%';
         }
+        
+        // Global timezone management
+        let currentTimezone = localStorage.getItem('cricket_timezone') || 'Australia/Melbourne';
+        
+        function setTimezone(tz) {
+            currentTimezone = tz;
+            localStorage.setItem('cricket_timezone', tz);
+            // Dispatch event for pages that need to react to timezone changes
+            window.dispatchEvent(new CustomEvent('timezoneChanged', { detail: { timezone: tz } }));
+        }
+        
+        // Initialize timezone selector on page load
+        document.addEventListener('DOMContentLoaded', () => {
+            const tzSelect = document.getElementById('timezone-select');
+            if (tzSelect) {
+                tzSelect.value = currentTimezone;
+            }
+        });
     </script>
     {% block scripts %}{% endblock %}
 </body>
