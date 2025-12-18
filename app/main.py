@@ -461,6 +461,61 @@ def get_venues():
         return jsonify({'success': False, 'error': str(e)}), 500
 
 
+@app.route('/api/players/details', methods=['GET'])
+def get_player_details():
+    """Get details for specific player IDs."""
+    try:
+        player_ids = request.args.get('player_ids', '')
+        if not player_ids:
+            return jsonify({'success': False, 'error': 'No player IDs provided'}), 400
+        
+        # Parse comma-separated IDs
+        player_id_list = [int(pid.strip()) for pid in player_ids.split(',') if pid.strip()]
+        
+        conn = get_connection()
+        cursor = conn.cursor()
+        
+        # Get player details
+        placeholders = ','.join('?' * len(player_id_list))
+        cursor.execute(f"""
+            SELECT player_id, name, batting_style, bowling_style
+            FROM players
+            WHERE player_id IN ({placeholders})
+        """, player_id_list)
+        
+        players_raw = cursor.fetchall()
+        conn.close()
+        
+        # Infer playing role from batting and bowling styles
+        players = []
+        for row in players_raw:
+            player_dict = dict(row)
+            batting = player_dict.get('batting_style', '') or ''
+            bowling = player_dict.get('bowling_style', '') or ''
+            
+            # Infer role
+            if batting and bowling:
+                player_dict['playing_role'] = 'Allrounder'
+            elif bowling:
+                player_dict['playing_role'] = 'Bowler'
+            elif batting:
+                player_dict['playing_role'] = 'Batter'
+            else:
+                player_dict['playing_role'] = ''
+            
+            players.append(player_dict)
+        
+        return jsonify({
+            'success': True,
+            'players': players
+        })
+    
+    except Exception as e:
+        logger.error(f"Error fetching player details: {e}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({'success': False, 'error': str(e)}), 500
+
 @app.route('/api/players/<int:team_id>', methods=['GET'])
 def get_team_players(team_id):
     """Get players for a specific team."""

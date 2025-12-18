@@ -987,9 +987,18 @@
             });
         });
         
+        console.log(`[DEBUG] selectMatch - Loading teams for gender: ${gender}, type: all`);
+        
         // Load teams (all types) and venues for this gender
         await loadTeams();
+        console.log(`[DEBUG] selectMatch - Teams loaded successfully`);
+        
+        // Small delay to ensure dropdown DOM is fully updated
+        await new Promise(resolve => setTimeout(resolve, 150));
+        console.log(`[DEBUG] selectMatch - Dropdown population delay complete`);
+        
         await loadVenues();
+        console.log(`[DEBUG] selectMatch - Venues loaded successfully`);
         
         // Load the match - use ESPN or API endpoint based on source
         if (isEspn) {
@@ -1070,70 +1079,75 @@
         let teamFound = false;
         let teamId = null;
         
+        console.log(`[DEBUG] Team ${teamNum} - Looking for: "${dbTeamName}"`);
+        console.log(`[DEBUG] Team ${teamNum} - Dropdown has ${teamSelect.options.length} options`);
+        
+        // Log first 10 options for debugging
+        const availableOptions = Array.from(teamSelect.options).slice(0, 10).map(opt => `"${opt.textContent}"`);
+        console.log(`[DEBUG] Team ${teamNum} - First 10 options:`, availableOptions.join(', '));
+        
         for (let opt of teamSelect.options) {
             if (opt.textContent === dbTeamName) {
                 teamSelect.value = opt.value;
                 teamId = opt.value;
                 teamFound = true;
+                console.log(`[DEBUG] Team ${teamNum} - FOUND match: "${opt.textContent}" (ID: ${opt.value})`);
                 break;
             }
         }
         
         if (!teamFound) {
-            console.warn(`Team not found in dropdown: ${dbTeamName}`);
+            console.warn(`[DEBUG] Team ${teamNum} - NOT FOUND in dropdown: "${dbTeamName}"`);
+            console.warn(`[DEBUG] Team ${teamNum} - All available teams:`, Array.from(teamSelect.options).map(opt => `"${opt.textContent}"`));
             return;
         }
         
-        // Load players for this team
-        await loadPlayers(teamNum);
+        console.log(`[DEBUG] Team ${teamNum} - espnTeam:`, espnTeam);
+        console.log(`[DEBUG] Team ${teamNum} - espnTeam.players:`, espnTeam?.players);
         
-        // Small delay to ensure DOM is updated
-        await new Promise(resolve => setTimeout(resolve, 100));
+        // Get matched players from ESPN data
+        const matchedPlayers = espnTeam?.players?.filter(p => p.db_player_id) || [];
         
-        // Get matched player IDs from ESPN data
-        const matchedPlayerIds = espnTeam?.players
-            ?.filter(p => p.db_player_id)
-            ?.map(p => p.db_player_id) || [];
+        console.log(`[DEBUG] Team ${teamNum} - matchedPlayers length: ${matchedPlayers.length}`);
         
-        // If ESPN has no squad, fall back to recent lineup from our database
-        if (matchedPlayerIds.length === 0) {
-            console.log(`Team ${teamNum} (${dbTeamName}): No ESPN squad, loading recent lineup from database...`);
+        // If ESPN has no matched players, fall back to recent lineup from our database
+        if (matchedPlayers.length === 0) {
+            console.log(`[DEBUG] Team ${teamNum} (${dbTeamName}): No ESPN squad matched to DB, loading recent lineup from database...`);
+            await loadPlayers(teamNum);  // Load historical players
+            await new Promise(resolve => setTimeout(resolve, 100));
             await loadRecentLineupForTeam(teamNum, teamId);
             return;
         }
         
-        // Select matched players
+        // Populate batters and bowlers dropdowns with ESPN-matched players
         const battersSelect = document.getElementById(`team${teamNum}-batters`);
         const bowlersSelect = document.getElementById(`team${teamNum}-bowlers`);
         
-        // Clear current selections
-        for (let opt of battersSelect.options) opt.selected = false;
-        for (let opt of bowlersSelect.options) opt.selected = false;
+        battersSelect.innerHTML = '';
+        bowlersSelect.innerHTML = '';
         
-        let battersSelected = 0;
-        let bowlersSelected = 0;
+        console.log(`[DEBUG] Team ${teamNum} - Populating dropdowns with ${matchedPlayers.length} matched players`);
         
-        // Select matched players from ESPN squad
-        for (let playerId of matchedPlayerIds) {
-            // Try batters first
-            for (let opt of battersSelect.options) {
-                if (parseInt(opt.value) === playerId && !opt.selected) {
-                    opt.selected = true;
-                    battersSelected++;
-                    break;
-                }
-            }
-            // Also try bowlers
-            for (let opt of bowlersSelect.options) {
-                if (parseInt(opt.value) === playerId && !opt.selected) {
-                    opt.selected = true;
-                    bowlersSelected++;
-                    break;
-                }
-            }
+        // Add all matched players to both batters and bowlers
+        // (since ESPN doesn't provide roles and DB might not have reliable role data)
+        for (let player of matchedPlayers) {
+            // Add to batters
+            const batterOpt = document.createElement('option');
+            batterOpt.value = player.db_player_id;
+            batterOpt.textContent = player.name;
+            batterOpt.selected = true;
+            battersSelect.appendChild(batterOpt);
+            
+            // Add to bowlers
+            const bowlerOpt = document.createElement('option');
+            bowlerOpt.value = player.db_player_id;
+            bowlerOpt.textContent = player.name;
+            bowlerOpt.selected = true;
+            bowlersSelect.appendChild(bowlerOpt);
         }
         
-        console.log(`Team ${teamNum} (${dbTeamName}): Selected ${battersSelected} batters, ${bowlersSelected} bowlers from ESPN`);
+        console.log(`[DEBUG] Team ${teamNum} - Populated ${battersSelect.options.length} batters, ${bowlersSelect.options.length} bowlers from ESPN`);
+        console.log(`Team ${teamNum} (${dbTeamName}): Auto-selected ${matchedPlayers.length} players (all in both batters and bowlers)`);
     }
     
     async function loadRecentLineupForTeam(teamNum, teamId) {
