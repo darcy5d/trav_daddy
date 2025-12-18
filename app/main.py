@@ -2218,15 +2218,30 @@ def start_data_download():
         force_download = data.get('force_download', False)
         
         def download_and_ingest():
-            """Download and ingest data."""
+            """Download and ingest data with progress reporting."""
+            from src.utils.job_manager import update_job_progress
+            import threading
+            
+            # Get current job ID
+            job_id = getattr(threading.current_thread(), 'job_id', None)
+            
             logger.info(f"Starting data download for formats: {formats}")
             
-            # Download
+            # Download - 0-50%
+            if job_id:
+                update_job_progress(job_id, 5, f"Downloading {', '.join(formats)} from Cricsheet...")
+            
             download_result = download_cricsheet_data(formats=formats, force_download=force_download)
             
-            # Ingest
+            if job_id:
+                update_job_progress(job_id, 50, "Download complete. Starting data ingestion...")
+            
+            # Ingest - 50-100%
             logger.info("Starting data ingestion...")
             ingest_result = ingest_matches(formats=formats)
+            
+            if job_id:
+                update_job_progress(job_id, 100, "Ingestion complete!")
             
             return {
                 'download': download_result,
@@ -2280,7 +2295,13 @@ def start_model_retrain():
         
         def retrain_models():
             """Retrain models based on mode."""
-            logger.info(f"Starting model retrain: mode={mode}, genders={genders}")
+            from src.utils.job_manager import update_job_progress, get_job_status
+            import threading
+            
+            # Get current job ID from thread-local storage
+            job_id = getattr(threading.current_thread(), 'job_id', None)
+            
+            logger.info(f"Starting model retrain: mode={mode}, genders={genders}, job_id={job_id}")
             
             skip_ingest = (mode == 'quick')
             skip_elo = (mode == 'quick')
@@ -2291,7 +2312,8 @@ def start_model_retrain():
                 skip_ingest=skip_ingest,
                 skip_elo=skip_elo,
                 male_only=male_only,
-                female_only=female_only
+                female_only=female_only,
+                progress_callback=lambda pct, step: update_job_progress(job_id, pct, step) if job_id else None
             )
             
             return result

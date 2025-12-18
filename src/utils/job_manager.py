@@ -112,7 +112,13 @@ def start_job(
 
 def _run_job(job_id: str, func: Callable, args: tuple, kwargs: dict):
     """Run a job in a background thread."""
+    import threading
+    
     try:
+        # Store job_id in thread-local storage so functions can access it
+        current_thread = threading.current_thread()
+        current_thread.job_id = job_id
+        
         # Update status to running
         update_job_status(job_id, JobStatus.RUNNING)
         update_job_field(job_id, 'started_at', datetime.now().isoformat())
@@ -131,6 +137,8 @@ def _run_job(job_id: str, func: Callable, args: tuple, kwargs: dict):
         
     except Exception as e:
         logger.error(f"Job {job_id} failed: {e}")
+        import traceback
+        traceback.print_exc()
         update_job_status(job_id, JobStatus.FAILED)
         update_job_field(job_id, 'error', str(e))
         update_job_field(job_id, 'completed_at', datetime.now().isoformat())

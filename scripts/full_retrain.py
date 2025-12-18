@@ -291,9 +291,10 @@ def run_full_pipeline(
     skip_ingest: bool = False,
     skip_elo: bool = False,
     male_only: bool = False,
-    female_only: bool = False
+    female_only: bool = False,
+    progress_callback = None
 ):
-    """Run the full retraining pipeline."""
+    """Run the full retraining pipeline with progress reporting."""
     start_time = time.time()
     
     logger.info("=" * 60)
@@ -302,16 +303,40 @@ def run_full_pipeline(
     logger.info("=" * 60)
     
     results = {}
+    current_progress = 0
+    
+    # Calculate progress increments based on what we're doing
+    num_genders = 0
+    if not male_only:
+        num_genders += 1
+    if not female_only:
+        num_genders += 1
+    
+    ingest_pct = 20 if not skip_ingest else 0
+    elo_pct = 10 if not skip_elo else 0
+    per_gender_pct = (100 - ingest_pct - elo_pct) / num_genders if num_genders > 0 else 0
+    
+    # Helper to report progress
+    def report_progress(step_name):
+        nonlocal current_progress
+        if progress_callback:
+            progress_callback(int(current_progress), step_name)
     
     # Step 1: Ingest data
     if not skip_ingest:
+        report_progress("Step 1/7: Ingesting data from Cricsheet...")
         results['ingest'] = step_ingest_data()
+        current_progress += ingest_pct
+        report_progress("Data ingestion complete")
     else:
         logger.info("Skipping data ingestion (--skip-ingest)")
     
     # Step 2: Calculate ELO
     if not skip_elo:
+        report_progress("Step 2/7: Calculating ELO ratings...")
         results['elo'] = step_calculate_elo()
+        current_progress += elo_pct
+        report_progress("ELO calculation complete")
     else:
         logger.info("Skipping ELO calculation (--skip-elo)")
     
@@ -322,25 +347,47 @@ def run_full_pipeline(
     if not male_only:
         genders.append('female')
     
-    for gender in genders:
+    for idx, gender in enumerate(genders, 1):
         logger.info(f"\n*** Processing {gender.upper()} data ***\n")
         
         # Track start time for this gender's training
         gender_start_time = time.time()
         
         # Steps 3-7 for each gender
+        step_increment = per_gender_pct / 6  # 6 sub-steps per gender
+        
+        report_progress(f"Step 3/{gender.upper()}: Building player distributions...")
         results[f'player_dist_{gender}'] = step_build_player_distributions(gender)
+        current_progress += step_increment
+        
+        report_progress(f"Step 4/{gender.upper()}: Building venue statistics...")
         results[f'venue_stats_{gender}'] = step_build_venue_stats(gender)
+        current_progress += step_increment
+        
+        report_progress(f"Step 5/{gender.upper()}: Generating training data...")
         results[f'training_data_{gender}'] = step_generate_training_data(gender)
+        current_progress += step_increment
+        
+        report_progress(f"Step 6/{gender.upper()}: Training neural network model...")
         results[f'train_{gender}'] = step_train_model(gender)
+        current_progress += step_increment
+        
+        report_progress(f"Step 7/{gender.upper()}: Validating model...")
         results[f'validate_{gender}'] = step_validate_model(gender)
+        current_progress += step_increment
         
         # Save model version metadata
+        report_progress(f"Saving {gender.upper()} model version metadata...")
         gender_end_time = datetime.now()
         gender_start_datetime = datetime.fromtimestamp(gender_start_time)
         results[f'version_{gender}'] = save_model_version_metadata(gender, gender_start_datetime, gender_end_time)
+        current_progress += step_increment
     
     elapsed = time.time() - start_time
+    
+    # Final progress report
+    if progress_callback:
+        progress_callback(100, "Pipeline complete!")
     
     logger.info("\n" + "=" * 60)
     logger.info("PIPELINE COMPLETE")
