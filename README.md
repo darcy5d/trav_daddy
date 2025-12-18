@@ -250,6 +250,10 @@ python scripts/full_retrain.py
 # Or use the GUI at http://localhost:5001/training
 ```
 
+## Inspiration
+
+This project was inspired by Andrew Kuo's pioneering work on [ball-by-ball T20 cricket prediction using Monte Carlo simulation](https://towardsdatascience.com/predicting-t20-cricket-matches-with-a-ball-simulation-model-1e9cae5dea22/). In his 2021 article, Kuo demonstrated a bottom-up approach to cricket match prediction by training a neural network to predict individual ball outcomes (dot, single, boundary, wicket, etc.) and then simulating entire matches thousands of times to generate win probabilities. Working with 677,000+ balls from 3,651 T20 matches across 7 major leagues, he achieved 55.6% match prediction accuracy—outperforming bookmaker odds and revealing the inherent unpredictability of T20 cricket. His work highlighted the power of probabilistic simulation for capturing the nuanced, moment-to-moment dynamics that determine cricket match outcomes, providing the conceptual foundation for this implementation with expanded data coverage, model versioning, and real-time match integration.
+
 ## License
 
 MIT License
@@ -258,4 +262,4 @@ MIT License
 
 - Cricsheet.org for comprehensive cricket data
 - ESPNcricinfo for live match schedules and squads
-- Inspired by cricket analytics and Monte Carlo simulation techniques
+- Andrew Kuo for the original ball-by-ball simulation methodology
