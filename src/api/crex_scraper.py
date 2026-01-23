@@ -581,9 +581,22 @@ class CREXScraper:
         # Parse venue stats
         venue_stats = self._parse_venue_stats(soup)
         
-        # Parse squads
+        # Parse squads from static HTML first
         team1 = self._parse_squad(soup, team1_id, team1_name, is_first_team=True)
         team2 = self._parse_squad(soup, team2_id, team2_name, is_first_team=False)
+        
+        # If one team is missing, try Playwright to get both squads
+        if (not team1 or not team1.players) or (not team2 or not team2.players):
+            logger.info("Static HTML missing squad data for one team, trying Playwright...")
+            pw_team1, pw_team2 = self.fetch_squads_with_playwright(
+                match_url, team1_name, team2_name, team1_id, team2_id
+            )
+            
+            # Use Playwright results if we got them
+            if pw_team1 and pw_team1.players:
+                team1 = pw_team1
+            if pw_team2 and pw_team2.players:
+                team2 = pw_team2
         
         has_squads = bool((team1 and team1.players) or (team2 and team2.players))
         
@@ -798,6 +811,223 @@ class CREXScraper:
         except Exception as e:
             logger.debug(f"Failed to parse squad for {team_name}: {e}")
             return None
+
+    def fetch_squads_with_playwright(self, match_url: str, team1_name: str, team2_name: str,
+                                      team1_id: str, team2_id: str) -> Tuple[Optional[CREXTeam], Optional[CREXTeam]]:
+        """
+        Use Playwright to render the page and click both squad tabs to get all players.
+        
+        Args:
+            match_url: URL to the match info page
+            team1_name: Name of team 1
+            team2_name: Name of team 2
+            team1_id: CREX ID of team 1 (e.g., "MY" for Paarl Royals)
+            team2_id: CREX ID of team 2 (e.g., "N0" for Sunrisers EC)
+            
+        Returns:
+            Tuple of (team1, team2) CREXTeam objects with full squads
+        """
+        try:
+            from playwright.sync_api import sync_playwright
+            
+            logger.info(f"Using Playwright to fetch squads for {team1_name} vs {team2_name}")
+            
+            teams_data = {}  # {tab_name: [players]}
+            
+            with sync_playwright() as p:
+                browser = p.chromium.launch(headless=True)
+                page = browser.new_page()
+                
+                # Navigate to match page (use domcontentloaded for faster loading)
+                page.goto(match_url, wait_until='domcontentloaded', timeout=60000)
+                # Wait a bit for JavaScript to render
+                page.wait_for_timeout(2000)
+                
+                # Scroll to load any lazy content
+                page.evaluate('window.scrollTo(0, document.body.scrollHeight)')
+                page.wait_for_timeout(500)
+                
+                # Wait for squad section to load
+                try:
+                    page.wait_for_selector('a[href*="/player/"]', timeout=10000)
+                except:
+                    logger.warning("No player links found on page")
+                    browser.close()
+                    return None, None
+                
+                # Find the squad tab buttons (they're <button> elements with team abbreviations)
+                tab_buttons = page.query_selector_all('button')
+                
+                squad_tabs = []
+                for tab in tab_buttons:
+                    text = tab.inner_text().strip()
+                    # Look for team abbreviations (SEC, PR, BHU-W, etc.) - short uppercase text
+                    if 1 <= len(text) <= 10 and (text.isupper() or '-' in text):
+                        # Make sure it's clickable (visible)
+                        if tab.is_visible():
+                            squad_tabs.append((tab, text))
+                
+                logger.debug(f"Found {len(squad_tabs)} squad tabs: {[t[1] for t in squad_tabs]}")
+                
+                # Click each tab and extract players
+                for tab, tab_name in squad_tabs:
+                    try:
+                        tab.click()
+                        page.wait_for_timeout(800)  # Wait for tab content to load
+                        
+                        # Extract players from current view
+                        players = self._extract_players_from_page(page)
+                        teams_data[tab_name] = players
+                        logger.debug(f"Tab '{tab_name}': {len(players)} players")
+                        
+                    except Exception as e:
+                        logger.debug(f"Failed to process tab {tab_name}: {e}")
+                
+                browser.close()
+            
+            # Match tabs to team names
+            # team1_id (e.g., "MY") might match tab "PR" via abbreviation
+            team1_players = []
+            team2_players = []
+            
+            # Create abbreviation mappings
+            team1_abbr = ''.join([w[0] for w in team1_name.split() if w]).upper()
+            team2_abbr = ''.join([w[0] for w in team2_name.split() if w]).upper()
+            
+            for tab_name, players in teams_data.items():
+                # Try to match tab to team
+                tab_upper = tab_name.upper().replace('-', '')
+                
+                # Match by tab name, team ID, or abbreviation
+                if (tab_upper == team1_id.upper() or 
+                    tab_upper == team1_abbr or 
+                    team1_name.upper().startswith(tab_upper)):
+                    team1_players = players
+                    logger.debug(f"Tab '{tab_name}' matched to team1: {team1_name}")
+                elif (tab_upper == team2_id.upper() or 
+                      tab_upper == team2_abbr or 
+                      team2_name.upper().startswith(tab_upper)):
+                    team2_players = players
+                    logger.debug(f"Tab '{tab_name}' matched to team2: {team2_name}")
+                else:
+                    # Try partial matching
+                    if any(part.upper() in tab_upper or tab_upper in part.upper() 
+                           for part in team1_name.split()):
+                        team1_players = players
+                    elif any(part.upper() in tab_upper or tab_upper in part.upper() 
+                             for part in team2_name.split()):
+                        team2_players = players
+            
+            # If we only got one set of players, it might be for the first/default tab
+            if not team1_players and not team2_players and teams_data:
+                # Assign to the teams in order
+                tab_names = list(teams_data.keys())
+                if len(tab_names) >= 2:
+                    team2_players = teams_data[tab_names[0]]  # First tab is usually visible by default
+                    team1_players = teams_data[tab_names[1]]
+                elif len(tab_names) == 1:
+                    team2_players = teams_data[tab_names[0]]
+            
+            # Create team objects
+            team1 = None
+            team2 = None
+            
+            if team1_players:
+                team1 = CREXTeam(
+                    crex_id=team1_id,
+                    name=team1_name,
+                    abbreviation=team1_id,
+                    players=team1_players
+                )
+                logger.info(f"Playwright: {team1_name} has {len(team1_players)} players")
+            
+            if team2_players:
+                team2 = CREXTeam(
+                    crex_id=team2_id,
+                    name=team2_name,
+                    abbreviation=team2_id,
+                    players=team2_players
+                )
+                logger.info(f"Playwright: {team2_name} has {len(team2_players)} players")
+            
+            return team1, team2
+            
+        except ImportError:
+            logger.warning("Playwright not installed, cannot fetch squads via JavaScript rendering")
+            return None, None
+        except Exception as e:
+            logger.error(f"Playwright squad fetch failed: {e}")
+            import traceback
+            traceback.print_exc()
+            return None, None
+    
+    def _extract_players_from_page(self, page) -> List[CREXPlayer]:
+        """Extract player data from current Playwright page state."""
+        players = []
+        
+        # Find all player links
+        player_links = page.query_selector_all('a[href*="/player/"]')
+        
+        for link in player_links:
+            try:
+                href = link.get_attribute('href') or ''
+                
+                # Extract player ID from URL
+                player_match = re.search(r'/player/[^/]+-([A-Za-z0-9]+)$', href)
+                if not player_match:
+                    continue
+                
+                crex_player_id = player_match.group(1)
+                
+                # Get parent element text for role detection
+                parent = link.evaluate('el => el.parentElement ? el.parentElement.innerText : ""')
+                
+                # Get player name (clean it)
+                name_raw = link.inner_text().strip()
+                name = re.sub(r'(Batter|Bowler|All Rounder|Wicket Keeper|✈️|\(C\)|\(WK\))+', '', name_raw).strip()
+                
+                if not name:
+                    name_from_url = href.split('/')[-1].rsplit('-', 1)[0]
+                    name = name_from_url.replace('-', ' ').title()
+                
+                short_name = name.split()[0] if name else 'Unknown'
+                
+                # Detect role
+                context_text = parent or name_raw
+                role = 'Batter'
+                if 'All Rounder' in context_text or 'All-Rounder' in context_text:
+                    role = 'All Rounder'
+                elif 'Bowler' in context_text:
+                    role = 'Bowler'
+                elif 'Batter' in context_text:
+                    role = 'Batter'
+                
+                is_wicketkeeper = '(WK)' in context_text
+                if is_wicketkeeper:
+                    role = 'WK'
+                
+                is_captain = '(C)' in context_text
+                is_overseas = '✈️' in context_text or '✈' in context_text
+                
+                player = CREXPlayer(
+                    crex_id=crex_player_id,
+                    name=name,
+                    short_name=short_name,
+                    role=role,
+                    is_captain=is_captain,
+                    is_wicketkeeper=is_wicketkeeper,
+                    is_overseas=is_overseas
+                )
+                
+                # Avoid duplicates
+                if not any(p.crex_id == player.crex_id for p in players):
+                    players.append(player)
+                    
+            except Exception as e:
+                logger.debug(f"Failed to extract player: {e}")
+                continue
+        
+        return players
 
     # =========================================================================
     # Live Match / Toss Parsing
