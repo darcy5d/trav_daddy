@@ -1200,7 +1200,13 @@
                     }
                     // Use waterfall selection with match_url (backend auto-detects CREX)
                     await waterfallLoadTeam(1, null, match.team1_db.team_id, matchUrl);
+                } else if (match.team1?.players?.some(p => p.db_player_id)) {
+                    // Team doesn't match but players do (franchise team)
+                    // Load players directly from matched squad
+                    console.log(`Team 1 is a franchise team - loading ${match.team1.players.filter(p => p.db_player_id).length} matched players directly`);
+                    await loadPlayersFromSquad(1, match.team1.players, match.team1.name);
                 }
+                
                 if (match.team2_db) {
                     // Select team in dropdown first
                     const team2Select = document.getElementById('team2-select');
@@ -1212,6 +1218,10 @@
                     }
                     // Use waterfall selection with match_url (backend auto-detects CREX)
                     await waterfallLoadTeam(2, null, match.team2_db.team_id, matchUrl);
+                } else if (match.team2?.players?.some(p => p.db_player_id)) {
+                    // Team doesn't match but players do (franchise team)
+                    console.log(`Team 2 is a franchise team - loading ${match.team2.players.filter(p => p.db_player_id).length} matched players directly`);
+                    await loadPlayersFromSquad(2, match.team2.players, match.team2.name);
                 }
                 
                 // Auto-select venue if matched
@@ -1776,6 +1786,99 @@
             }
         } catch (error) {
             console.error('Error loading venues:', error);
+        }
+    }
+    
+    // Load players directly from a matched squad (for franchise teams where team doesn't match DB)
+    async function loadPlayersFromSquad(teamNum, squadPlayers, teamName) {
+        console.log(`[loadPlayersFromSquad] Loading ${squadPlayers.length} players for team ${teamNum} (${teamName})`);
+        
+        // Get matched players with db_player_id
+        const matchedPlayerIds = squadPlayers
+            .filter(p => p.db_player_id)
+            .map(p => p.db_player_id);
+        
+        if (matchedPlayerIds.length === 0) {
+            console.log(`[loadPlayersFromSquad] No matched players for team ${teamNum}`);
+            return;
+        }
+        
+        try {
+            // Fetch stats for these specific players
+            const response = await fetch(`/api/players/by-ids`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ 
+                    player_ids: matchedPlayerIds,
+                    gender: currentGender
+                })
+            });
+            const data = await response.json();
+            
+            if (data.success) {
+                // Create a lookup map
+                const playerStats = new Map(data.players.map(p => [p.player_id, p]));
+                
+                // Populate batter dropdown
+                const battersSelect = document.getElementById(`team${teamNum}-batters`);
+                battersSelect.innerHTML = '';
+                
+                // Populate bowler dropdown
+                const bowlersSelect = document.getElementById(`team${teamNum}-bowlers`);
+                bowlersSelect.innerHTML = '';
+                
+                let battersAdded = 0;
+                let bowlersAdded = 0;
+                
+                // Add matched players based on their roles
+                squadPlayers.forEach(squadPlayer => {
+                    if (!squadPlayer.db_player_id) return;
+                    
+                    const stats = playerStats.get(squadPlayer.db_player_id);
+                    if (!stats) return;
+                    
+                    const playerName = stats.name || squadPlayer.name;
+                    
+                    // Add to batters if they have batting stats or are marked as batter
+                    const isBatter = squadPlayer.role === 'Batter' || 
+                                     squadPlayer.role === 'All Rounder' ||
+                                     squadPlayer.role === 'WK' ||
+                                     stats.total_runs > 0;
+                    
+                    // Add to bowlers if they have bowling stats or are marked as bowler
+                    const isBowler = squadPlayer.role === 'Bowler' || 
+                                     squadPlayer.role === 'All Rounder' ||
+                                     stats.total_wickets > 0;
+                    
+                    if (isBatter && battersAdded < 11) {
+                        const opt = document.createElement('option');
+                        opt.value = squadPlayer.db_player_id;
+                        opt.textContent = `${playerName} (${stats.total_runs || 0} runs)`;
+                        opt.selected = battersAdded < 6;  // Auto-select first 6
+                        battersSelect.appendChild(opt);
+                        battersAdded++;
+                    }
+                    
+                    if (isBowler && bowlersAdded < 11) {
+                        const opt = document.createElement('option');
+                        opt.value = squadPlayer.db_player_id;
+                        opt.textContent = `${playerName} (${stats.total_wickets || 0} wkts)`;
+                        opt.selected = bowlersAdded < 5;  // Auto-select first 5
+                        bowlersSelect.appendChild(opt);
+                        bowlersAdded++;
+                    }
+                });
+                
+                console.log(`[loadPlayersFromSquad] Added ${battersAdded} batters, ${bowlersAdded} bowlers for ${teamName}`);
+                
+                // Update source badge
+                updateSourceBadge(teamNum, 'crex_squad_optimized', 'medium', battersAdded);
+                
+                // Store for reference
+                window[`team${teamNum}Players`] = data.players;
+            }
+        } catch (error) {
+            console.error(`[loadPlayersFromSquad] Error:`, error);
         }
     }
     

@@ -571,6 +571,75 @@ def get_player_details():
         traceback.print_exc()
         return jsonify({'success': False, 'error': str(e)}), 500
 
+
+@app.route('/api/players/by-ids', methods=['POST'])
+def get_players_by_ids():
+    """
+    Get player stats for a list of player IDs.
+    Used for franchise teams where players are matched but team is not.
+    
+    Request body:
+        player_ids: List of player IDs
+        gender: 'male' or 'female'
+        
+    Returns:
+        List of players with stats
+    """
+    try:
+        data = request.get_json()
+        player_ids = data.get('player_ids', [])
+        gender = data.get('gender', 'male')
+        
+        if not player_ids:
+            return jsonify({'success': False, 'error': 'No player IDs provided'}), 400
+        
+        conn = get_connection()
+        cursor = conn.cursor()
+        
+        placeholders = ','.join(['?'] * len(player_ids))
+        cursor.execute(f"""
+            SELECT 
+                p.player_id,
+                p.name,
+                SUM(pms.runs_scored) as total_runs,
+                SUM(pms.balls_faced) as balls_faced,
+                SUM(pms.wickets_taken) as total_wickets,
+                SUM(pms.overs_bowled) as overs_bowled,
+                COUNT(DISTINCT pms.match_id) as matches
+            FROM players p
+            LEFT JOIN player_match_stats pms ON p.player_id = pms.player_id
+            LEFT JOIN matches m ON pms.match_id = m.match_id AND m.match_type = 'T20' AND m.gender = ?
+            WHERE p.player_id IN ({placeholders})
+            GROUP BY p.player_id
+        """, (gender,) + tuple(player_ids))
+        
+        players = []
+        for row in cursor.fetchall():
+            players.append({
+                'player_id': row['player_id'],
+                'name': row['name'],
+                'total_runs': row['total_runs'] or 0,
+                'balls_faced': row['balls_faced'] or 0,
+                'total_wickets': row['total_wickets'] or 0,
+                'overs_bowled': row['overs_bowled'] or 0,
+                'matches': row['matches'] or 0
+            })
+        
+        conn.close()
+        
+        logger.info(f"Fetched stats for {len(players)} players")
+        return jsonify({
+            'success': True,
+            'players': players
+        })
+    
+    except Exception as e:
+        logger.error(f"Error fetching players by IDs: {e}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
 @app.route('/api/players/<int:team_id>', methods=['GET'])
 def get_team_players(team_id):
     """
@@ -736,10 +805,13 @@ def waterfall_team_selection():
                         # Match venue and teams to database
                         if match.venue:
                             venue_match = scraper.match_venue_to_db(match.venue, match.gender)
+                        team_match = None
                         if team_data:
                             team_match = scraper.match_team_to_db(team_data, match.gender)
-                            if team_match:
-                                scraper.match_players_to_db(team_data, team_match[1], match.gender)
+                            # Always try to match players, even if team doesn't match
+                            # For franchise teams, players are often international players in our database
+                            team_name_for_matching = team_match[1] if team_match else None
+                            scraper.match_players_to_db(team_data, team_name_for_matching, match.gender)
                         
                         # Step 1b: Optimize from External Squad
                         conn = get_connection()
@@ -2402,15 +2474,18 @@ def get_espn_match():
             team_match = scraper.match_team_to_db(match.team1, match.gender)
             if team_match:
                 team1_db = {'team_id': team_match[0], 'name': team_match[1]}
-                # Match players
-                scraper.match_players_to_db(match.team1, team_match[1], match.gender)
+            # Always try to match players, even if team doesn't match
+            # For franchise teams like IPL/BBL, players are often international players in our database
+            team_name_for_matching = team_match[1] if team_match else None
+            scraper.match_players_to_db(match.team1, team_name_for_matching, match.gender)
         
         if match.team2:
             team_match = scraper.match_team_to_db(match.team2, match.gender)
             if team_match:
                 team2_db = {'team_id': team_match[0], 'name': team_match[1]}
-                # Match players
-                scraper.match_players_to_db(match.team2, team_match[1], match.gender)
+            # Always try to match players, even if team doesn't match
+            team_name_for_matching = team_match[1] if team_match else None
+            scraper.match_players_to_db(match.team2, team_name_for_matching, match.gender)
         
         def team_to_dict(team):
             if not team:
@@ -2595,15 +2670,18 @@ def get_crex_match():
             team_match = scraper.match_team_to_db(match.team1, match.gender)
             if team_match:
                 team1_db = {'team_id': team_match[0], 'name': team_match[1]}
-                # Match players
-                scraper.match_players_to_db(match.team1, team_match[1], match.gender)
+            # Always try to match players, even if team doesn't match
+            # For franchise teams like SA20/IPL, players are often international players in our database
+            team_name_for_matching = team_match[1] if team_match else None
+            scraper.match_players_to_db(match.team1, team_name_for_matching, match.gender)
         
         if match.team2:
             team_match = scraper.match_team_to_db(match.team2, match.gender)
             if team_match:
                 team2_db = {'team_id': team_match[0], 'name': team_match[1]}
-                # Match players
-                scraper.match_players_to_db(match.team2, team_match[1], match.gender)
+            # Always try to match players, even if team doesn't match
+            team_name_for_matching = team_match[1] if team_match else None
+            scraper.match_players_to_db(match.team2, team_name_for_matching, match.gender)
         
         def team_to_dict(team):
             if not team:
