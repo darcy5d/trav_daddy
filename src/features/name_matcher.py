@@ -254,7 +254,7 @@ class PlayerNameMatcher:
                 method=best_method
             )
         
-        logger.warning(f"Could not match player: {api_name} (team: {team_name})")
+        logger.debug(f"No match found for player: {api_name} (team: {team_name})")
         return None
     
     def match_squad(
