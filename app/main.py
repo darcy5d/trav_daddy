@@ -687,11 +687,13 @@ def get_team_players(team_id):
 @app.route('/api/team/waterfall-select', methods=['GET'])
 def waterfall_team_selection():
     """
-    ESPN-first waterfall selection hierarchy:
-    1. ESPN XI (if available from match data)
-    2. ESPN Squad Optimized (optimize best 11 from full ESPN squad)
+    External source-first waterfall selection hierarchy:
+    1. CREX/ESPN XI (if available from match data)
+    2. CREX/ESPN Squad Optimized (optimize best 11 from full squad)
     3. Database Last Match (recent lineup from database)
     4. Best Available (fallback from all T20 players)
+    
+    Auto-detects source from URL (crex.com or espn).
     """
     try:
         from src.utils.role_classifier import infer_role_from_stats, categorize_role, get_role_display_name, is_bowling_option
@@ -708,18 +710,28 @@ def waterfall_team_selection():
         
         logger.info(f"Waterfall selection for team {team_id} (team {team_num}), gender {gender}, match_url: {match_url}")
         
-        # Step 1: Try ESPN data if match_url provided
+        # Step 1: Try external source data if match_url provided
         if match_url:
             try:
-                scraper = get_espn_scraper()
+                # Auto-detect source from URL
+                if 'crex.com' in match_url:
+                    logger.info(f"Detected CREX URL, using CREX scraper")
+                    scraper = get_crex_scraper()
+                else:
+                    logger.info(f"Using ESPN scraper for URL")
+                    scraper = get_espn_scraper()
+                
                 match = scraper.get_match_details(match_url)
                 
                 if match:
                     # Determine which team (1 or 2)
                     team_data = match.team1 if team_num == 1 else match.team2
                     
+                    # Detect source type for logging
+                    source_type = 'CREX' if 'crex.com' in match_url else 'ESPN'
+                    
                     if team_data and team_data.players:
-                        logger.info(f"ESPN squad found: {len(team_data.players)} players for team {team_num}")
+                        logger.info(f"{source_type} squad found: {len(team_data.players)} players for team {team_num}")
                         
                         # Match venue and teams to database
                         if match.venue:
@@ -729,12 +741,13 @@ def waterfall_team_selection():
                             if team_match:
                                 scraper.match_players_to_db(team_data, team_match[1], match.gender)
                         
-                        # Step 1b: Optimize from ESPN Squad
+                        # Step 1b: Optimize from External Squad
                         conn = get_connection()
                         cursor = conn.cursor()
                         
-                        # Get database players matching ESPN squad
-                        espn_player_ids = [p.espn_id for p in team_data.players if p.espn_id]
+                        # Get database players matching squad (ESPN uses espn_id, CREX uses name matching)
+                        # For ESPN, try espn_player_id lookup first
+                        espn_player_ids = [getattr(p, 'espn_id', None) for p in team_data.players if getattr(p, 'espn_id', None)]
                         db_players = []
                         
                         if espn_player_ids:
@@ -761,26 +774,28 @@ def waterfall_team_selection():
                             # Convert sqlite3.Row objects to dicts
                             db_players = [dict(row) for row in cursor.fetchall()]
                         
-                        # Also try name matching for players without espn_player_id
+                        # Also try name matching for players without db_player_id (primary method for CREX)
                         name_matcher = PlayerNameMatcher()
                         team_name = team_match[1] if team_match else None
-                        for espn_player in team_data.players:
-                            if not espn_player.db_player_id:
+                        for squad_player in team_data.players:
+                            if not squad_player.db_player_id:
                                 # Try to match by name
+                                # Get external ID (espn_id or crex_id depending on source)
+                                external_id = getattr(squad_player, 'espn_id', None) or getattr(squad_player, 'crex_id', None)
                                 matched = name_matcher.find_player(
-                                    espn_player.name,
+                                    squad_player.name,
                                     team_name=team_name,
-                                    espn_player_id=espn_player.espn_id
+                                    espn_player_id=external_id if source_type == 'ESPN' else None
                                 )
                                 if matched:
-                                    espn_player.db_player_id = matched.player_id
+                                    squad_player.db_player_id = matched.player_id
                         
                         # Build squad from matched players
                         squad = []
                         db_players_dict = {p['player_id']: p for p in db_players}
                         
-                        for espn_player in team_data.players:
-                            db_id = espn_player.db_player_id
+                        for squad_player in team_data.players:
+                            db_id = squad_player.db_player_id
                             
                             if db_id:
                                 # Get stats for this player (from query or fetch if name-matched)
@@ -823,6 +838,9 @@ def waterfall_team_selection():
                                     role = infer_role_from_stats(stats)
                                     role_category = categorize_role(role)
                                     
+                                    # Get external ID (espn_id or crex_id)
+                                    external_id = getattr(squad_player, 'espn_id', None) or getattr(squad_player, 'crex_id', None)
+                                    
                                     squad.append({
                                         'player_id': db_id,
                                         'name': player_row['name'],
@@ -834,13 +852,13 @@ def waterfall_team_selection():
                                             'wickets': stats['wickets_taken'],
                                             'matches': stats['total_matches']
                                         },
-                                        'espn_id': espn_player.espn_id
+                                        'external_id': external_id  # Works for both ESPN and CREX
                                     })
                         
                         conn.close()
                         
                         if len(squad) >= 11:
-                            # Optimize XI from ESPN squad
+                            # Optimize XI from external squad
                             optimized_xi = optimize_xi_from_squad(squad)
                             validation = validate_team(optimized_xi)
                             
@@ -849,12 +867,15 @@ def waterfall_team_selection():
                                 logger.warning(f"Optimizer returned {len(optimized_xi)} players, expected 11. Using first 11.")
                                 optimized_xi = optimized_xi[:11]
                             
-                            logger.info(f"Optimized XI from ESPN squad: {len(optimized_xi)} players")
+                            logger.info(f"Optimized XI from {source_type} squad: {len(optimized_xi)} players")
+                            
+                            # Use source-specific labels for frontend
+                            source_label = 'crex_squad_optimized' if source_type == 'CREX' else 'espn_squad_optimized'
                             
                             return jsonify({
                                 'success': True,
                                 'players': optimized_xi,
-                                'source': 'espn_squad_optimized',
+                                'source': source_label,
                                 'confidence': 'high' if len(squad) >= 15 else 'medium',
                                 'alternatives': [p for p in squad if p not in optimized_xi],
                                 'validation': {
@@ -864,9 +885,9 @@ def waterfall_team_selection():
                                 }
                             })
                         else:
-                            logger.warning(f"ESPN squad matched only {len(squad)} players, falling back to database")
+                            logger.warning(f"{source_type} squad matched only {len(squad)} players, falling back to database")
             except Exception as e:
-                logger.warning(f"Error fetching ESPN data: {e}")
+                logger.warning(f"Error fetching external match data: {e}")
                 import traceback
                 traceback.print_exc()
         

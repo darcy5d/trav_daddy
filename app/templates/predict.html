@@ -223,11 +223,12 @@
     <div style="margin-bottom: 1rem;">
         <span class="team-filter-label">Data Source</span>
         <div class="segmented-control" id="data-source-control">
-            <button class="active" data-value="espn" onclick="setDataSource('espn')">ESPN Cricinfo (All T20s)</button>
+            <button class="active" data-value="crex" onclick="setDataSource('crex')">CREX (Recommended)</button>
+            <button data-value="espn" onclick="setDataSource('espn')">ESPN Cricinfo</button>
             <button data-value="api" onclick="setDataSource('api')">Cricket Data API</button>
         </div>
         <small id="source-info" style="color: var(--text-muted); display: block; margin-top: 0.25rem;">
-            ESPN Cricinfo provides comprehensive coverage of all T20 matches worldwide
+            CREX provides comprehensive T20 coverage with squads, venue stats, and live toss data
         </small>
     </div>
     
@@ -704,8 +705,8 @@
     let currentSeriesId = '';
     let currentSeriesName = '';
     
-    // Data source: 'espn' or 'api'
-    let currentDataSource = 'espn';
+    // Data source: 'crex', 'espn', or 'api'
+    let currentDataSource = 'crex';
     
     // Team filter state (for manual selection)
     const teamFilters = {
@@ -817,7 +818,9 @@
         
         // Update info text
         const info = document.getElementById('source-info');
-        if (source === 'espn') {
+        if (source === 'crex') {
+            info.textContent = 'CREX provides comprehensive T20 coverage with squads, venue stats, and live toss data';
+        } else if (source === 'espn') {
             info.textContent = 'ESPN Cricinfo provides comprehensive coverage of all T20 matches worldwide';
         } else {
             info.textContent = 'Cricket Data API - requires API key, covers major tournaments only';
@@ -898,9 +901,11 @@
         
         try {
             // Choose endpoint based on data source
-            let endpoint = currentDataSource === 'espn' 
-                ? '/api/espn/upcoming?hours_ahead=72'
-                : '/api/t20/upcoming';
+            let endpoint = currentDataSource === 'crex'
+                ? '/api/crex/upcoming'
+                : currentDataSource === 'espn' 
+                    ? '/api/espn/upcoming?hours_ahead=72'
+                    : '/api/t20/upcoming';
             
             console.log(`[loadUpcomingMatches] Fetching from: ${endpoint}`);
             const response = await fetch(endpoint);
@@ -954,7 +959,7 @@
                                         displayDateTime = m.start_time ? m.start_time : (m.status || 'TBD');
                                     }
                                     
-                                    // Handle both ESPN and API data formats
+                                    // Handle CREX, ESPN and API data formats
                                     let matchTitle;
                                     if (m.team1 && m.team2) {
                                         matchTitle = m.team1 + ' vs ' + m.team2;
@@ -964,10 +969,20 @@
                                     const matchType = m.match_type || '';
                                     // Use venue_city from schedule, fallback to venue
                                     const matchVenue = m.venue_city || m.venue || '';
-                                    const matchId = m.match_id || m.espn_id || '';
+                                    const matchId = m.match_id || m.crex_id || m.espn_id || '';
                                     const matchUrl = m.match_url || '';
                                     const hasSquad = m.has_squad || m.has_squads || false;
+                                    const isCrex = currentDataSource === 'crex';
                                     const isEspn = currentDataSource === 'espn';
+                                    const isExternalSource = isCrex || isEspn;
+                                    
+                                    // Source label for display
+                                    let sourceLabel = '';
+                                    if (isCrex) {
+                                        sourceLabel = '<span style="color: #4caf50; margin-left: 0.5rem;">CREX</span>';
+                                    } else if (isEspn) {
+                                        sourceLabel = '<span style="color: #ff9800; margin-left: 0.5rem;">ESPNcricinfo</span>';
+                                    }
                                     
                                     // Status indicators (data fetched fresh on selection)
                                     let statusIcons = '';
@@ -979,13 +994,13 @@
                                             <div style="font-size: 0.8rem; color: var(--text-muted);">
                                                 <span style="color: var(--text-secondary);">${displayDateTime}</span>${matchVenue ? ' • ' + matchVenue : ''}
                                                 <span class="prefetch-status" style="margin-left: 0.5rem;">${statusIcons}</span>
-                                                ${isEspn ? '<span style="color: #ff9800; margin-left: 0.5rem;">ESPNcricinfo</span>' : ''}
+                                                ${sourceLabel}
                                             </div>
                                         </div>
                                         <div style="display: flex; align-items: center; gap: 0.75rem;">
                                             ${countdownHtml}
                                             <button class="btn btn-primary" style="padding: 0.4rem 1rem; font-size: 0.85rem;" 
-                                                    onclick="selectMatch('${isEspn ? matchUrl : matchId}', '${series.gender}', ${isEspn})">
+                                                    onclick="selectMatch('${isExternalSource ? matchUrl : matchId}', '${series.gender}', ${isExternalSource})">
                                                 Select
                                             </button>
                                         </div>
@@ -1076,7 +1091,7 @@
         });
     }
     
-    async function selectMatch(matchIdOrUrl, gender, isEspn = false) {
+    async function selectMatch(matchIdOrUrl, gender, isExternalSource = false) {
         // Set the gender for correct model selection
         currentGender = gender;
         
@@ -1112,11 +1127,112 @@
         await loadVenues();
         console.log(`[DEBUG] selectMatch - Venues loaded successfully`);
         
-        // Load the match - use ESPN or API endpoint based on source
-        if (isEspn) {
+        // Load the match - use CREX, ESPN or API endpoint based on source
+        if (currentDataSource === 'crex' && isExternalSource) {
+            await loadCrexMatch(matchIdOrUrl);
+        } else if (currentDataSource === 'espn' && isExternalSource) {
             await loadEspnMatch(matchIdOrUrl);
         } else {
             await loadT20MatchById(matchIdOrUrl);
+        }
+    }
+    
+    async function loadCrexMatch(matchUrl) {
+        if (!matchUrl) {
+            alert('Invalid match URL');
+            return;
+        }
+        
+        // Show loading
+        document.getElementById('t20-loading').style.display = 'block';
+        document.getElementById('t20-match-info').style.display = 'none';
+        
+        try {
+            const response = await fetch(`/api/crex/match?url=${encodeURIComponent(matchUrl)}`);
+            const data = await response.json();
+            
+            document.getElementById('t20-loading').style.display = 'none';
+            
+            if (data.success && data.match) {
+                const match = data.match;
+                
+                // Show match info
+                const team1Name = match.team1?.name || match.team1_db?.name || 'Team 1';
+                const team2Name = match.team2?.name || match.team2_db?.name || 'Team 2';
+                document.getElementById('t20-match-name').textContent = `${team1Name} vs ${team2Name}`;
+                document.getElementById('t20-match-date').textContent = `${match.start_date || ''} ${match.start_time || ''}`;
+                
+                const team1Players = match.team1?.players?.length || 0;
+                const team2Players = match.team2?.players?.length || 0;
+                const team1Matched = match.team1?.players?.filter(p => p.db_player_id)?.length || 0;
+                const team2Matched = match.team2?.players?.filter(p => p.db_player_id)?.length || 0;
+                
+                document.getElementById('t20-team1-info').textContent = `${team1Matched}/${team1Players} matched`;
+                document.getElementById('t20-team2-info').textContent = `${team2Matched}/${team2Players} matched`;
+                document.getElementById('t20-match-info').style.display = 'block';
+                
+                console.log(`CREX match loaded: ${team1Name} vs ${team2Name}`);
+                console.log(`  Series: ${match.series_name}`);
+                console.log(`  Venue: ${match.venue?.name} -> DB: ${match.venue?.db_venue_name}`);
+                console.log(`  Team 1 Squad: ${match.team1?.players?.length || 0} players`);
+                console.log(`  Team 2 Squad: ${match.team2?.players?.length || 0} players`);
+                
+                // Show toss info if available
+                if (match.toss_winner) {
+                    console.log(`  Toss: ${match.toss_winner} elected to ${match.toss_decision}`);
+                }
+                
+                // Store squad data globally for filtering (reuse espnSquadData for compatibility)
+                window.espnSquadData = {
+                    team1: match.team1?.players || [],
+                    team2: match.team2?.players || []
+                };
+                
+                // Auto-fill teams using waterfall selection
+                if (match.team1_db) {
+                    // Select team in dropdown first
+                    const team1Select = document.getElementById('team1-select');
+                    for (let opt of team1Select.options) {
+                        if (opt.textContent === match.team1_db.name) {
+                            team1Select.value = opt.value;
+                            break;
+                        }
+                    }
+                    // Use waterfall selection with match_url (backend auto-detects CREX)
+                    await waterfallLoadTeam(1, null, match.team1_db.team_id, matchUrl);
+                }
+                if (match.team2_db) {
+                    // Select team in dropdown first
+                    const team2Select = document.getElementById('team2-select');
+                    for (let opt of team2Select.options) {
+                        if (opt.textContent === match.team2_db.name) {
+                            team2Select.value = opt.value;
+                            break;
+                        }
+                    }
+                    // Use waterfall selection with match_url (backend auto-detects CREX)
+                    await waterfallLoadTeam(2, null, match.team2_db.team_id, matchUrl);
+                }
+                
+                // Auto-select venue if matched
+                if (match.venue?.db_venue_id) {
+                    const venueSelect = document.getElementById('venue-select');
+                    venueSelect.value = match.venue.db_venue_id;
+                    console.log(`Auto-selected venue: ${match.venue.db_venue_name} (ID: ${match.venue.db_venue_id})`);
+                }
+                
+                // Enable toss simulation
+                document.getElementById('use-toss').checked = true;
+                
+                // If toss info is available, we could pre-set it (future enhancement)
+                
+            } else {
+                alert('Error loading CREX match: ' + (data.error || 'Unknown error'));
+            }
+        } catch (error) {
+            document.getElementById('t20-loading').style.display = 'none';
+            console.error('Error loading CREX match:', error);
+            alert('Error loading match data from CREX');
         }
     }
     
@@ -1910,6 +2026,8 @@
         const icons = {
             'espn_xi': '✓',
             'espn_squad_optimized': '⚙',
+            'crex_xi': '✓',
+            'crex_squad_optimized': '⚙',
             'database_last_match': '📊',
             'fallback': '⚠'
         };
@@ -1917,6 +2035,8 @@
         const labels = {
             'espn_xi': 'ESPN Playing XI',
             'espn_squad_optimized': 'Optimized from Squad',
+            'crex_xi': 'CREX Playing XI',
+            'crex_squad_optimized': 'Optimized from Squad',
             'database_last_match': 'Last Match Lineup',
             'fallback': 'Best Available Players'
         };
@@ -1957,6 +2077,8 @@
                 const sourceLabels = {
                     'espn_xi': '✅ ESPN Playing XI',
                     'espn_squad_optimized': '⚙️ Optimized from ESPN Squad',
+                    'crex_xi': '✅ CREX Playing XI',
+                    'crex_squad_optimized': '⚙️ Optimized from CREX Squad',
                     'database_last_match': '📊 Last Match from Database',
                     'fallback': '⚠️ Best Available Players'
                 };
@@ -1968,23 +2090,25 @@
                 updateSourceBadge(teamNum, data.source, data.confidence, data.players.length);
                 
                 // Update espnSquadData with the actual matched players from backend
-                // This ensures frontend filtering matches backend optimizer
-                if (data.source === 'espn_playing_xi' || data.source === 'espn_squad_optimized') {
+                // This ensures frontend filtering matches backend optimizer (works for both ESPN and CREX)
+                const isExternalSquadSource = ['espn_playing_xi', 'espn_squad_optimized', 'crex_xi', 'crex_squad_optimized'].includes(data.source);
+                if (isExternalSquadSource) {
                     const matchedPlayerIds = data.players.map(p => p.player_id);
                     const alternatives = data.alternatives || [];
                     const allMatchedIds = [...matchedPlayerIds, ...alternatives.map(p => p.player_id)];
                     
-                    // Update espnSquadData to include all matched players
+                    // Update espnSquadData to include all matched players (shared structure for ESPN and CREX)
                     if (window.espnSquadData && window.espnSquadData[`team${teamNum}`]) {
-                        // Update each ESPN player with their matched db_player_id
-                        window.espnSquadData[`team${teamNum}`].forEach(espnPlayer => {
-                            // Check if this ESPN player was matched to one of our players
-                            const matched = [...data.players, ...alternatives].find(p => p.espn_id === espnPlayer.espn_id);
+                        // Update each squad player with their matched db_player_id
+                        window.espnSquadData[`team${teamNum}`].forEach(squadPlayer => {
+                            // Check if this player was matched - use external_id which works for both ESPN and CREX
+                            const externalId = squadPlayer.espn_id || squadPlayer.crex_id;
+                            const matched = [...data.players, ...alternatives].find(p => p.external_id === externalId);
                             if (matched) {
-                                espnPlayer.db_player_id = matched.player_id;
+                                squadPlayer.db_player_id = matched.player_id;
                             }
                         });
-                        console.log(`[waterfallLoadTeam] Updated espnSquadData for team ${teamNum}: ${window.espnSquadData[`team${teamNum}`].filter(p => p.db_player_id).length}/${window.espnSquadData[`team${teamNum}`].length} players matched`);
+                        console.log(`[waterfallLoadTeam] Updated squadData for team ${teamNum}: ${window.espnSquadData[`team${teamNum}`].filter(p => p.db_player_id).length}/${window.espnSquadData[`team${teamNum}`].length} players matched`);
                     }
                 }
                 
@@ -2179,7 +2303,9 @@
                 await new Promise(resolve => setTimeout(resolve, 100));
                 
                 selectPlayersByIds(teamNum, data.optimized_xi);
-                updateSourceBadge(teamNum, 'espn_squad_optimized', 'high', data.optimized_xi.length);
+                // Use source based on current data source
+                const sourceLabel = currentDataSource === 'crex' ? 'crex_squad_optimized' : 'espn_squad_optimized';
+                updateSourceBadge(teamNum, sourceLabel, 'high', data.optimized_xi.length);
                 
                 // Validate after selection
                 setTimeout(() => {
