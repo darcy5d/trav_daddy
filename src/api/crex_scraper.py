@@ -496,6 +496,43 @@ class CREXScraper:
                 team1_name = team_images[0].get('alt', '')
                 team2_name = team_images[1].get('alt', '')
         
+        # Try to find full team names in page content (for franchise teams)
+        # CREX pages have full names like "Paarl Royals   Sunrisers Eastern Cape  Match info"
+        page_text = soup.get_text()
+        
+        # Common franchise team name patterns (endings)
+        team_patterns = [
+            r'([\w\s]+(?:Royals|Cape|Sixers|Thunder|Stars|Warriors|Sunrisers|Strikers|Heat|Hurricanes|Renegades|Titans|Lions|Dolphins|Knights|Capitals|Kings|Challengers|Super Giants|Lucknow|Gujarat|Punjab|Rajasthan|Chennai|Mumbai|Kolkata|Delhi|Hyderabad|Bangalore))',
+        ]
+        
+        # Look for pattern "Team1 vs Team2" or "Team1   Team2" with full names
+        for pattern in team_patterns:
+            vs_match = re.search(pattern + r'\s+(?:vs\.?|v)\s+' + pattern, page_text, re.I)
+            if vs_match:
+                team1_full = vs_match.group(1).strip()
+                team2_full = vs_match.group(2).strip()
+                # Only use if longer than current names (abbreviations are short)
+                if len(team1_full) > len(team1_name):
+                    logger.debug(f"Found full team name: {team1_name} -> {team1_full}")
+                    team1_name = team1_full
+                if len(team2_full) > len(team2_name):
+                    logger.debug(f"Found full team name: {team2_name} -> {team2_full}")
+                    team2_name = team2_full
+                break
+        
+        # Also try extracting from the section right after the H1 title
+        # Pattern: "...info Team1FullName   Team2FullName  Match info..."
+        if len(team1_name) <= 5 or len(team2_name) <= 5:  # Still using abbreviations
+            info_match = re.search(r'info\s+([\w\s]+?)\s{2,}([\w\s]+?)\s+Match info', page_text)
+            if info_match:
+                team1_candidate = info_match.group(1).strip()
+                team2_candidate = info_match.group(2).strip()
+                if len(team1_candidate) > 3 and len(team1_candidate) > len(team1_name):
+                    team1_name = team1_candidate
+                if len(team2_candidate) > 3 and len(team2_candidate) > len(team2_name):
+                    team2_name = team2_candidate
+                logger.debug(f"Extracted full names from header: {team1_name} vs {team2_name}")
+        
         # Detect format
         format_type = 'T20'
         if 'odi' in match_type.lower():
@@ -989,14 +1026,27 @@ class CREXScraper:
         matched_players = []
         
         for player in team.players:
+            # Try matching with team filter first
             result = self._name_matcher.find_player(
                 player.name,
                 db_team_name
             )
             
+            # If no match with team filter, try without (for franchise teams)
+            # Players may have played for other teams in our database
+            if not result and db_team_name:
+                result = self._name_matcher.find_player(
+                    player.name,
+                    None  # Search all players
+                )
+                if result:
+                    logger.debug(f"Matched '{player.name}' to '{result.db_name}' via global search (not found in {db_team_name})")
+            
             if result:
                 player.db_player_id = result.player_id
                 logger.debug(f"Matched '{player.name}' to '{result.db_name}' (ID: {result.player_id})")
+            else:
+                logger.warning(f"Could not match player: {player.name} (team: {db_team_name})")
             
             matched_players.append(player)
         
