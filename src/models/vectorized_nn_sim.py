@@ -34,9 +34,14 @@ from tensorflow import keras
 
 # Configure TensorFlow threading for Apple M2 Pro
 # Use multiple threads for parallel operations
+# Note: These must be set before TensorFlow is initialized
 N_CPU_CORES = multiprocessing.cpu_count()
-tf.config.threading.set_inter_op_parallelism_threads(max(4, N_CPU_CORES // 2))
-tf.config.threading.set_intra_op_parallelism_threads(max(4, N_CPU_CORES // 2))
+try:
+    tf.config.threading.set_inter_op_parallelism_threads(max(4, N_CPU_CORES // 2))
+    tf.config.threading.set_intra_op_parallelism_threads(max(4, N_CPU_CORES // 2))
+except RuntimeError:
+    # Already initialized - threading cannot be changed
+    pass
 
 # Enable Metal GPU acceleration (Apple Silicon)
 try:

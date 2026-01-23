@@ -80,6 +80,125 @@
         outline: none;
         border-color: var(--accent-primary);
     }
+    
+    /* Role-based Team Selection Styles */
+    .team-source-badge {
+        display: inline-flex;
+        align-items: center;
+        gap: 0.5rem;
+        padding: 0.5rem 1rem;
+        background: var(--accent-primary);
+        color: white;
+        border-radius: 6px;
+        font-size: 0.875rem;
+        font-weight: 600;
+        margin: 0.5rem 0 1rem 0;
+        box-shadow: 0 2px 4px rgba(0,0,0,0.2);
+        box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+    }
+    
+    .role-section {
+        margin: 1rem 0;
+    }
+    
+    .role-header {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        font-weight: 600;
+        margin-bottom: 0.5rem;
+        color: var(--text-primary);
+        font-size: 0.95rem;
+    }
+    
+    .constraint {
+        color: var(--text-muted);
+        font-size: 0.8rem;
+        font-weight: 400;
+    }
+    
+    .role-section select {
+        width: 100%;
+        background: var(--bg-secondary);
+        color: var(--text-primary);
+        border: 1px solid var(--border-color);
+        border-radius: 6px;
+        padding: 0.5rem;
+        font-size: 0.9rem;
+    }
+    
+    .role-section select:focus {
+        outline: none;
+        border-color: var(--accent-primary);
+        box-shadow: 0 0 0 3px rgba(var(--accent-primary-rgb), 0.1);
+    }
+    
+    .validation-summary {
+        margin-top: 1rem;
+        padding: 1rem;
+        background: var(--bg-secondary);
+        border-radius: 6px;
+        border-left: 4px solid var(--border-color);
+    }
+    
+    .validation-summary.valid {
+        border-left-color: #10b981;
+        background: rgba(16, 185, 129, 0.1);
+    }
+    
+    .validation-summary.invalid {
+        border-left-color: #ef4444;
+        background: rgba(239, 68, 68, 0.1);
+    }
+    
+    .validation-item {
+        display: flex;
+        align-items: center;
+        gap: 0.5rem;
+        margin: 0.4rem 0;
+        font-size: 0.875rem;
+    }
+    
+    .validation-item .icon {
+        font-weight: 700;
+        font-size: 1rem;
+    }
+    
+    .validation-item.valid {
+        color: #10b981;
+    }
+    
+    .validation-item.invalid {
+        color: #ef4444;
+    }
+    
+    .validation-item.warning {
+        color: #f59e0b;
+    }
+    
+    .team-actions {
+        margin-top: 1rem;
+        display: flex;
+        gap: 0.5rem;
+        flex-wrap: wrap;
+    }
+    
+    .btn-secondary {
+        padding: 0.5rem 1rem;
+        background: var(--bg-secondary);
+        border: 1px solid var(--border-color);
+        border-radius: 6px;
+        cursor: pointer;
+        color: var(--text-primary);
+        font-size: 0.875rem;
+        transition: all 0.2s ease;
+    }
+    
+    .btn-secondary:hover {
+        background: var(--accent-primary);
+        color: white;
+        border-color: var(--accent-primary);
+    }
 </style>
 
 <div class="hero" style="padding: 2rem;">
@@ -97,10 +216,6 @@
             <button class="btn" onclick="loadUpcomingMatches(true)" style="padding: 0.5rem 1rem;">
                 🔄 Refresh
             </button>
-            <button class="btn" id="prefetch-btn" onclick="prefetchAllMatches()" style="padding: 0.5rem 1rem;">
-                📥 Pre-fetch Data
-            </button>
-            <span id="prefetch-status" style="font-size: 0.8rem; color: var(--text-muted);"></span>
         </div>
     </div>
     
@@ -169,22 +284,70 @@
         
         <div class="form-group">
             <label>Select Team <span id="team1-count" style="color: var(--text-muted); font-weight: normal;"></span></label>
-            <select id="team1-select" onchange="loadPlayers(1)">
+            <select id="team1-select" onchange="clearSquadData(1); loadPlayers(1)">
                 <option value="">-- Select Team --</option>
             </select>
         </div>
         
-        <div class="form-group">
-            <label>Batters (select 11)</label>
-            <select id="team1-batters" multiple size="8" style="min-height: 200px;">
+        <!-- Team Source Badge -->
+        <div class="team-source-badge" id="team1-source-badge" style="display: none;">
+            <span id="team1-source-icon">🔄</span>
+            <span id="team1-source-text">Loading...</span>
+        </div>
+        
+        <!-- Squad Filter Badge -->
+        <div class="team-source-badge" id="team1-squad-badge" style="display: none; background: #3b82f6;">
+            <span>🎯</span>
+            <span id="team1-squad-text">ESPN Squad Only</span>
+        </div>
+        
+        <!-- Role-based Selection -->
+        <div class="role-section">
+            <div class="role-header">
+                <span>🧤 Wicketkeeper</span>
+                <span class="constraint">(1 required)</span>
+            </div>
+            <select id="team1-keepers" size="2" onchange="validateTeamSelection(1)">
+            </select>
+        </div>
+        
+        <div class="role-section">
+            <div class="role-header">
+                <span>🏏 Batters</span>
+                <span class="constraint">(4-7 players)</span>
+            </div>
+            <select id="team1-batters" multiple size="8" onchange="validateTeamSelection(1)">
             </select>
             <small style="color: var(--text-muted);">Hold Ctrl/Cmd to select multiple</small>
         </div>
         
-        <div class="form-group">
-            <label>Bowlers (select 5)</label>
-            <select id="team1-bowlers" multiple size="5" style="min-height: 120px;">
+        <div class="role-section">
+            <div class="role-header">
+                <span>⚡ All-rounders</span>
+                <span class="constraint">(0-3 players)</span>
+            </div>
+            <select id="team1-allrounders" multiple size="4" onchange="validateTeamSelection(1)">
             </select>
+        </div>
+        
+        <div class="role-section">
+            <div class="role-header">
+                <span>🎯 Bowlers</span>
+                <span class="constraint">(min 4, total 5+ bowling options)</span>
+            </div>
+            <select id="team1-bowlers" multiple size="6" onchange="validateTeamSelection(1)">
+            </select>
+        </div>
+        
+        <!-- Validation Summary -->
+        <div id="team1-validation" class="validation-summary" style="display: none;">
+        </div>
+        
+        <!-- Team Actions -->
+        <div class="team-actions">
+            <button onclick="reOptimizeTeam(1)" class="btn-secondary">⚙ Re-optimize from Squad</button>
+            <button onclick="loadLastMatch(1)" class="btn-secondary">📊 Load Last Match XI</button>
+            <button onclick="clearTeam(1)" class="btn-secondary">🗑 Clear Selection</button>
         </div>
     </div>
     
@@ -209,22 +372,70 @@
         
         <div class="form-group">
             <label>Select Team <span id="team2-count" style="color: var(--text-muted); font-weight: normal;"></span></label>
-            <select id="team2-select" onchange="loadPlayers(2)">
+            <select id="team2-select" onchange="clearSquadData(2); loadPlayers(2)">
                 <option value="">-- Select Team --</option>
             </select>
         </div>
         
-        <div class="form-group">
-            <label>Batters (select 11)</label>
-            <select id="team2-batters" multiple size="8" style="min-height: 200px;">
+        <!-- Team Source Badge -->
+        <div class="team-source-badge" id="team2-source-badge" style="display: none;">
+            <span id="team2-source-icon">🔄</span>
+            <span id="team2-source-text">Loading...</span>
+        </div>
+        
+        <!-- Squad Filter Badge -->
+        <div class="team-source-badge" id="team2-squad-badge" style="display: none; background: #3b82f6;">
+            <span>🎯</span>
+            <span id="team2-squad-text">ESPN Squad Only</span>
+        </div>
+        
+        <!-- Role-based Selection -->
+        <div class="role-section">
+            <div class="role-header">
+                <span>🧤 Wicketkeeper</span>
+                <span class="constraint">(1 required)</span>
+            </div>
+            <select id="team2-keepers" size="2" onchange="validateTeamSelection(2)">
+            </select>
+        </div>
+        
+        <div class="role-section">
+            <div class="role-header">
+                <span>🏏 Batters</span>
+                <span class="constraint">(4-7 players)</span>
+            </div>
+            <select id="team2-batters" multiple size="8" onchange="validateTeamSelection(2)">
             </select>
             <small style="color: var(--text-muted);">Hold Ctrl/Cmd to select multiple</small>
         </div>
         
-        <div class="form-group">
-            <label>Bowlers (select 5)</label>
-            <select id="team2-bowlers" multiple size="5" style="min-height: 120px;">
+        <div class="role-section">
+            <div class="role-header">
+                <span>⚡ All-rounders</span>
+                <span class="constraint">(0-3 players)</span>
+            </div>
+            <select id="team2-allrounders" multiple size="4" onchange="validateTeamSelection(2)">
             </select>
+        </div>
+        
+        <div class="role-section">
+            <div class="role-header">
+                <span>🎯 Bowlers</span>
+                <span class="constraint">(min 4, total 5+ bowling options)</span>
+            </div>
+            <select id="team2-bowlers" multiple size="6" onchange="validateTeamSelection(2)">
+            </select>
+        </div>
+        
+        <!-- Validation Summary -->
+        <div id="team2-validation" class="validation-summary" style="display: none;">
+        </div>
+        
+        <!-- Team Actions -->
+        <div class="team-actions">
+            <button onclick="reOptimizeTeam(2)" class="btn-secondary">⚙ Re-optimize from Squad</button>
+            <button onclick="loadLastMatch(2)" class="btn-secondary">📊 Load Last Match XI</button>
+            <button onclick="clearTeam(2)" class="btn-secondary">🗑 Clear Selection</button>
         </div>
     </div>
 </div>
@@ -688,20 +899,22 @@
         try {
             // Choose endpoint based on data source
             let endpoint = currentDataSource === 'espn' 
-                ? '/api/espn/upcoming'
+                ? '/api/espn/upcoming?hours_ahead=72'
                 : '/api/t20/upcoming';
             
-            // Add refresh parameter if forcing
-            if (forceRefresh && currentDataSource === 'espn') {
-                endpoint += '?refresh=true';
+            console.log(`[loadUpcomingMatches] Fetching from: ${endpoint}`);
+            const response = await fetch(endpoint);
+            
+            if (!response.ok) {
+                throw new Error(`HTTP ${response.status}: ${response.statusText}`);
             }
             
-            const response = await fetch(endpoint);
             const data = await response.json();
+            console.log(`[loadUpcomingMatches] Response success: ${data.success}, series count: ${data.matches_by_series?.length || 0}`);
             
             loadingEl.style.display = 'none';
             
-            if (data.success && data.matches_by_series.length > 0) {
+            if (data.success && data.matches_by_series && data.matches_by_series.length > 0) {
                 listEl.innerHTML = '';
                 
                 data.matches_by_series.forEach(series => {
@@ -756,20 +969,8 @@
                                     const hasSquad = m.has_squad || m.has_squads || false;
                                     const isEspn = currentDataSource === 'espn';
                                     
-                                    // Get prefetch status if available
-                                    const prefetchStatus = prefetchData[matchUrl] || {};
+                                    // Status indicators (data fetched fresh on selection)
                                     let statusIcons = '';
-                                    if (prefetchStatus.venue_found) {
-                                        statusIcons += '<span style="color: #4caf50;" title="Venue matched to DB">📍✓</span>';
-                                    } else if (prefetchStatus.venue_name) {
-                                        statusIcons += '<span style="color: #ff9800;" title="Venue: ' + prefetchStatus.venue_name + ' (not in DB)">📍?</span>';
-                                    }
-                                    if (prefetchStatus.team1_squad) {
-                                        statusIcons += '<span style="color: #4caf50;" title="Team 1: ' + prefetchStatus.team1_count + ' players"> T1✓</span>';
-                                    }
-                                    if (prefetchStatus.team2_squad) {
-                                        statusIcons += '<span style="color: #4caf50;" title="Team 2: ' + prefetchStatus.team2_count + ' players"> T2✓</span>';
-                                    }
                                     
                                     return `
                                     <div style="display: flex; justify-content: space-between; align-items: center; padding: 0.75rem 1rem; background: var(--bg-tertiary); border-radius: 8px; border-left: 3px solid ${series.gender === 'female' ? '#e91e63' : '#2196f3'};" data-match-url="${matchUrl}">
@@ -802,7 +1003,7 @@
                 // Start the countdown timer updater
                 startCountdownUpdater();
                 
-                // Update prefetch status display from cached data
+                // Status display updated (no prefetch needed)
                 updatePrefetchStatusDisplay();
             } else {
                 emptyEl.style.display = 'block';
@@ -815,84 +1016,14 @@
         }
     }
     
-    // Store prefetch status data
-    let prefetchData = {};
-    
-    // Pre-fetch all match data
-    async function prefetchAllMatches() {
-        const btn = document.getElementById('prefetch-btn');
-        const status = document.getElementById('prefetch-status');
-        
-        btn.disabled = true;
-        btn.textContent = '⏳ Fetching...';
-        status.textContent = 'Loading match details...';
-        
-        try {
-            const response = await fetch('/api/espn/prefetch?hours_ahead=24', { method: 'POST' });
-            const data = await response.json();
-            
-            if (data.success) {
-                // Store the prefetch data
-                prefetchData = {};
-                data.matches.forEach(m => {
-                    prefetchData[m.match_url] = m;
-                });
-                
-                // Update display
-                const withVenue = data.matches.filter(m => m.venue_found).length;
-                const withSquads = data.matches.filter(m => m.team1_squad || m.team2_squad).length;
-                
-                status.innerHTML = `<span style="color: var(--success);">✓ ${data.cached_count}/${data.total} cached</span> | Venues: ${withVenue} | Squads: ${withSquads}`;
-                
-                // Reload matches to show updated status indicators
-                await loadUpcomingMatches(false);
-                
-                console.log('Prefetch complete:', data);
-            } else {
-                status.innerHTML = `<span style="color: var(--danger);">✗ ${data.error}</span>`;
-            }
-        } catch (error) {
-            console.error('Prefetch error:', error);
-            status.innerHTML = `<span style="color: var(--danger);">✗ Error</span>`;
-        } finally {
-            btn.disabled = false;
-            btn.textContent = '📥 Pre-fetch Data';
-        }
-    }
-    
-    // Update match cards with prefetch status indicators
+    // Update match cards with status indicators (no prefetch needed - data fetched fresh)
     function updateMatchCardsWithPrefetchStatus() {
-        // Find all match cards and update their status indicators
-        const cards = document.querySelectorAll('#matches-list [data-match-url]');
-        cards.forEach(card => {
-            const url = card.dataset.matchUrl;
-            const status = prefetchData[url];
-            if (status) {
-                const statusEl = card.querySelector('.prefetch-status');
-                if (statusEl) {
-                    let html = '';
-                    if (status.venue_found) {
-                        html += '<span style="color: #4caf50;" title="Venue matched">📍✓</span>';
-                    } else if (status.venue_name) {
-                        html += '<span style="color: #ff9800;" title="Venue not in DB">📍?</span>';
-                    }
-                    if (status.team1_squad) {
-                        html += `<span style="color: #4caf50;" title="${status.team1_count} players">👥✓</span>`;
-                    }
-                    if (status.team2_squad) {
-                        html += `<span style="color: #4caf50;" title="${status.team2_count} players">👥✓</span>`;
-                    }
-                    statusEl.innerHTML = html;
-                }
-            }
-        });
+        // No-op - status indicators removed since we fetch fresh on selection
     }
     
-    // Update status display after loading matches (for cached data)
+    // Update status display after loading matches (no prefetch needed)
     function updatePrefetchStatusDisplay() {
-        if (Object.keys(prefetchData).length > 0) {
-            updateMatchCardsWithPrefetchStatus();
-        }
+        // No-op - prefetch removed
     }
     
     // Countdown timer updater
@@ -1025,13 +1156,39 @@
                 
                 console.log(`ESPN match loaded: ${team1Name} vs ${team2Name}`);
                 console.log(`  Venue: ${match.venue?.name} -> DB: ${match.venue?.db_venue_name}`);
+                console.log(`  Team 1 Squad: ${match.team1?.players?.length || 0} players`);
+                console.log(`  Team 2 Squad: ${match.team2?.players?.length || 0} players`);
                 
-                // Auto-fill teams from ESPN data
+                // Store squad data globally for filtering
+                window.espnSquadData = {
+                    team1: match.team1?.players || [],
+                    team2: match.team2?.players || []
+                };
+                
+                // Auto-fill teams using waterfall selection
                 if (match.team1_db) {
-                    await autoFillTeamFromEspn(1, match.team1_db.name, match.team1);
+                    // Select team in dropdown first
+                    const team1Select = document.getElementById('team1-select');
+                    for (let opt of team1Select.options) {
+                        if (opt.textContent === match.team1_db.name) {
+                            team1Select.value = opt.value;
+                            break;
+                        }
+                    }
+                    // Use waterfall selection with match_url
+                    await waterfallLoadTeam(1, null, match.team1_db.team_id, matchUrl);
                 }
                 if (match.team2_db) {
-                    await autoFillTeamFromEspn(2, match.team2_db.name, match.team2);
+                    // Select team in dropdown first
+                    const team2Select = document.getElementById('team2-select');
+                    for (let opt of team2Select.options) {
+                        if (opt.textContent === match.team2_db.name) {
+                            team2Select.value = opt.value;
+                            break;
+                        }
+                    }
+                    // Use waterfall selection with match_url
+                    await waterfallLoadTeam(2, null, match.team2_db.team_id, matchUrl);
                 }
                 
                 // Auto-select venue if matched
@@ -1100,35 +1257,98 @@
             return;
         }
         
-        // Populate batters and bowlers dropdowns with ESPN-matched players
-        const battersSelect = document.getElementById(`team${teamNum}-batters`);
-        const bowlersSelect = document.getElementById(`team${teamNum}-bowlers`);
+        // ESPN has matched players - fetch their stats and categorize them properly
+        console.log(`[DEBUG] Team ${teamNum} - ESPN provided ${matchedPlayers.length} matched players, fetching stats to categorize...`);
         
-        battersSelect.innerHTML = '';
-        bowlersSelect.innerHTML = '';
+        const gender = teamFilters[teamNum].gender;
+        const response = await fetch(`/api/players/${teamId}?gender=${gender}`);
+        const data = await response.json();
         
-        console.log(`[DEBUG] Team ${teamNum} - Populating dropdowns with ${matchedPlayers.length} matched players`);
-        
-        // Add all matched players to both batters and bowlers
-        // (since ESPN doesn't provide roles and DB might not have reliable role data)
-        for (let player of matchedPlayers) {
-            // Add to batters
-            const batterOpt = document.createElement('option');
-            batterOpt.value = player.db_player_id;
-            batterOpt.textContent = player.name;
-            batterOpt.selected = true;
-            battersSelect.appendChild(batterOpt);
-            
-            // Add to bowlers
-            const bowlerOpt = document.createElement('option');
-            bowlerOpt.value = player.db_player_id;
-            bowlerOpt.textContent = player.name;
-            bowlerOpt.selected = true;
-            bowlersSelect.appendChild(bowlerOpt);
+        if (!data.success) {
+            console.error(`[DEBUG] Team ${teamNum} - Failed to load player stats`);
+            return;
         }
         
-        console.log(`[DEBUG] Team ${teamNum} - Populated ${battersSelect.options.length} batters, ${bowlersSelect.options.length} bowlers from ESPN`);
-        console.log(`Team ${teamNum} (${dbTeamName}): Auto-selected ${matchedPlayers.length} players (all in both batters and bowlers)`);
+        // Create maps of player stats
+        const batterStats = new Map(data.batters.map(b => [String(b.player_id), b]));
+        const bowlerStats = new Map(data.bowlers.map(b => [String(b.player_id), b]));
+        
+        // Categorize ESPN players into batters and bowlers (no overlap)
+        const espnPlayerIds = new Set(matchedPlayers.map(p => String(p.db_player_id)));
+        const categorizedBatters = [];
+        const categorizedBowlers = [];
+        
+        for (let playerId of espnPlayerIds) {
+            const batterInfo = batterStats.get(playerId);
+            const bowlerInfo = bowlerStats.get(playerId);
+            
+            // Decide category based on stats
+            if (batterInfo && bowlerInfo) {
+                // All-rounder: prioritize based on primary contribution
+                // If they've scored more runs than 20x wickets, they're primarily a batter
+                const battingScore = batterInfo.total_runs || 0;
+                const bowlingScore = (bowlerInfo.total_wickets || 0) * 20;
+                
+                if (battingScore >= bowlingScore) {
+                    categorizedBatters.push(batterInfo);
+                } else {
+                    categorizedBowlers.push(bowlerInfo);
+                }
+            } else if (batterInfo) {
+                categorizedBatters.push(batterInfo);
+            } else if (bowlerInfo) {
+                categorizedBowlers.push(bowlerInfo);
+            }
+        }
+        
+        // If we don't have enough players, add from database
+        const remainingBatters = data.batters.filter(b => !espnPlayerIds.has(String(b.player_id)) && !bowlerStats.has(String(b.player_id)));
+        const remainingBowlers = data.bowlers.filter(b => !espnPlayerIds.has(String(b.player_id)));
+        
+        // Populate batters dropdown
+        const battersSelect = document.getElementById(`team${teamNum}-batters`);
+        battersSelect.innerHTML = '';
+        
+        // Add categorized ESPN batters first (selected)
+        categorizedBatters.forEach(b => {
+            const opt = document.createElement('option');
+            opt.value = b.player_id;
+            opt.textContent = `${b.name} (${b.total_runs} runs)`;
+            opt.selected = true;
+            battersSelect.appendChild(opt);
+        });
+        
+        // Add remaining database batters (unselected)
+        remainingBatters.forEach(b => {
+            const opt = document.createElement('option');
+            opt.value = b.player_id;
+            opt.textContent = `${b.name} (${b.total_runs} runs)`;
+            battersSelect.appendChild(opt);
+        });
+        
+        // Populate bowlers dropdown
+        const bowlersSelect = document.getElementById(`team${teamNum}-bowlers`);
+        bowlersSelect.innerHTML = '';
+        
+        // Add categorized ESPN bowlers first (selected)
+        categorizedBowlers.forEach(b => {
+            const opt = document.createElement('option');
+            opt.value = b.player_id;
+            opt.textContent = `${b.name} (${b.total_wickets} wkts)`;
+            opt.selected = true;
+            bowlersSelect.appendChild(opt);
+        });
+        
+        // Add remaining database bowlers (unselected)
+        remainingBowlers.forEach(b => {
+            const opt = document.createElement('option');
+            opt.value = b.player_id;
+            opt.textContent = `${b.name} (${b.total_wickets} wkts)`;
+            bowlersSelect.appendChild(opt);
+        });
+        
+        console.log(`[DEBUG] Team ${teamNum} - Categorized ${categorizedBatters.length} batters, ${categorizedBowlers.length} bowlers (no overlap)`);
+        console.log(`Team ${teamNum} (${dbTeamName}): Auto-selected ${categorizedBatters.length} batters and ${categorizedBowlers.length} bowlers from ESPN squad`);
     }
     
     async function loadRecentLineupForTeam(teamNum, teamId) {
@@ -1443,40 +1663,141 @@
         }
     }
     
+    // Track loading state to prevent infinite loops
+    const loadingPlayers = {1: false, 2: false};
+    
     async function loadPlayers(teamNum) {
+        // Prevent recursive calls
+        if (loadingPlayers[teamNum]) {
+            console.log(`[loadPlayers] Already loading for team ${teamNum}, skipping`);
+            return;
+        }
+        
         const teamId = document.getElementById(`team${teamNum}-select`).value;
         if (!teamId) return;
         
-        // Use the team-specific gender filter, not the global currentGender
-        const gender = teamFilters[teamNum].gender;
-        const response = await fetch(`/api/players/${teamId}?gender=${gender}`);
-        const data = await response.json();
+        console.log(`[loadPlayers] Team ${teamNum}, ID: ${teamId}`);
         
-        if (data.success) {
-            // Populate batters
-            const battersSelect = document.getElementById(`team${teamNum}-batters`);
-            battersSelect.innerHTML = '';
-            data.batters.forEach(p => {
-                const opt = document.createElement('option');
-                opt.value = p.player_id;
-                opt.textContent = `${p.name} (${p.total_runs} runs)`;
-                battersSelect.appendChild(opt);
-            });
+        loadingPlayers[teamNum] = true;
+        
+        try {
+            // Use the team-specific gender filter
+            const gender = teamFilters[teamNum].gender;
+            const response = await fetch(`/api/players/${teamId}?gender=${gender}`);
+            const data = await response.json();
             
-            // Populate bowlers
-            const bowlersSelect = document.getElementById(`team${teamNum}-bowlers`);
-            bowlersSelect.innerHTML = '';
-            data.bowlers.forEach(p => {
-                const opt = document.createElement('option');
-                opt.value = p.player_id;
-                opt.textContent = `${p.name} (${p.total_wickets} wkts)`;
-                bowlersSelect.appendChild(opt);
-            });
-            
-            // Auto-select top players
-            selectTop(battersSelect, 11);
-            selectTop(bowlersSelect, 5);
+            if (data.success) {
+                let filteredPlayers = data.players;
+                let filteredGrouped = data.grouped_by_role;
+                
+                // Filter by ESPN squad if available
+                const espnSquad = window.espnSquadData?.[`team${teamNum}`] || [];
+                if (espnSquad.length > 0) {
+                    // Get squad player IDs (both ESPN IDs and DB IDs)
+                    const squadDbIds = espnSquad
+                        .map(p => p.db_player_id)
+                        .filter(id => id != null);
+                    
+                    console.log(`[loadPlayers] 🎯 Filtering to ESPN squad: ${squadDbIds.length} matched players from ${espnSquad.length} ESPN players`);
+                    
+                    // Filter players to only those in the squad
+                    // Also include any players that might have been matched but not yet in espnSquadData
+                    filteredPlayers = data.players.filter(p => {
+                        // Include if in matched squad
+                        if (squadDbIds.includes(p.player_id)) {
+                            return true;
+                        }
+                        // Also include if this player has an ESPN ID that matches the squad
+                        const espnMatch = espnSquad.find(espn => espn.espn_id === p.espn_player_id);
+                        if (espnMatch) {
+                            // Update espnSquadData with this match
+                            espnMatch.db_player_id = p.player_id;
+                            return true;
+                        }
+                        return false;
+                    });
+                    
+                    // Re-group filtered players by role
+                    filteredGrouped = {
+                        KEEPER: filteredPlayers.filter(p => p.role_category === 'KEEPER'),
+                        BATTER: filteredPlayers.filter(p => p.role_category === 'BATTER'),
+                        ALLROUNDER: filteredPlayers.filter(p => p.role_category === 'ALLROUNDER'),
+                        BOWLER: filteredPlayers.filter(p => p.role_category === 'BOWLER')
+                    };
+                    
+                    console.log(`[loadPlayers] ✅ Squad filtered: ${filteredPlayers.length} players (K:${filteredGrouped.KEEPER.length}, B:${filteredGrouped.BATTER.length}, A:${filteredGrouped.ALLROUNDER.length}, Bo:${filteredGrouped.BOWLER.length})`);
+                    
+                    // Show squad filter badge
+                    const squadBadge = document.getElementById(`team${teamNum}-squad-badge`);
+                    const squadText = document.getElementById(`team${teamNum}-squad-text`);
+                    if (squadBadge && squadText) {
+                        squadText.textContent = `ESPN Squad Only (${filteredPlayers.length} players)`;
+                        squadBadge.style.display = 'inline-flex';
+                    }
+                } else {
+                    console.log(`[loadPlayers] ⚠️ No ESPN squad data - showing all ${data.players.length} players`);
+                    
+                    // Hide squad filter badge
+                    const squadBadge = document.getElementById(`team${teamNum}-squad-badge`);
+                    if (squadBadge) {
+                        squadBadge.style.display = 'none';
+                    }
+                }
+                
+                // Store players for this team
+                window[`team${teamNum}Players`] = filteredPlayers;
+                window[`team${teamNum}GroupedPlayers`] = filteredGrouped;
+                
+                // Populate role-based dropdowns
+                populateRoleDropdowns(teamNum, filteredGrouped);
+                
+                console.log(`[loadPlayers] Loaded ${filteredPlayers.length} players for team ${teamNum}`);
+            }
+        } finally {
+            loadingPlayers[teamNum] = false;
         }
+    }
+    
+    function populateRoleDropdowns(teamNum, grouped) {
+        // Keepers
+        const keepersSelect = document.getElementById(`team${teamNum}-keepers`);
+        keepersSelect.innerHTML = '';
+        (grouped.KEEPER || []).forEach(p => {
+            const opt = document.createElement('option');
+            opt.value = p.player_id;
+            opt.textContent = `${p.name} (${p.stats.runs} runs, ${p.stats.stumpings || 0} st)`;
+            keepersSelect.appendChild(opt);
+        });
+        
+        // Batters
+        const battersSelect = document.getElementById(`team${teamNum}-batters`);
+        battersSelect.innerHTML = '';
+        (grouped.BATTER || []).forEach(p => {
+            const opt = document.createElement('option');
+            opt.value = p.player_id;
+            opt.textContent = `${p.name} (${p.stats.runs} runs, avg ${p.stats.avg})`;
+            battersSelect.appendChild(opt);
+        });
+        
+        // All-rounders
+        const allroundersSelect = document.getElementById(`team${teamNum}-allrounders`);
+        allroundersSelect.innerHTML = '';
+        (grouped.ALLROUNDER || []).forEach(p => {
+            const opt = document.createElement('option');
+            opt.value = p.player_id;
+            opt.textContent = `${p.name} (${p.stats.runs}r, ${p.stats.wickets}w)`;
+            allroundersSelect.appendChild(opt);
+        });
+        
+        // Bowlers
+        const bowlersSelect = document.getElementById(`team${teamNum}-bowlers`);
+        bowlersSelect.innerHTML = '';
+        (grouped.BOWLER || []).forEach(p => {
+            const opt = document.createElement('option');
+            opt.value = p.player_id;
+            opt.textContent = `${p.name} (${p.stats.wickets} wkts)`;
+            bowlersSelect.appendChild(opt);
+        });
     }
     
     function selectTop(selectEl, n) {
@@ -1484,6 +1805,446 @@
         for (let i = 0; i < Math.min(n, options.length); i++) {
             options[i].selected = true;
         }
+    }
+    
+    function validateTeamSelection(teamNum) {
+        // Get selected players from all role dropdowns
+        const keepers = getSelectedValues(`team${teamNum}-keepers`);
+        const batters = getSelectedValues(`team${teamNum}-batters`);
+        const allrounders = getSelectedValues(`team${teamNum}-allrounders`);
+        const bowlers = getSelectedValues(`team${teamNum}-bowlers`);
+        
+        const total = keepers.length + batters.length + allrounders.length + bowlers.length;
+        const bowlingOptions = allrounders.length + bowlers.length;
+        
+        const errors = [];
+        const warnings = [];
+        
+        // Validation rules
+        if (keepers.length !== 1) {
+            errors.push(`Must select exactly 1 wicketkeeper (have ${keepers.length})`);
+        }
+        // Bowling requirement: Either 4+ specialist bowlers OR 5+ total bowling options
+        if (bowlers.length < 4 && bowlingOptions < 5) {
+            errors.push(`Need either 4+ specialist bowlers OR 5+ total bowling options (have ${bowlers.length} bowlers, ${bowlingOptions} total)`);
+        }
+        if (total !== 11) {
+            errors.push(`Must select exactly 11 players (have ${total})`);
+        }
+        
+        // Warnings
+        if (batters.length > 7) {
+            warnings.push(`Team has ${batters.length} specialist batters (recommended max: 7)`);
+        }
+        
+        // Display validation summary
+        const validationDiv = document.getElementById(`team${teamNum}-validation`);
+        if (errors.length > 0 || warnings.length > 0) {
+            validationDiv.style.display = 'block';
+            validationDiv.className = `validation-summary ${errors.length > 0 ? 'invalid' : 'valid'}`;
+            
+            let html = '';
+            errors.forEach(err => {
+                html += `<div class="validation-item invalid"><span class="icon">✗</span><span>${err}</span></div>`;
+            });
+            warnings.forEach(warn => {
+                html += `<div class="validation-item warning"><span class="icon">⚠</span><span>${warn}</span></div>`;
+            });
+            if (errors.length === 0) {
+                html += `<div class="validation-item valid"><span class="icon">✓</span><span>Team selection valid (${total}/11 players)</span></div>`;
+            }
+            
+            validationDiv.innerHTML = html;
+        } else {
+            validationDiv.style.display = 'none';
+        }
+        
+        // Update predict button state
+        const isValid = errors.length === 0;
+        updatePredictButtonState();
+        
+        return isValid;
+    }
+    
+    function updatePredictButtonState() {
+        // Check validation state WITHOUT re-running validation (avoid recursion)
+        const team1Errors = checkTeamErrors(1);
+        const team2Errors = checkTeamErrors(2);
+        
+        // Also check if venue is selected
+        const venueSelected = document.getElementById('venue-select').value !== '';
+        
+        // Enable predict button only if all valid
+        const predictBtn = document.querySelector('button[onclick="runSimulation()"]');
+        if (predictBtn) {
+            predictBtn.disabled = !(team1Errors.length === 0 && team2Errors.length === 0 && venueSelected);
+        }
+    }
+    
+    function checkTeamErrors(teamNum) {
+        // Just check for errors without updating UI
+        const keepers = getSelectedValues(`team${teamNum}-keepers`);
+        const batters = getSelectedValues(`team${teamNum}-batters`);
+        const allrounders = getSelectedValues(`team${teamNum}-allrounders`);
+        const bowlers = getSelectedValues(`team${teamNum}-bowlers`);
+        
+        const total = keepers.length + batters.length + allrounders.length + bowlers.length;
+        const bowlingOptions = allrounders.length + bowlers.length;
+        
+        const errors = [];
+        if (keepers.length !== 1) errors.push(`Must select exactly 1 wicketkeeper (have ${keepers.length})`);
+        // Bowling requirement: Either 4+ specialist bowlers OR 5+ total bowling options
+        if (bowlers.length < 4 && bowlingOptions < 5) {
+            errors.push(`Need either 4+ specialist bowlers OR 5+ total bowling options (have ${bowlers.length} bowlers, ${bowlingOptions} total)`);
+        }
+        if (total !== 11) errors.push(`Must select exactly 11 players (have ${total})`);
+        
+        return errors;
+    }
+    
+    function updateSourceBadge(teamNum, source, confidence, playerCount = null) {
+        const badge = document.getElementById(`team${teamNum}-source-badge`);
+        const icon = document.getElementById(`team${teamNum}-source-icon`);
+        const text = document.getElementById(`team${teamNum}-source-text`);
+        
+        const icons = {
+            'espn_xi': '✓',
+            'espn_squad_optimized': '⚙',
+            'database_last_match': '📊',
+            'fallback': '⚠'
+        };
+        
+        const labels = {
+            'espn_xi': 'ESPN Playing XI',
+            'espn_squad_optimized': 'Optimized from Squad',
+            'database_last_match': 'Last Match Lineup',
+            'fallback': 'Best Available Players'
+        };
+        
+        icon.textContent = icons[source] || '🔄';
+        let labelText = labels[source] || 'Loading...';
+        if (playerCount !== null) {
+            labelText += ` (${playerCount}/11)`;
+        }
+        text.textContent = labelText;
+        badge.style.display = 'inline-flex';
+        
+        // Color based on confidence
+        if (confidence === 'high') {
+            badge.style.background = '#10b981';
+        } else if (confidence === 'medium') {
+            badge.style.background = '#f59e0b';
+        } else {
+            badge.style.background = '#ef4444';
+        }
+    }
+    
+    async function waterfallLoadTeam(teamNum, matchId, teamId, matchUrl = null) {
+        console.log(`[waterfallLoadTeam] Team ${teamNum}, Match: ${matchId}, Team ID: ${teamId}, URL: ${matchUrl}`);
+        
+        const gender = teamFilters[teamNum].gender;
+        
+        try {
+            let url = `/api/team/waterfall-select?team_num=${teamNum}&team_id=${teamId}&gender=${gender}`;
+            if (matchUrl) {
+                url += `&match_url=${encodeURIComponent(matchUrl)}`;
+            }
+            
+            const response = await fetch(url);
+            const data = await response.json();
+            
+            if (data.success) {
+                const sourceLabels = {
+                    'espn_xi': '✅ ESPN Playing XI',
+                    'espn_squad_optimized': '⚙️ Optimized from ESPN Squad',
+                    'database_last_match': '📊 Last Match from Database',
+                    'fallback': '⚠️ Best Available Players'
+                };
+                
+                console.log(`[waterfallLoadTeam] Source: ${sourceLabels[data.source] || data.source}`);
+                console.log(`[waterfallLoadTeam] Players found: ${data.players.length}/11`);
+                
+                // Update source badge with player count
+                updateSourceBadge(teamNum, data.source, data.confidence, data.players.length);
+                
+                // Update espnSquadData with the actual matched players from backend
+                // This ensures frontend filtering matches backend optimizer
+                if (data.source === 'espn_playing_xi' || data.source === 'espn_squad_optimized') {
+                    const matchedPlayerIds = data.players.map(p => p.player_id);
+                    const alternatives = data.alternatives || [];
+                    const allMatchedIds = [...matchedPlayerIds, ...alternatives.map(p => p.player_id)];
+                    
+                    // Update espnSquadData to include all matched players
+                    if (window.espnSquadData && window.espnSquadData[`team${teamNum}`]) {
+                        // Update each ESPN player with their matched db_player_id
+                        window.espnSquadData[`team${teamNum}`].forEach(espnPlayer => {
+                            // Check if this ESPN player was matched to one of our players
+                            const matched = [...data.players, ...alternatives].find(p => p.espn_id === espnPlayer.espn_id);
+                            if (matched) {
+                                espnPlayer.db_player_id = matched.player_id;
+                            }
+                        });
+                        console.log(`[waterfallLoadTeam] Updated espnSquadData for team ${teamNum}: ${window.espnSquadData[`team${teamNum}`].filter(p => p.db_player_id).length}/${window.espnSquadData[`team${teamNum}`].length} players matched`);
+                    }
+                }
+                
+                // Load all available players first (will use updated espnSquadData)
+                await loadPlayers(teamNum);
+                
+                // Small delay to ensure DOM is updated
+                await new Promise(resolve => setTimeout(resolve, 100));
+                
+                // Then select the waterfall-selected players
+                selectPlayersByIds(teamNum, data.players);
+                
+                // Validate after a short delay to ensure selection is complete
+                setTimeout(() => {
+                    validateTeamSelection(teamNum);
+                }, 200);
+                
+                // Show warning if incomplete team
+                if (data.players.length < 11) {
+                    console.warn(`[waterfallLoadTeam] ⚠️ Only ${data.players.length} players auto-selected. Please complete the team manually or click "Re-optimize from Squad".`);
+                }
+            }
+        } catch (error) {
+            console.error(`[waterfallLoadTeam] Error: ${error}`);
+            // Fall back to regular load
+            await loadPlayers(teamNum);
+        }
+    }
+    
+    function selectPlayersByIds(teamNum, players) {
+        console.log(`[selectPlayersByIds] Selecting ${players.length} players for team ${teamNum}:`, players.map(p => `${p.name} (${p.role_category})`));
+        
+        // Group players by role
+        const grouped = {
+            KEEPER: [],
+            BATTER: [],
+            ALLROUNDER: [],
+            BOWLER: []
+        };
+        
+        players.forEach(p => {
+            const category = p.role_category;
+            if (grouped[category]) {
+                grouped[category].push(p.player_id);
+            } else {
+                console.warn(`[selectPlayersByIds] Unknown role category: ${category} for player ${p.name}`);
+            }
+        });
+        
+        console.log(`[selectPlayersByIds] Grouped:`, grouped);
+        
+        // Select in each dropdown
+        const keepersSelected = selectInDropdown(`team${teamNum}-keepers`, grouped.KEEPER);
+        const battersSelected = selectInDropdown(`team${teamNum}-batters`, grouped.BATTER);
+        const allroundersSelected = selectInDropdown(`team${teamNum}-allrounders`, grouped.ALLROUNDER);
+        const bowlersSelected = selectInDropdown(`team${teamNum}-bowlers`, grouped.BOWLER);
+        
+        console.log(`[selectPlayersByIds] Selected: ${keepersSelected} keepers, ${battersSelected} batters, ${allroundersSelected} all-rounders, ${bowlersSelected} bowlers`);
+        
+        // Trigger change events to update validation
+        ['keepers', 'batters', 'allrounders', 'bowlers'].forEach(role => {
+            const select = document.getElementById(`team${teamNum}-${role}`);
+            if (select) {
+                select.dispatchEvent(new Event('change', { bubbles: true }));
+            }
+        });
+    }
+    
+    function selectInDropdown(selectId, playerIds) {
+        const select = document.getElementById(selectId);
+        if (!select) {
+            console.warn(`[selectInDropdown] Select element not found: ${selectId}`);
+            return 0;
+        }
+        
+        if (playerIds.length === 0) {
+            // Clear selection
+            Array.from(select.options).forEach(opt => opt.selected = false);
+            // For single-select, also clear the selectedIndex
+            if (!select.multiple) {
+                select.selectedIndex = -1;
+            }
+            return 0;
+        }
+        
+        // Clear existing selection
+        Array.from(select.options).forEach(opt => opt.selected = false);
+        if (!select.multiple) {
+            select.selectedIndex = -1;
+        }
+        
+        let selectedCount = 0;
+        // Select matching players
+        playerIds.forEach(playerId => {
+            let found = false;
+            Array.from(select.options).forEach((opt, index) => {
+                const optValue = parseInt(opt.value);
+                if (optValue === playerId) {
+                    opt.selected = true;
+                    found = true;
+                    selectedCount++;
+                    // For single-select, also set selectedIndex
+                    if (!select.multiple && select.selectedIndex === -1) {
+                        select.selectedIndex = index;
+                    }
+                }
+            });
+            if (!found) {
+                console.warn(`[selectInDropdown] Player ID ${playerId} not found in ${selectId} dropdown (has ${select.options.length} options)`);
+            }
+        });
+        
+        // For single-select, only select the first one
+        if (!select.multiple && selectedCount > 1) {
+            console.warn(`[selectInDropdown] Single-select dropdown ${selectId} had ${selectedCount} players to select, only selecting first`);
+            // Clear all and select only first
+            Array.from(select.options).forEach(opt => opt.selected = false);
+            const firstId = playerIds[0];
+            Array.from(select.options).forEach((opt, index) => {
+                if (parseInt(opt.value) === firstId) {
+                    opt.selected = true;
+                    select.selectedIndex = index;
+                }
+            });
+            selectedCount = 1;
+        }
+        
+        console.log(`[selectInDropdown] Selected ${selectedCount} players in ${selectId} (multiple: ${select.multiple})`);
+        return selectedCount;
+    }
+    
+    async function reOptimizeTeam(teamNum) {
+        const teamId = document.getElementById(`team${teamNum}-select`).value;
+        if (!teamId) {
+            alert('Please select a team first');
+            return;
+        }
+        
+        // Get available players (filtered by ESPN squad if available)
+        let allPlayers = window[`team${teamNum}Players`] || [];
+        
+        console.log(`[reOptimizeTeam] Current players available: ${allPlayers.length}`);
+        
+        // If we have fewer than 11, try to reload from ESPN squad
+        if (allPlayers.length < 11) {
+            // Check if we have ESPN squad data that might have more players
+            const espnSquad = window.espnSquadData?.[`team${teamNum}`] || [];
+            if (espnSquad.length >= 11) {
+                // Reload players to get full ESPN squad
+                console.log(`[reOptimizeTeam] Reloading players to get full ESPN squad (${espnSquad.length} players)`);
+                await loadPlayers(teamNum);
+                const reloadedPlayers = window[`team${teamNum}Players`] || [];
+                if (reloadedPlayers.length < 11) {
+                    alert(`Not enough players available to optimize (have ${reloadedPlayers.length}, need 11)`);
+                    return;
+                }
+            } else {
+                alert(`Not enough players available to optimize (have ${allPlayers.length}, need 11)`);
+                return;
+            }
+        }
+        
+        // Get updated players after potential reload
+        const playersToUse = window[`team${teamNum}Players`] || [];
+        if (playersToUse.length < 11) {
+            alert(`Not enough players available to optimize (have ${playersToUse.length}, need 11)`);
+            return;
+        }
+        
+        const gender = teamFilters[teamNum].gender;
+        const squadIds = playersToUse.map(p => p.player_id);
+        
+        console.log(`[reOptimizeTeam] Optimizing from ${squadIds.length} players for team ${teamNum}`);
+        
+        try {
+            const response = await fetch('/api/team/optimize', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({
+                    squad_player_ids: squadIds,
+                    team_id: teamId,
+                    gender: gender
+                })
+            });
+            
+            const data = await response.json();
+            
+            if (data.success) {
+                console.log(`[reOptimizeTeam] Optimized XI: ${data.optimized_xi.length} players`);
+                
+                // Small delay to ensure dropdowns are ready
+                await new Promise(resolve => setTimeout(resolve, 100));
+                
+                selectPlayersByIds(teamNum, data.optimized_xi);
+                updateSourceBadge(teamNum, 'espn_squad_optimized', 'high', data.optimized_xi.length);
+                
+                // Validate after selection
+                setTimeout(() => {
+                    validateTeamSelection(teamNum);
+                }, 200);
+                
+                console.log(`[reOptimizeTeam] Successfully optimized team ${teamNum}`);
+            } else {
+                alert(`Failed to optimize: ${data.error || 'Unknown error'}`);
+            }
+        } catch (error) {
+            console.error(`[reOptimizeTeam] Error: ${error}`);
+            alert('Failed to optimize team: ' + error.message);
+        }
+    }
+    
+    async function loadLastMatch(teamNum) {
+        const teamId = document.getElementById(`team${teamNum}-select`).value;
+        if (!teamId) {
+            alert('Please select a team first');
+            return;
+        }
+        
+        const gender = teamFilters[teamNum].gender;
+        
+        try {
+            const response = await fetch(`/api/team/${teamId}/recent-lineup?gender=${gender}`);
+            const data = await response.json();
+            
+            if (data.success && data.players.length > 0) {
+                selectPlayersByIds(teamNum, data.players);
+                updateSourceBadge(teamNum, 'database_last_match', 'medium');
+                validateTeamSelection(teamNum);
+                console.log(`[loadLastMatch] Loaded last match for team ${teamNum}`);
+            } else {
+                alert('No recent match data available for this team');
+            }
+        } catch (error) {
+            console.error(`[loadLastMatch] Error: ${error}`);
+            alert('Failed to load last match lineup');
+        }
+    }
+    
+    function clearSquadData(teamNum) {
+        // Clear ESPN squad filter when manually changing team
+        if (window.espnSquadData) {
+            window.espnSquadData[`team${teamNum}`] = [];
+        }
+        const squadBadge = document.getElementById(`team${teamNum}-squad-badge`);
+        if (squadBadge) {
+            squadBadge.style.display = 'none';
+        }
+    }
+    
+    function clearTeam(teamNum) {
+        ['keepers', 'batters', 'allrounders', 'bowlers'].forEach(role => {
+            const select = document.getElementById(`team${teamNum}-${role}`);
+            if (select) {
+                Array.from(select.options).forEach(opt => opt.selected = false);
+            }
+        });
+        
+        document.getElementById(`team${teamNum}-source-badge`).style.display = 'none';
+        clearSquadData(teamNum);
+        validateTeamSelection(teamNum);
     }
     
     function getSelectedValues(selectId) {
@@ -1495,25 +2256,40 @@
         const team1Name = document.getElementById('team1-select').selectedOptions[0]?.text || 'Team 1';
         const team2Name = document.getElementById('team2-select').selectedOptions[0]?.text || 'Team 2';
         
+        // Collect all players from role-based dropdowns
+        const team1Keepers = getSelectedValues('team1-keepers');
         const team1Batters = getSelectedValues('team1-batters');
+        const team1Allrounders = getSelectedValues('team1-allrounders');
         const team1Bowlers = getSelectedValues('team1-bowlers');
+        
+        const team2Keepers = getSelectedValues('team2-keepers');
         const team2Batters = getSelectedValues('team2-batters');
+        const team2Allrounders = getSelectedValues('team2-allrounders');
         const team2Bowlers = getSelectedValues('team2-bowlers');
         
-        if (team1Batters.length === 0 || team2Batters.length === 0) {
+        // Combine all players (batters = everyone, bowlers = allrounders + bowlers)
+        const team1AllPlayers = [...team1Keepers, ...team1Batters, ...team1Allrounders, ...team1Bowlers];
+        const team2AllPlayers = [...team2Keepers, ...team2Batters, ...team2Allrounders, ...team2Bowlers];
+        
+        const team1BowlingPlayers = [...team1Allrounders, ...team1Bowlers];
+        const team2BowlingPlayers = [...team2Allrounders, ...team2Bowlers];
+        
+        if (team1AllPlayers.length === 0 || team2AllPlayers.length === 0) {
             alert('Please select players for both teams');
             return;
         }
         
-        // Deduplicate batters (each player can only bat once!)
-        const uniqueTeam1Batters = [...new Set(team1Batters)];
-        const uniqueTeam2Batters = [...new Set(team2Batters)];
+        // Deduplicate (shouldn't happen with role-based selection, but just in case)
+        const uniqueTeam1Batters = [...new Set(team1AllPlayers)];
+        const uniqueTeam2Batters = [...new Set(team2AllPlayers)];
+        const uniqueTeam1Bowlers = [...new Set(team1BowlingPlayers)];
+        const uniqueTeam2Bowlers = [...new Set(team2BowlingPlayers)];
         
-        if (uniqueTeam1Batters.length < team1Batters.length) {
-            console.warn(`Removed ${team1Batters.length - uniqueTeam1Batters.length} duplicate Team 1 batters`);
+        if (uniqueTeam1Batters.length < team1AllPlayers.length) {
+            console.warn(`Removed ${team1AllPlayers.length - uniqueTeam1Batters.length} duplicate Team 1 players`);
         }
-        if (uniqueTeam2Batters.length < team2Batters.length) {
-            console.warn(`Removed ${team2Batters.length - uniqueTeam2Batters.length} duplicate Team 2 batters`);
+        if (uniqueTeam2Batters.length < team2AllPlayers.length) {
+            console.warn(`Removed ${team2AllPlayers.length - uniqueTeam2Batters.length} duplicate Team 2 players`);
         }
         
         // Get venue and toss options
@@ -1568,9 +2344,9 @@
         
         const payload = {
             team1_batters: uniqueTeam1Batters,
-            team1_bowlers: team1Bowlers,
+            team1_bowlers: uniqueTeam1Bowlers,
             team2_batters: uniqueTeam2Batters,
-            team2_bowlers: team2Bowlers,
+            team2_bowlers: uniqueTeam2Bowlers,
             simulator: document.getElementById('simulator-type').value,
             n_simulations: nSimulations,
             venue_id: venueId,

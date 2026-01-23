@@ -12,14 +12,21 @@ CREATE TABLE IF NOT EXISTS teams (
     country_code TEXT,
     is_international BOOLEAN DEFAULT TRUE,
     team_type TEXT DEFAULT 'domestic' CHECK(team_type IN ('international', 'franchise', 'domestic')),
+    tier INTEGER DEFAULT 3 CHECK(tier BETWEEN 1 AND 5),
+    tier_last_reviewed DATE,
+    tier_notes TEXT,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
+
+-- Create index for fast tier lookups
+CREATE INDEX IF NOT EXISTS idx_teams_tier ON teams(tier);
 
 -- Players table
 CREATE TABLE IF NOT EXISTS players (
     player_id INTEGER PRIMARY KEY AUTOINCREMENT,
     name TEXT NOT NULL,
     registry_id TEXT UNIQUE,  -- Cricsheet unique identifier
+    espn_player_id INTEGER,  -- ESPN Cricinfo player ID
     country TEXT,
     batting_style TEXT,  -- right-hand bat, left-hand bat
     bowling_style TEXT,  -- right-arm fast, left-arm spin, etc.
@@ -31,6 +38,7 @@ CREATE TABLE IF NOT EXISTS players (
 -- Create index for player name lookups
 CREATE INDEX IF NOT EXISTS idx_players_name ON players(name);
 CREATE INDEX IF NOT EXISTS idx_players_registry_id ON players(registry_id);
+CREATE INDEX IF NOT EXISTS idx_players_espn_id ON players(espn_player_id);
 
 -- Venues table
 CREATE TABLE IF NOT EXISTS venues (
@@ -186,33 +194,35 @@ CREATE INDEX IF NOT EXISTS idx_player_stats_match ON player_match_stats(match_id
 CREATE INDEX IF NOT EXISTS idx_player_stats_player ON player_match_stats(player_id);
 
 -- ============================================================================
--- ELO RATING TABLES
+-- ELO RATING TABLES (V2 - with format and gender separation)
 -- ============================================================================
 
--- Team ELO history
+-- Team ELO history (with gender separation)
 CREATE TABLE IF NOT EXISTS team_elo_history (
     elo_id INTEGER PRIMARY KEY AUTOINCREMENT,
     team_id INTEGER NOT NULL REFERENCES teams(team_id),
     date DATE NOT NULL,
-    match_id INTEGER REFERENCES matches(match_id),  -- Match that triggered update
-    elo_t20 REAL DEFAULT 1500,
-    elo_odi REAL DEFAULT 1500,
-    elo_t20_change REAL DEFAULT 0,  -- Change from previous rating
-    elo_odi_change REAL DEFAULT 0,
-    is_monthly_snapshot BOOLEAN DEFAULT FALSE,  -- For monthly summaries
+    match_id INTEGER REFERENCES matches(match_id),
+    format TEXT NOT NULL CHECK(format IN ('T20', 'ODI')),
+    gender TEXT NOT NULL CHECK(gender IN ('male', 'female')),
+    elo REAL DEFAULT 1500,
+    elo_change REAL DEFAULT 0,
+    is_monthly_snapshot BOOLEAN DEFAULT FALSE,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
 CREATE INDEX IF NOT EXISTS idx_team_elo_team_date ON team_elo_history(team_id, date);
+CREATE INDEX IF NOT EXISTS idx_team_elo_format_gender ON team_elo_history(format, gender);
 CREATE INDEX IF NOT EXISTS idx_team_elo_monthly ON team_elo_history(is_monthly_snapshot, date);
 
--- Player ELO history
+-- Player ELO history (with gender separation)
 CREATE TABLE IF NOT EXISTS player_elo_history (
     elo_id INTEGER PRIMARY KEY AUTOINCREMENT,
     player_id INTEGER NOT NULL REFERENCES players(player_id),
     date DATE NOT NULL,
     match_id INTEGER REFERENCES matches(match_id),
     format TEXT NOT NULL CHECK(format IN ('T20', 'ODI')),
+    gender TEXT NOT NULL CHECK(gender IN ('male', 'female')),
     
     -- ELO ratings
     batting_elo REAL DEFAULT 1500,
@@ -229,29 +239,51 @@ CREATE TABLE IF NOT EXISTS player_elo_history (
 );
 
 CREATE INDEX IF NOT EXISTS idx_player_elo_player_date ON player_elo_history(player_id, date);
-CREATE INDEX IF NOT EXISTS idx_player_elo_format ON player_elo_history(format);
+CREATE INDEX IF NOT EXISTS idx_player_elo_format_gender ON player_elo_history(format, gender);
 CREATE INDEX IF NOT EXISTS idx_player_elo_monthly ON player_elo_history(is_monthly_snapshot, date);
 
--- Current ELO ratings (denormalized for quick lookups)
+-- Current ELO ratings for teams (denormalized for quick lookups)
+-- Now with 4 combinations: T20_male, T20_female, ODI_male, ODI_female
 CREATE TABLE IF NOT EXISTS team_current_elo (
     team_id INTEGER PRIMARY KEY REFERENCES teams(team_id),
-    elo_t20 REAL DEFAULT 1500,
-    elo_odi REAL DEFAULT 1500,
-    last_t20_match_date DATE,
-    last_odi_match_date DATE,
+    -- T20
+    elo_t20_male REAL DEFAULT 1500,
+    elo_t20_female REAL DEFAULT 1500,
+    -- ODI
+    elo_odi_male REAL DEFAULT 1500,
+    elo_odi_female REAL DEFAULT 1500,
+    -- Last match dates
+    last_t20_male_date DATE,
+    last_t20_female_date DATE,
+    last_odi_male_date DATE,
+    last_odi_female_date DATE,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
+-- Current ELO ratings for players (denormalized for quick lookups)
 CREATE TABLE IF NOT EXISTS player_current_elo (
     player_id INTEGER PRIMARY KEY REFERENCES players(player_id),
-    batting_elo_t20 REAL DEFAULT 1500,
-    bowling_elo_t20 REAL DEFAULT 1500,
-    overall_elo_t20 REAL DEFAULT 1500,
-    batting_elo_odi REAL DEFAULT 1500,
-    bowling_elo_odi REAL DEFAULT 1500,
-    overall_elo_odi REAL DEFAULT 1500,
-    last_t20_match_date DATE,
-    last_odi_match_date DATE,
+    -- T20 Male
+    batting_elo_t20_male REAL DEFAULT 1500,
+    bowling_elo_t20_male REAL DEFAULT 1500,
+    overall_elo_t20_male REAL DEFAULT 1500,
+    -- T20 Female
+    batting_elo_t20_female REAL DEFAULT 1500,
+    bowling_elo_t20_female REAL DEFAULT 1500,
+    overall_elo_t20_female REAL DEFAULT 1500,
+    -- ODI Male
+    batting_elo_odi_male REAL DEFAULT 1500,
+    bowling_elo_odi_male REAL DEFAULT 1500,
+    overall_elo_odi_male REAL DEFAULT 1500,
+    -- ODI Female
+    batting_elo_odi_female REAL DEFAULT 1500,
+    bowling_elo_odi_female REAL DEFAULT 1500,
+    overall_elo_odi_female REAL DEFAULT 1500,
+    -- Last match dates
+    last_t20_male_date DATE,
+    last_t20_female_date DATE,
+    last_odi_male_date DATE,
+    last_odi_female_date DATE,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
@@ -283,46 +315,170 @@ LEFT JOIN teams t2 ON m.team2_id = t2.team_id
 LEFT JOIN teams tw ON m.toss_winner_id = tw.team_id
 LEFT JOIN teams w ON m.winner_id = w.team_id;
 
--- View for current team rankings
-CREATE VIEW IF NOT EXISTS team_rankings_t20 AS
+-- Views for team rankings (by format and gender)
+CREATE VIEW IF NOT EXISTS team_rankings_t20_male AS
 SELECT 
     t.name as team_name,
-    e.elo_t20 as elo,
-    e.last_t20_match_date as last_match
+    e.elo_t20_male as elo,
+    e.last_t20_male_date as last_match
 FROM team_current_elo e
 JOIN teams t ON e.team_id = t.team_id
-ORDER BY e.elo_t20 DESC;
+WHERE e.elo_t20_male != 1500
+ORDER BY e.elo_t20_male DESC;
 
-CREATE VIEW IF NOT EXISTS team_rankings_odi AS
+CREATE VIEW IF NOT EXISTS team_rankings_t20_female AS
 SELECT 
     t.name as team_name,
-    e.elo_odi as elo,
-    e.last_odi_match_date as last_match
+    e.elo_t20_female as elo,
+    e.last_t20_female_date as last_match
 FROM team_current_elo e
 JOIN teams t ON e.team_id = t.team_id
-ORDER BY e.elo_odi DESC;
+WHERE e.elo_t20_female != 1500
+ORDER BY e.elo_t20_female DESC;
 
--- View for player batting rankings (T20)
-CREATE VIEW IF NOT EXISTS player_batting_rankings_t20 AS
+CREATE VIEW IF NOT EXISTS team_rankings_odi_male AS
+SELECT 
+    t.name as team_name,
+    e.elo_odi_male as elo,
+    e.last_odi_male_date as last_match
+FROM team_current_elo e
+JOIN teams t ON e.team_id = t.team_id
+WHERE e.elo_odi_male != 1500
+ORDER BY e.elo_odi_male DESC;
+
+CREATE VIEW IF NOT EXISTS team_rankings_odi_female AS
+SELECT 
+    t.name as team_name,
+    e.elo_odi_female as elo,
+    e.last_odi_female_date as last_match
+FROM team_current_elo e
+JOIN teams t ON e.team_id = t.team_id
+WHERE e.elo_odi_female != 1500
+ORDER BY e.elo_odi_female DESC;
+
+-- Views for player batting rankings
+CREATE VIEW IF NOT EXISTS player_batting_rankings_t20_male AS
 SELECT 
     p.name as player_name,
     p.country,
-    e.batting_elo_t20 as elo,
-    e.last_t20_match_date as last_match
+    e.batting_elo_t20_male as elo,
+    e.last_t20_male_date as last_match
 FROM player_current_elo e
 JOIN players p ON e.player_id = p.player_id
-WHERE e.batting_elo_t20 != 1500  -- Only players with ratings
-ORDER BY e.batting_elo_t20 DESC;
+WHERE e.batting_elo_t20_male != 1500
+ORDER BY e.batting_elo_t20_male DESC;
 
--- View for player bowling rankings (T20)
-CREATE VIEW IF NOT EXISTS player_bowling_rankings_t20 AS
+CREATE VIEW IF NOT EXISTS player_batting_rankings_t20_female AS
 SELECT 
     p.name as player_name,
     p.country,
-    e.bowling_elo_t20 as elo,
-    e.last_t20_match_date as last_match
+    e.batting_elo_t20_female as elo,
+    e.last_t20_female_date as last_match
 FROM player_current_elo e
 JOIN players p ON e.player_id = p.player_id
-WHERE e.bowling_elo_t20 != 1500
-ORDER BY e.bowling_elo_t20 DESC;
+WHERE e.batting_elo_t20_female != 1500
+ORDER BY e.batting_elo_t20_female DESC;
+
+-- Views for player bowling rankings
+CREATE VIEW IF NOT EXISTS player_bowling_rankings_t20_male AS
+SELECT 
+    p.name as player_name,
+    p.country,
+    e.bowling_elo_t20_male as elo,
+    e.last_t20_male_date as last_match
+FROM player_current_elo e
+JOIN players p ON e.player_id = p.player_id
+WHERE e.bowling_elo_t20_male != 1500
+ORDER BY e.bowling_elo_t20_male DESC;
+
+CREATE VIEW IF NOT EXISTS player_bowling_rankings_t20_female AS
+SELECT 
+    p.name as player_name,
+    p.country,
+    e.bowling_elo_t20_female as elo,
+    e.last_t20_female_date as last_match
+FROM player_current_elo e
+JOIN players p ON e.player_id = p.player_id
+WHERE e.bowling_elo_t20_female != 1500
+ORDER BY e.bowling_elo_t20_female DESC;
+
+-- ============================================================================
+-- TIERED ELO SYSTEM TABLES
+-- ============================================================================
+
+-- Tournament tiers mapping table
+CREATE TABLE IF NOT EXISTS tournament_tiers (
+    tournament_pattern TEXT PRIMARY KEY,
+    base_tier INTEGER CHECK(base_tier BETWEEN 1 AND 5) NOT NULL,
+    notes TEXT
+);
+
+-- Populate tournament tier patterns
+INSERT OR IGNORE INTO tournament_tiers VALUES 
+    -- World Cups and Champions Events (Tier 1)
+    ('%T20 World Cup%', 1, 'Premier global tournament'),
+    ('%World Cup%', 1, 'Premier global tournament'),
+    ('%Champions Trophy%', 1, 'Premier ICC event'),
+    ('%World Twenty20%', 1, 'Legacy World Cup naming'),
+    ('%ICC Men''s T20 World Cup%', 1, 'Full ICC World Cup title'),
+    ('%ICC Women''s T20 World Cup%', 1, 'Full ICC World Cup title'),
+    -- Bilateral International (Full Members) - Tier 2
+    ('%tour of%', 2, 'Bilateral international series'),
+    ('%T20I Series%', 2, 'T20 International series'),
+    ('%Triangular%', 2, 'Multi-nation tournament'),
+    ('%Tri-Series%', 2, 'Tri-nation series'),
+    ('%Tri-Nation%', 2, 'Tri-nation series'),
+    -- Premier Franchise Leagues - Tier 3
+    ('%Indian Premier League%', 3, 'IPL'),
+    ('%Big Bash League%', 3, 'BBL'),
+    ('%Caribbean Premier League%', 3, 'CPL'),
+    ('%Pakistan Super League%', 3, 'PSL'),
+    ('%The Hundred%', 3, 'The Hundred'),
+    ('%Super Smash%', 3, 'New Zealand domestic T20'),
+    ('%Bangladesh Premier League%', 3, 'BPL'),
+    ('%Lanka Premier League%', 3, 'LPL'),
+    ('%Women''s Premier League%', 3, 'WPL India'),
+    -- Regional/Associate Tournaments - Tier 4
+    ('%Africa%', 4, 'African regional'),
+    ('%Asia Cup%', 4, 'Asian regional'),
+    ('%ACC%', 4, 'Asian Cricket Council'),
+    ('%Continental Cup%', 4, 'Associate regional'),
+    ('%ICC World Cup Qualifier%', 4, 'World Cup qualifying'),
+    ('%East Asia%', 4, 'Regional Asian'),
+    ('%Europe%', 4, 'European regional'),
+    -- Domestic/Minor Leagues - Tier 5
+    ('%County%', 5, 'English county cricket'),
+    ('%Trophy%', 5, 'Domestic trophy'),
+    ('%Challenge%', 5, 'Domestic challenge'),
+    ('%T20 Blast%', 5, 'English domestic T20'),
+    ('%Vitality Blast%', 5, 'English domestic T20'),
+    ('%Syed Mushtaq Ali%', 5, 'Indian domestic T20'),
+    ('%Inter-Provincial%', 5, 'Irish domestic'),
+    -- Catch-all patterns (lowest priority)
+    ('%Cup%', 5, 'Generic cup tournament'),
+    ('%Series%', 4, 'Generic series'),
+    ('%Tournament%', 4, 'Generic tournament');
+
+-- Promotion review flags table
+CREATE TABLE IF NOT EXISTS promotion_review_flags (
+    flag_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    team_id INTEGER NOT NULL REFERENCES teams(team_id),
+    format TEXT NOT NULL CHECK(format IN ('T20', 'ODI')),
+    gender TEXT NOT NULL CHECK(gender IN ('male', 'female')),
+    current_tier INTEGER NOT NULL CHECK(current_tier BETWEEN 1 AND 5),
+    suggested_tier INTEGER NOT NULL CHECK(suggested_tier BETWEEN 1 AND 5),
+    trigger_reason TEXT NOT NULL,
+    current_elo REAL NOT NULL,
+    months_at_ceiling INTEGER,
+    cross_tier_record TEXT,
+    flagged_date DATE DEFAULT CURRENT_DATE,
+    reviewed BOOLEAN DEFAULT FALSE,
+    reviewed_date DATE,
+    reviewer_notes TEXT,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(team_id, format, gender, reviewed)
+);
+
+CREATE INDEX IF NOT EXISTS idx_promotion_flags_pending ON promotion_review_flags(reviewed, flagged_date);
+CREATE INDEX IF NOT EXISTS idx_promotion_flags_team ON promotion_review_flags(team_id, format, gender);
 

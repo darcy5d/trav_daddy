@@ -61,24 +61,28 @@ class PlayerNameMatcher:
         conn = get_connection()
         cursor = conn.cursor()
         
-        # Get all players with their teams (for WBBL)
+        # Get all players with their teams (for both male and female)
         cursor.execute("""
             SELECT DISTINCT 
                 p.player_id, 
                 p.name,
-                t.name as team_name
+                p.espn_player_id,
+                t.name as team_name,
+                m.gender
             FROM players p
             JOIN player_match_stats pms ON p.player_id = pms.player_id
             JOIN teams t ON pms.team_id = t.team_id
             JOIN matches m ON pms.match_id = m.match_id
-            WHERE m.gender = 'female'
+            WHERE m.match_type = 'T20'
         """)
         
         for row in cursor.fetchall():
             player = {
                 'player_id': row['player_id'],
                 'name': row['name'],
-                'team_name': row['team_name']
+                'espn_player_id': row['espn_player_id'],
+                'team_name': row['team_name'],
+                'gender': row['gender']
             }
             
             self._player_cache[row['player_id']] = player
@@ -161,20 +165,35 @@ class PlayerNameMatcher:
         self, 
         api_name: str, 
         team_name: str = None,
-        role: str = None
+        role: str = None,
+        espn_player_id: int = None
     ) -> Optional[MatchResult]:
         """
         Find database player matching API name.
         
         Args:
-            api_name: Player name from Cricket Data API
+            api_name: Player name from Cricket Data API or ESPN
             team_name: Optional team name to narrow search
             role: Optional role (Batsman, Bowler, etc.) for disambiguation
+            espn_player_id: Optional ESPN player ID for exact matching
             
         Returns:
             MatchResult if found, None otherwise
         """
         self._initialize()
+        
+        # Strategy 0: ESPN ID match (most reliable)
+        if espn_player_id:
+            for player in self._player_cache.values():
+                if player.get('espn_player_id') == espn_player_id:
+                    logger.debug(f"ESPN ID match: {api_name} -> {player['name']} (ID: {espn_player_id})")
+                    return MatchResult(
+                        player_id=player['player_id'],
+                        db_name=player['name'],
+                        api_name=api_name,
+                        score=1.0,
+                        method='espn_id'
+                    )
         
         # Normalize team name for lookup
         team_key = None

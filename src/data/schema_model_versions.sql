@@ -25,3 +25,8 @@ CREATE INDEX IF NOT EXISTS idx_model_versions_is_active ON model_versions(is_act
 CREATE INDEX IF NOT EXISTS idx_model_versions_created_at ON model_versions(created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_model_versions_format ON model_versions(format_type);
 
+
+
+
+
+

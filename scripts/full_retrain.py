@@ -4,7 +4,7 @@ Full Model Retraining Script.
 
 Orchestrates the complete retraining pipeline:
 1. Re-ingest data from Cricsheet
-2. Calculate ELO ratings
+2. Calculate ELO ratings (tiered system V3)
 3. Build player distributions
 4. Build venue statistics
 5. Generate training features
@@ -13,6 +13,15 @@ Orchestrates the complete retraining pipeline:
 
 Usage:
     python scripts/full_retrain.py [--skip-ingest] [--skip-elo] [--male-only] [--female-only]
+
+Notes:
+    - ELO calculation uses the tiered system (V3) by default
+    - Use --skip-elo to skip ELO recalculation (recommended if no new matches added)
+    - ELO recalculation takes ~30 seconds for 11K matches
+    - Run without --skip-elo when:
+        * New matches have been downloaded
+        * Team tiers have been manually adjusted via admin API
+        * Testing ELO logic changes
 """
 
 import sys
@@ -33,6 +42,31 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
+def step_validate_schema():
+    """Step 0: Validate database schema before training."""
+    logger.info("=" * 60)
+    logger.info("STEP 0: SCHEMA VALIDATION")
+    logger.info("=" * 60)
+    
+    # Import validation script
+    from scripts.validate_schema import validate_schema, print_fix_suggestions
+    
+    is_valid, issues = validate_schema()
+    
+    if not is_valid:
+        logger.error("=" * 60)
+        logger.error("❌ SCHEMA VALIDATION FAILED")
+        logger.error("=" * 60)
+        logger.error("The database schema is missing required tables or columns.")
+        logger.error("Training cannot proceed until schema issues are resolved.")
+        logger.error("")
+        print_fix_suggestions(issues)
+        raise RuntimeError(f"Schema validation failed with {len(issues)} issue(s). See logs for details.")
+    
+    logger.info("✅ Schema validation passed - proceeding with training")
+    return True
+
+
 def step_ingest_data():
     """Step 1: Ingest data from Cricsheet JSON files."""
     logger.info("=" * 60)
@@ -48,18 +82,40 @@ def step_ingest_data():
     return stats
 
 
-def step_calculate_elo():
-    """Step 2: Calculate ELO ratings for teams and players."""
+def step_calculate_elo(use_tiered_system: bool = True):
+    """Step 2: Calculate ELO ratings for teams and players.
+    
+    Args:
+        use_tiered_system: If True, use calculator_v3 (tiered system).
+                          If False, use calculator_v2 (legacy system).
+    
+    Note: Tiered ELO calculation is expensive (~27s for 11K matches).
+          Should only be run when:
+          - New matches are added to the database
+          - Team tiers are manually adjusted
+          - Schema/logic changes require recalculation
+    """
     logger.info("=" * 60)
     logger.info("STEP 2: ELO CALCULATIONS")
     logger.info("=" * 60)
     
-    from src.elo.calculator_v2 import calculate_all_elos_v2
+    if use_tiered_system:
+        from src.elo.calculator_v3 import calculate_all_elos_v3
+        logger.info("Using tiered ELO system (V3)...")
+        
+        # Calculate ELOs for all matches (handles both genders internally)
+        stats = calculate_all_elos_v3(force_recalculate=False)
+        
+        logger.info(f"Tiered ELO calculation complete")
+    else:
+        from src.elo.calculator_v2 import calculate_all_elos_v2
+        logger.info("Using legacy ELO system (V2)...")
+        
+        # Calculate ELOs for all matches (handles both genders internally)
+        stats = calculate_all_elos_v2(force_recalculate=True)
+        
+        logger.info(f"Legacy ELO calculation complete")
     
-    # Calculate ELOs for all matches (handles both genders internally)
-    stats = calculate_all_elos_v2(force_recalculate=True)
-    
-    logger.info(f"ELO calculation complete")
     return stats
 
 
@@ -301,6 +357,13 @@ def run_full_pipeline(
     logger.info("FULL MODEL RETRAINING PIPELINE")
     logger.info(f"Started at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     logger.info("=" * 60)
+    
+    # Step 0: Validate schema before proceeding
+    try:
+        step_validate_schema()
+    except RuntimeError as e:
+        logger.error(f"Pipeline aborted: {e}")
+        return {'error': str(e), 'stage': 'schema_validation'}
     
     results = {}
     current_progress = 0

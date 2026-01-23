@@ -7,7 +7,7 @@ ESPN uses Next.js which embeds complete data in __NEXT_DATA__ script tags.
 
 Key pages:
 - Schedule: /live-cricket-match-schedule-fixtures?quick_class_id=t20
-- Match Preview: /series/{slug}/match-preview (contains venue + squad JSON)
+- Match Squads: /series/{slug}/match-squads (contains venue + FULL squad JSON with 15-20 players)
 """
 
 import json
@@ -208,8 +208,8 @@ class ESPNCricInfoScraper:
         for link in soup.select('a[href*="/series/"]'):
             href = link.get('href', '')
             
-            # Only match URLs that look like match pages (live-cricket-score or match-preview)
-            if '/live-cricket-score' not in href and '/match-preview' not in href:
+            # Only match URLs that look like match pages (live-cricket-score or match-preview or match-squads)
+            if '/live-cricket-score' not in href and '/match-preview' not in href and '/match-squads' not in href:
                 continue
             
             text = link.get_text(' ', strip=True)
@@ -285,8 +285,8 @@ class ESPNCricInfoScraper:
             ESPNMatch or None
         """
         # Extract match ID from URL
-        # Format: /series/series-slug-1234567/team1-vs-team2-match-1234568/live-cricket-score (or /match-preview)
-        match_id_match = re.search(r'-(\d+)/(?:live-cricket-score|match-preview)', href)
+        # Format: /series/series-slug-1234567/team1-vs-team2-match-1234568/live-cricket-score (or /match-preview or /match-squads)
+        match_id_match = re.search(r'-(\d+)/(?:live-cricket-score|match-preview|match-squads)', href)
         series_id_match = re.search(r'/series/[^/]+-(\d+)/', href)
         
         if not match_id_match:
@@ -430,8 +430,8 @@ class ESPNCricInfoScraper:
         # Detect gender
         gender = self._detect_gender(text + series_name)
         
-        # Build match URL for details page
-        match_url = self.BASE_URL + href.replace('/live-cricket-score', '/match-preview')
+        # Build match URL for details page - use match-squads to get FULL squad (15-20 players)
+        match_url = self.BASE_URL + href.replace('/live-cricket-score', '/match-squads')
         
         return ESPNMatch(
             espn_id=espn_id,
@@ -456,7 +456,7 @@ class ESPNCricInfoScraper:
         Get full match details including venue and squads.
         
         Args:
-            match_url: URL to match-preview page
+            match_url: URL to match-squads page (for full squad) or match-preview page
             
         Returns:
             ESPNMatch with full details or None
@@ -805,12 +805,13 @@ class ESPNCricInfoScraper:
         for player in team.players:
             result = self._name_matcher.find_player(
                 player.long_name or player.name,
-                db_team_name
+                db_team_name,
+                espn_player_id=player.espn_id
             )
             
             if result:
                 player.db_player_id = result.player_id
-                logger.debug(f"Matched '{player.name}' to '{result.db_name}' (ID: {result.player_id})")
+                logger.debug(f"Matched '{player.name}' to '{result.db_name}' (ID: {result.player_id}, method: {result.method})")
             
             matched_players.append(player)
         

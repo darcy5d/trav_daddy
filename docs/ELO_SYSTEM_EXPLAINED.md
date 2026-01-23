@@ -608,20 +608,324 @@ http://localhost:5001/rankings
 
 ---
 
+## Tiered ELO System (V3)
+
+###Why Tiered ELO?
+
+The original ELO system (V2) treated all teams equally, which led to unrealistic rankings:
+- **Problem**: Somerset (English county) ranked equal to Spain (national team)
+- **Problem**: Nepal ranked above New Zealand based on recent matches
+- **Problem**: No "prestige factor" - winning against India should mean more than beating Italy
+
+**Solution**: Introduce a 5-tier classification system with cross-pool normalization.
+
+### Tier Classification
+
+Teams are manually classified into 5 tiers based on prestige and competitive level:
+
+| Tier | Description | Initial ELO | Examples |
+|------|-------------|-------------|----------|
+| **T1** | Elite Full Members | 1650 | India, Australia, England, Pakistan, New Zealand, South Africa |
+| **T2** | Full Members | 1550 | West Indies, Sri Lanka, Bangladesh, Afghanistan, Ireland, Zimbabwe |
+| **T3** | Top Associates + Premier Franchises | 1450 | Nepal, UAE, IPL teams, BBL teams, CPL teams |
+| **T4** | Associates + Regional Franchises | 1350 | Malaysia, Thailand, SA domestic, Indian domestic |
+| **T5** | Emerging + Minor Leagues | 1250 | Italy, Spain, English counties, minor leagues |
+
+**Key Points**:
+- Classification is **manual and admin-reviewed** (not automatic)
+- Based on ICC status, tournament participation, and historical performance
+- Franchise teams (IPL, BBL) classified by league prestige
+
+### Cross-Pool K-Factor Adjustments
+
+When teams from different tiers play, K-factors are adjusted **asymmetrically**:
+
+```python
+tier_gap = abs(team1_tier - team2_tier)
+
+if tier_gap == 0:
+    # Same tier: no adjustment
+    k1, k2 = base_k1, base_k2
+    
+elif tier_gap == 1:
+    # 1 tier gap: slight asymmetry
+    higher_tier_k = base_k * 0.85   # Gain less, lose more
+    lower_tier_k = base_k * 1.15    # Gain more, lose less
+    
+elif tier_gap == 2:
+    # 2 tier gap: moderate asymmetry
+    higher_tier_k = base_k * 0.6
+    lower_tier_k = base_k * 1.4
+    
+else:  # >= 3 tiers
+    # 3+ tier gap: heavy asymmetry
+    higher_tier_k = base_k * 0.4
+    lower_tier_k = base_k * 1.6
+```
+
+**Effect**:
+- **India (T1) beats Uganda (T4)**: India gains +3 ELO, Uganda loses -12 ELO
+- **Uganda (T4) beats India (T1)**: Uganda gains +51 ELO, India loses -20 ELO
+
+This ensures upsets have maximum impact while protecting higher-tier teams from excessive losses in expected wins.
+
+### Prestige-Adjusted Expected Scores
+
+Beyond ELO difference, tier prestige provides a small boost to expected scores:
+
+```python
+base_expected = 1 / (1 + 10^((rating2 - rating1) / 400))
+
+# Tier prestige adjustment: +0.04 per tier gap (clamped to ±0.15)
+tier_gap = tier1 - tier2  # Negative if team1 is higher tier
+prestige_adjustment = 0.04 * tier_gap
+prestige_adjustment = clamp(prestige_adjustment, -0.15, 0.15)
+
+adjusted_expected = base_expected + prestige_adjustment
+adjusted_expected = clamp(adjusted_expected, 0.05, 0.95)
+```
+
+**Example**:
+- **India (T1, 1700 ELO) vs Uganda (T4, 1700 ELO)**
+  - Without prestige: Expected = 0.50 (50%)
+  - With prestige: Expected = 0.50 + (0.04 * -3) = 0.62 (62%)
+  - Effect: India gets 12% boost despite equal ELO
+
+### Tier Boundaries (Ceilings & Floors)
+
+Each tier has enforced ELO boundaries:
+
+| Tier | Floor | Ceiling | Range |
+|------|-------|---------|-------|
+| T1 | 1550 | 2500 | 950 points |
+| T2 | 1450 | 1950 | 500 points |
+| T3 | 1350 | 1800 | 450 points |
+| T4 | 1250 | 1700 | 450 points |
+| T5 | 1150 | 1600 | 450 points |
+
+**Effect**:
+- **Ceiling**: Teams hitting ceiling are flagged for promotion review
+- **Floor**: Teams at floor for 6+ months are flagged for demotion review
+- **Natural stratification**: Prevents tier 5 teams from reaching tier 1 ELOs
+
+### Tournament Tier Classification
+
+Matches are classified by a **hybrid system**:
+
+1. **Base tier from tournament pattern**:
+   ```sql
+   '%T20 World Cup%'        → Tier 1
+   '%tour of%'              → Tier 2 (bilateral series)
+   '%Indian Premier League%' → Tier 3 (franchise)
+   '%Asia Cup%'             → Tier 4 (regional)
+   '%County%'               → Tier 5 (domestic)
+   ```
+
+2. **Adjustment based on teams involved**:
+   - If both teams are higher tier than series → **Upgrade match by 1 tier**
+   - If both teams are lower tier than series → **Downgrade match by 1 tier**
+
+3. **Tournament weight multiplier**:
+   ```python
+   tier_1_weight = 1.3  # World Cup: 30% more volatile
+   tier_2_weight = 1.0  # Bilateral: baseline
+   tier_3_weight = 0.9  # Franchise: slightly less
+   tier_4_weight = 0.8  # Regional: moderately less
+   tier_5_weight = 0.7  # Domestic: 30% less volatile
+   ```
+
+**Example**:
+- **India vs Australia in T20 World Cup**:
+  - Tournament: Tier 1
+  - Teams: Both Tier 1
+  - Match tier: 1 (no adjustment)
+  - K-factor: 40 * 1.3 = **52** (high volatility)
+
+- **Somerset vs Surrey in County Championship**:
+  - Tournament: Tier 5
+  - Teams: Both Tier 5
+  - Match tier: 5 (no adjustment)
+  - K-factor: 16 * 0.7 = **11.2** (low volatility)
+
+### Promotion Review System
+
+Teams are automatically **flagged for admin review** based on:
+
+#### Trigger 1: At Ceiling (Promotion)
+- ELO within 30 points of tier ceiling
+- Sustained for **6+ consecutive months**
+- **Action**: Flag for promotion to higher tier
+
+#### Trigger 2: Strong Cross-Tier Record (Promotion)
+- Played **10+ matches** against higher-tier teams in last 12 months
+- Win rate **≥40%** against higher tier
+- **Action**: Flag for promotion
+
+#### Trigger 3: At Floor (Demotion)
+- ELO within 30 points of tier floor
+- Sustained for **6+ consecutive months**
+- **Action**: Flag for demotion to lower tier
+
+#### Admin Review Process
+
+1. **System generates flag**:
+   ```sql
+   INSERT INTO promotion_review_flags (
+     team_id, format, gender, current_tier, suggested_tier,
+     trigger_reason, current_elo, months_at_ceiling
+   ) VALUES (...);
+   ```
+
+2. **Admin reviews via API**:
+   ```bash
+   GET /api/admin/promotion-flags
+   
+   # Returns:
+   [
+     {
+       "flag_id": 12,
+       "team": "Nepal",
+       "current_tier": 3,
+       "suggested_tier": 2,
+       "reason": "At ceiling (1798) for 8 months",
+       "current_elo": 1798,
+       "format": "T20",
+       "gender": "male"
+     }
+   ]
+   ```
+
+3. **Admin approves or rejects**:
+   ```bash
+   # Approve promotion
+   POST /api/admin/promotion-flags/12/approve
+   
+   # Reject (keep current tier)
+   POST /api/admin/promotion-flags/12/reject
+   ```
+
+4. **On approval**:
+   - Team's `tier` column updated in database
+   - Flag marked as `reviewed = TRUE`
+   - Team's ELO reset to new tier's initial rating
+   - Future matches use new tier classification
+
+### Validation & Verification
+
+Run validation checks:
+
+```bash
+python scripts/validate_tiered_elo.py --format T20 --gender male
+```
+
+**Checks performed**:
+1. ✓ **Sanity**: Elite teams (India, Australia, England) in top 10?
+2. ✓ **Tier integrity**: Average ELO decreases as tier increases?
+3. ✓ **Boundary enforcement**: All teams within their tier's ceiling/floor?
+4. ℹ️ **Promotion flags**: Lists pending reviews for admin action
+
+**Example output**:
+```
+Top 15 Teams (T20 MALE):
+1. [T1] India           1929 ✓
+2. [T1] Australia       1858 ✓
+3. [T1] England         1766 ✓
+...
+
+Tier Integrity:
+T1: Avg 1763 (6 teams)
+T2: Avg 1518 (5 teams)
+T4: Avg 1360 (283 teams)
+T5: Avg 1255 (59 teams)
+
+✓ All validation checks passed
+```
+
+### Recalculation Script
+
+For full historical recalculation (2019-2025):
+
+```bash
+cd /Users/darcy5d/Desktop/DD_AI_models/indias_dad
+python scripts/recalculate_tiered_elo.py
+```
+
+**What it does**:
+1. Creates database backup
+2. Applies tier schema changes (adds tier columns, creates tables)
+3. Classifies ~200 teams into tiers
+4. Resets all ELO ratings to tier-based initial values
+5. Recalculates **all 11,309 matches** chronologically
+6. Generates promotion review flags
+7. Creates validation report
+
+**Duration**: ~30 seconds for 11K matches
+
+### Configuration
+
+**Tier K-Factors** (`src/elo/calculator_v3.py`):
+```python
+TIER_K_FACTORS = {
+    1: 40,  # Elite: high volatility (World Cup impact)
+    2: 32,  # Full members: baseline
+    3: 24,  # Top associates/franchises
+    4: 20,  # Associates/regional
+    5: 16,  # Emerging/minor leagues
+}
+```
+
+**Tier Boundaries**:
+```python
+TIER_CEILINGS = {1: 2500, 2: 1950, 3: 1800, 4: 1700, 5: 1600}
+TIER_FLOORS = {1: 1550, 2: 1450, 3: 1350, 4: 1250, 5: 1150}
+TIER_INITIAL_RATINGS = {1: 1650, 2: 1550, 3: 1450, 4: 1350, 5: 1250}
+```
+
+### UI Integration
+
+**Rankings Page** (`/rankings`):
+- **International Tab**: Tiers 1-2 (full member nations)
+- **Regional/Associate Tab**: Tiers 3-4 (associates + franchises)
+- **Domestic Tab**: Tier 5 (counties, minor leagues)
+- **All Teams Tab**: Combined view
+
+**Tier badges**:
+- T1: 🥇 Gold
+- T2: 🥈 Silver
+- T3: 🥉 Bronze
+- T4: 🔵 Blue
+- T5: ⚫ Gray
+
+### Key Insights
+
+1. **Realistic Rankings**: India (1929) >> Somerset (1407) now reflects reality
+2. **Meaningful Upsets**: Uganda beating India = massive ELO swing
+3. **Prestige Preserved**: Elite teams maintain 1550+ ELO floor
+4. **Natural Stratification**: Tier boundaries prevent unrealistic crossovers
+5. **Transparent Reviews**: Admin API allows manual tier adjustments
+
+---
+
 ## Summary
 
-The ELO system provides a **dynamic, context-aware, temporally-accurate** measure of team and player skill across multiple dimensions:
+The ELO system provides a **dynamic, context-aware, temporally-accurate, tier-stratified** measure of team and player skill across multiple dimensions:
 
 ✓ **16 separate rating tracks** (4 format×gender combos, each with team + 3 player types)  
+✓ **5-tier classification** with cross-pool normalization  
+✓ **Asymmetric K-factors** protect elite teams from volatility  
+✓ **Prestige adjustments** reward wins against stronger opponents  
 ✓ **Match-by-match updates** preserve full history  
 ✓ **Monthly snapshots** enable historical queries  
 ✓ **Opponent-adjusted** performance scoring  
 ✓ **Denormalized current tables** for fast API responses  
 ✓ **Temporal accuracy** for ML training  
+✓ **Automatic promotion review** with admin approval workflow  
 
-This powers the prediction engine by providing accurate skill assessments for the Monte Carlo simulation's neural network inputs.
+This powers the prediction engine by providing **realistic** skill assessments for the Monte Carlo simulation's neural network inputs.
 
 ---
 
-*For implementation details, see `src/elo/calculator_v2.py` and `src/data/schema_v2.sql`*
+*For implementation details, see:*
+- *V3 (Tiered): `src/elo/calculator_v3.py` and `src/data/schema_v3_tiered_elo.sql`*
+- *V2 (Legacy): `src/elo/calculator_v2.py` and `src/data/schema_v2.sql`*
 

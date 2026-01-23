@@ -3,9 +3,94 @@
 {% block title %}ELO Rankings - Cricket Predictor{% endblock %}
 
 {% block content %}
+<style>
+    .tier-badge {
+        display: inline-block;
+        padding: 0.2rem 0.5rem;
+        border-radius: 0.25rem;
+        font-size: 0.7rem;
+        font-weight: bold;
+        margin-right: 0.5rem;
+    }
+    .tier-1 { background-color: #FFD700; color: #000; }  /* Gold */
+    .tier-2 { background-color: #C0C0C0; color: #000; }  /* Silver */
+    .tier-3 { background-color: #CD7F32; color: #fff; }  /* Bronze */
+    .tier-4 { background-color: #4169E1; color: #fff; }  /* Royal Blue */
+    .tier-5 { background-color: #808080; color: #fff; }  /* Gray */
+    
+    .tabs {
+        display: flex;
+        gap: 0.5rem;
+        border-bottom: 2px solid var(--border-color);
+        margin-bottom: 1.5rem;
+    }
+    
+    .tab {
+        padding: 0.75rem 1.5rem;
+        cursor: pointer;
+        border-bottom: 3px solid transparent;
+        color: var(--text-muted);
+        transition: all 0.2s;
+    }
+    
+    .tab:hover {
+        color: var(--text-primary);
+        background-color: var(--card-bg-hover);
+    }
+    
+    .tab.active {
+        color: var(--accent-primary);
+        border-bottom-color: var(--accent-primary);
+    }
+    
+    .elo-change {
+        font-size: 0.8rem;
+        margin-left: 0.5rem;
+    }
+    
+    .elo-change.positive { color: #10B981; }
+    .elo-change.negative { color: #EF4444; }
+    
+    .ranking-row {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        padding: 0.75rem 0;
+        border-bottom: 1px solid var(--border-color);
+    }
+    
+    .ranking-row:hover {
+        background-color: var(--card-bg-hover);
+        padding-left: 0.5rem;
+        padding-right: 0.5rem;
+        margin-left: -0.5rem;
+        margin-right: -0.5rem;
+        border-radius: 0.25rem;
+    }
+    
+    .rank-num {
+        color: var(--text-muted);
+        width: 2.5rem;
+        display: inline-block;
+        font-weight: bold;
+    }
+    
+    .team-info {
+        flex: 1;
+        display: flex;
+        align-items: center;
+    }
+    
+    .team-meta {
+        color: var(--text-muted);
+        font-size: 0.75rem;
+        margin-left: 0.5rem;
+    }
+</style>
+
 <div class="hero" style="padding: 2rem;">
     <h1>ELO Rankings</h1>
-    <p id="rankings-subtitle">Current T20 Men's ratings based on historical performance</p>
+    <p id="rankings-subtitle">Current T20 Men's ratings based on historical performance (Tiered System V3)</p>
 </div>
 
 <!-- Filter Controls -->
@@ -25,13 +110,12 @@
             </select>
         </div>
         <div class="form-group">
-            <label>Min Matches (Teams)</label>
+            <label>Min Matches</label>
             <select id="min-matches-select" onchange="loadRankings()">
                 <option value="5">5+</option>
                 <option value="10" selected>10+</option>
                 <option value="20">20+</option>
                 <option value="30">30+</option>
-                <option value="50">50+</option>
             </select>
         </div>
         <div class="form-group">
@@ -43,10 +127,35 @@
     </div>
 </div>
 
+<!-- Tier Statistics Banner -->
+<div class="card" style="margin-bottom: 1.5rem; background: linear-gradient(135deg, var(--card-bg) 0%, var(--card-bg-hover) 100%);">
+    <div id="tier-stats-banner" style="display: flex; justify-content: space-between; align-items: center;">
+        <div class="loading"><div class="spinner"></div></div>
+    </div>
+</div>
+
+<!-- Tier Tabs -->
+<div class="card" style="margin-bottom: 0; padding-bottom: 0;">
+    <div class="tabs">
+        <div class="tab active" onclick="selectTierView('international')" id="tab-international">
+            International
+        </div>
+        <div class="tab" onclick="selectTierView('regional')" id="tab-regional">
+            Regional / Associate
+        </div>
+        <div class="tab" onclick="selectTierView('domestic')" id="tab-domestic">
+            Domestic
+        </div>
+        <div class="tab" onclick="selectTierView('all')" id="tab-all">
+            All Teams
+        </div>
+    </div>
+</div>
+
 <div class="grid grid-3">
     <!-- Team Rankings -->
     <div class="card">
-        <h2 class="card-title">Team Rankings</h2>
+        <h2 class="card-title">Team Rankings <span id="tier-filter-label"></span></h2>
         <div id="team-rankings">
             <div class="loading"><div class="spinner"></div></div>
         </div>
@@ -72,6 +181,77 @@
 
 {% block scripts %}
 <script>
+    let currentTierView = 'international';  // 'international', 'regional', 'domestic', 'all'
+    
+    function selectTierView(view) {
+        currentTierView = view;
+        
+        // Update tab active state
+        ['international', 'regional', 'domestic', 'all'].forEach(v => {
+            const tab = document.getElementById(`tab-${v}`);
+            if (v === view) {
+                tab.classList.add('active');
+            } else {
+                tab.classList.remove('active');
+            }
+        });
+        
+        loadRankings();
+    }
+    
+    function getTierFilterParams() {
+        // Return tier filter based on current view
+        if (currentTierView === 'international') {
+            return { tiers: [1, 2], label: '(Tiers 1-2)' };
+        } else if (currentTierView === 'regional') {
+            return { tiers: [3, 4], label: '(Tiers 3-4)' };
+        } else if (currentTierView === 'domestic') {
+            return { tiers: [5], label: '(Tier 5)' };
+        } else {
+            return { tiers: null, label: '(All Tiers)' };
+        }
+    }
+    
+    async function loadTierStatistics() {
+        try {
+            const response = await fetch('/api/rankings/tier-stats');
+            const data = await response.json();
+            
+            if (data.success) {
+                const banner = document.getElementById('tier-stats-banner');
+                const tierBadges = data.tier_counts.map(t => {
+                    return `<div style="text-align: center;">
+                        <div class="tier-badge tier-${t.tier}">T${t.tier}</div>
+                        <div style="font-size: 0.8rem; color: var(--text-muted); margin-top: 0.25rem;">
+                            ${t.team_count} teams
+                        </div>
+                        <div style="font-size: 0.7rem; color: var(--text-muted);">
+                            ${t.name}
+                        </div>
+                    </div>`;
+                }).join('');
+                
+                const flagsInfo = data.pending_promotion_flags > 0 
+                    ? `<div style="text-align: center; color: var(--accent-warning);">
+                        <div style="font-size: 1.2rem; font-weight: bold;">⚠️ ${data.pending_promotion_flags}</div>
+                        <div style="font-size: 0.8rem;">Pending Reviews</div>
+                       </div>`
+                    : `<div style="text-align: center; color: var(--text-success);">
+                        <div style="font-size: 1.2rem; font-weight: bold;">✓</div>
+                        <div style="font-size: 0.8rem;">All tiers reviewed</div>
+                       </div>`;
+                
+                banner.innerHTML = `
+                    ${tierBadges}
+                    <div style="width: 2px; background: var(--border-color); height: 3rem;"></div>
+                    ${flagsInfo}
+                `;
+            }
+        } catch (error) {
+            console.error('Error loading tier statistics:', error);
+        }
+    }
+    
     async function loadAvailableMonths() {
         try {
             const response = await fetch('/api/rankings/months');
@@ -82,7 +262,6 @@
                 data.months.forEach(month => {
                     const option = document.createElement('option');
                     option.value = month;
-                    // Format as "Nov 2025" style
                     const [year, mon] = month.split('-');
                     const monthNames = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
                     option.textContent = `${monthNames[parseInt(mon) - 1]} ${year}`;
@@ -99,112 +278,102 @@
         const gender = document.getElementById('gender-select').value;
         const minMatches = document.getElementById('min-matches-select').value;
         const month = document.getElementById('month-select').value;
+        const tierFilter = getTierFilterParams();
         
         // Update subtitle
         const genderText = gender === 'male' ? "Men's" : "Women's";
         const periodText = month ? `${month}` : 'Current';
         document.getElementById('rankings-subtitle').textContent = 
-            `${periodText} ${format} ${genderText} ratings (min ${minMatches} matches)`;
+            `${periodText} ${format} ${genderText} ratings (min ${minMatches} matches) - Tiered System V3`;
         
-        // Build query string
-        const params = new URLSearchParams({
-            format: format,
-            gender: gender,
-            min_matches: minMatches
-        });
-        if (month) params.append('month', month);
+        // Update tier filter label
+        document.getElementById('tier-filter-label').textContent = tierFilter.label;
         
         // Show loading
-        ['team-rankings', 'batting-rankings', 'bowling-rankings'].forEach(id => {
-            document.getElementById(id).innerHTML = '<div class="loading"><div class="spinner"></div></div>';
-        });
+        document.getElementById('team-rankings').innerHTML = '<div class="loading"><div class="spinner"></div></div>';
         
-        // Load team rankings
+        // Load team rankings for each tier in the current view
         try {
-            const teamResponse = await fetch(`/api/rankings/teams?${params}`);
-            const teamData = await teamResponse.json();
+            const tiers = tierFilter.tiers;
+            let allTeams = [];
             
-            if (teamData.success) {
-                const container = document.getElementById('team-rankings');
-                if (teamData.rankings.length === 0) {
-                    container.innerHTML = '<p style="color: var(--text-muted); text-align: center;">No teams meet the criteria</p>';
-                } else {
-                    container.innerHTML = teamData.rankings.map((t, i) => `
-                        <div style="display: flex; justify-content: space-between; padding: 0.75rem 0; border-bottom: 1px solid var(--border-color);">
-                            <div>
-                                <span style="color: var(--text-muted); width: 2rem; display: inline-block;">${i + 1}.</span>
-                                <span>${t.name}</span>
-                                <span style="color: var(--text-muted); font-size: 0.7rem; margin-left: 0.5rem;">(${t.matches})</span>
-                            </div>
-                            <span style="font-family: 'JetBrains Mono', monospace; color: var(--accent-primary);">
-                                ${t.elo}
-                            </span>
-                        </div>
-                    `).join('');
+            if (tiers === null) {
+                // Load all teams
+                const params = new URLSearchParams({
+                    format: format,
+                    gender: gender,
+                    min_matches: minMatches,
+                    limit: 100
+                });
+                if (month) params.append('month', month);
+                
+                const response = await fetch(`/api/rankings/teams?${params}`);
+                const data = await response.json();
+                if (data.success) {
+                    allTeams = data.rankings;
                 }
+            } else {
+                // Load teams for each tier
+                for (const tier of tiers) {
+                    const params = new URLSearchParams({
+                        format: format,
+                        gender: gender,
+                        min_matches: minMatches,
+                        tier: tier,
+                        limit: 100
+                    });
+                    if (month) params.append('month', month);
+                    
+                    const response = await fetch(`/api/rankings/teams?${params}`);
+                    const data = await response.json();
+                    if (data.success) {
+                        allTeams = allTeams.concat(data.rankings);
+                    }
+                }
+            }
+            
+            // Sort by ELO
+            allTeams.sort((a, b) => b.elo - a.elo);
+            
+            // Render teams
+            const container = document.getElementById('team-rankings');
+            if (allTeams.length === 0) {
+                container.innerHTML = '<p style="color: var(--text-muted); text-align: center;">No teams meet the criteria</p>';
+            } else {
+                container.innerHTML = allTeams.map((t, i) => {
+                    const eloChange = t.elo_change_30d || 0;
+                    const changeClass = eloChange > 0 ? 'positive' : eloChange < 0 ? 'negative' : '';
+                    const changeSymbol = eloChange > 0 ? '↑' : eloChange < 0 ? '↓' : '';
+                    
+                    return `
+                        <div class="ranking-row">
+                            <div class="team-info">
+                                <span class="rank-num">${i + 1}.</span>
+                                <span class="tier-badge tier-${t.tier}">T${t.tier}</span>
+                                <span>${t.name}</span>
+                                <span class="team-meta">(${t.matches} matches)</span>
+                            </div>
+                            <div style="text-align: right;">
+                                <span style="font-family: 'JetBrains Mono', monospace; color: var(--accent-primary); font-weight: bold;">
+                                    ${t.elo}
+                                </span>
+                                ${eloChange !== 0 ? `<span class="elo-change ${changeClass}">${changeSymbol}${Math.abs(eloChange)}</span>` : ''}
+                            </div>
+                        </div>
+                    `;
+                }).join('');
             }
         } catch (error) {
             console.error('Error loading team rankings:', error);
+            document.getElementById('team-rankings').innerHTML = 
+                '<p style="color: var(--accent-error); text-align: center;">Error loading rankings</p>';
         }
         
-        // Load batting rankings (only for current, not historical)
+        // Load player rankings (only for current, not historical)
         if (!month) {
-            try {
-                const battingResponse = await fetch(`/api/rankings/batting?${params}&min_matches=5`);
-                const battingData = await battingResponse.json();
-                
-                if (battingData.success) {
-                    const container = document.getElementById('batting-rankings');
-                    if (battingData.rankings.length === 0) {
-                        container.innerHTML = '<p style="color: var(--text-muted); text-align: center;">No players meet the criteria</p>';
-                    } else {
-                        container.innerHTML = battingData.rankings.map((p, i) => `
-                            <div style="display: flex; justify-content: space-between; padding: 0.75rem 0; border-bottom: 1px solid var(--border-color);">
-                                <div style="flex: 1;">
-                                    <span style="color: var(--text-muted); width: 2rem; display: inline-block;">${i + 1}.</span>
-                                    <span>${p.name}</span>
-                                    <span style="color: var(--text-muted); font-size: 0.7rem; display: block; margin-left: 2rem;">${p.team || ''}</span>
-                                </div>
-                                <span style="font-family: 'JetBrains Mono', monospace; color: var(--accent-secondary);">
-                                    ${p.elo}
-                                </span>
-                            </div>
-                        `).join('');
-                    }
-                }
-            } catch (error) {
-                console.error('Error loading batting rankings:', error);
-            }
-            
-            // Load bowling rankings
-            try {
-                const bowlingResponse = await fetch(`/api/rankings/bowling?${params}&min_matches=5`);
-                const bowlingData = await bowlingResponse.json();
-                
-                if (bowlingData.success) {
-                    const container = document.getElementById('bowling-rankings');
-                    if (bowlingData.rankings.length === 0) {
-                        container.innerHTML = '<p style="color: var(--text-muted); text-align: center;">No players meet the criteria</p>';
-                    } else {
-                        container.innerHTML = bowlingData.rankings.map((p, i) => `
-                            <div style="display: flex; justify-content: space-between; padding: 0.75rem 0; border-bottom: 1px solid var(--border-color);">
-                                <div style="flex: 1;">
-                                    <span style="color: var(--text-muted); width: 2rem; display: inline-block;">${i + 1}.</span>
-                                    <span>${p.name}</span>
-                                    <span style="color: var(--text-muted); font-size: 0.7rem; display: block; margin-left: 2rem;">${p.team || ''}</span>
-                                </div>
-                                <span style="font-family: 'JetBrains Mono', monospace; color: var(--accent-warning);">
-                                    ${p.elo}
-                                </span>
-                            </div>
-                        `).join('');
-                    }
-                }
-            } catch (error) {
-                console.error('Error loading bowling rankings:', error);
-            }
+            loadPlayerRankings('batting', format, gender);
+            loadPlayerRankings('bowling', format, gender);
         } else {
-            // For historical months, show message that player data is not available
             document.getElementById('batting-rankings').innerHTML = 
                 '<p style="color: var(--text-muted); text-align: center; font-size: 0.9rem;">Player history not available.<br>Select "Current" to view player rankings.</p>';
             document.getElementById('bowling-rankings').innerHTML = 
@@ -212,8 +381,49 @@
         }
     }
     
+    async function loadPlayerRankings(type, format, gender) {
+        try {
+            const params = new URLSearchParams({
+                format: format,
+                gender: gender,
+                min_matches: 5
+            });
+            
+            const response = await fetch(`/api/rankings/${type}?${params}`);
+            const data = await response.json();
+            
+            if (data.success) {
+                const containerId = `${type}-rankings`;
+                const container = document.getElementById(containerId);
+                const accentColor = type === 'batting' ? 'var(--accent-secondary)' : 'var(--accent-warning)';
+                
+                if (data.rankings.length === 0) {
+                    container.innerHTML = '<p style="color: var(--text-muted); text-align: center;">No players meet the criteria</p>';
+                } else {
+                    container.innerHTML = data.rankings.map((p, i) => `
+                        <div class="ranking-row">
+                            <div class="team-info">
+                                <span class="rank-num">${i + 1}.</span>
+                                <div style="flex: 1;">
+                                    <div>${p.name}</div>
+                                    <div style="color: var(--text-muted); font-size: 0.7rem; margin-left: 0;">${p.team || ''}</div>
+                                </div>
+                            </div>
+                            <span style="font-family: 'JetBrains Mono', monospace; color: ${accentColor}; font-weight: bold;">
+                                ${p.elo}
+                            </span>
+                        </div>
+                    `).join('');
+                }
+            }
+        } catch (error) {
+            console.error(`Error loading ${type} rankings:`, error);
+        }
+    }
+    
     // Load on page ready
     document.addEventListener('DOMContentLoaded', () => {
+        loadTierStatistics();
         loadAvailableMonths();
         loadRankings();
     });

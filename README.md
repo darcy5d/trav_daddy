@@ -7,7 +7,7 @@ A neural network-powered Monte Carlo simulation system for predicting T20 cricke
 ### Core Prediction Engine
 - **Neural Network Ball-by-Ball Simulation**: Predicts individual ball outcomes (dot, single, boundary, wicket) using a trained deep learning model
 - **Monte Carlo Simulation**: Run 1,000-10,000 match simulations to generate win probabilities with real-time progress streaming
-- **ELO Rating System**: Tracks team and player ratings with historical snapshots
+- **Tiered ELO Rating System (V3)**: Advanced 5-tier classification system with cross-pool normalization, prestige adjustments, and asymmetric K-factors for realistic team and player rankings
 - **Men's & Women's Cricket**: Separate models trained on men's and women's T20 data
 - **Toss Simulation**: Per-match toss outcomes simulated based on historical data
 - **ESPN-Style Scorecards**: View detailed sample scorecards from simulations
@@ -24,7 +24,8 @@ A neural network-powered Monte Carlo simulation system for predicting T20 cricke
 - **Global Timezone Selector**: View all match times in your preferred timezone (defaults to Melbourne)
 - **Dynamic Time Conversion**: All timestamps (match times, training dates, model versions) respect timezone selection
 - **Data & Training Management**: Comprehensive GUI for managing models, data downloads, and retraining
-- **Team Rankings**: View ELO rankings for teams and players
+- **Tiered Team Rankings**: View ELO rankings with International/Regional/Domestic tabs, tier badges, and 30-day ELO change indicators
+- **Admin Promotion Review**: API endpoints for reviewing and approving tier adjustments for teams
 - **Responsive Design**: Modern, clean interface with real-time updates
 
 ### Data Management & Training
@@ -60,11 +61,12 @@ python app/main.py
 python -m src.data.downloader
 python -m src.data.ingest
 
-# 3. Calculate ELO ratings
-python -m src.elo.calculator_v2
+# 3. Calculate ELO ratings (tiered system)
+python scripts/recalculate_tiered_elo.py  # One-time full recalculation
+# Or use legacy system: python -m src.elo.calculator_v2
 
 # 4. Train neural network (optional - or use GUI)
-python scripts/full_retrain.py
+python scripts/full_retrain.py  # Uses tiered ELO as features
 
 # 5. Run the web app
 python app/main.py
@@ -136,13 +138,16 @@ Visit `http://localhost:5001` in your browser.
 │   │   ├── ball_training_data.py   # Training data generation
 │   │   └── lineup_service.py       # Recent lineup fetching
 │   ├── elo/             # ELO rating system
-│   │   └── calculator_v2.py       # ELO calculation engine
+│   │   ├── calculator_v2.py       # Legacy ELO calculator
+│   │   └── calculator_v3.py       # Tiered ELO calculator (V3)
 │   └── utils/
 │       └── job_manager.py         # Background job management
 ├── scripts/
-│   ├── full_retrain.py       # Complete retraining pipeline
-│   ├── capture_baseline.py   # Database metrics snapshot
-│   └── migrate_venues.py     # Venue schema migration
+│   ├── full_retrain.py            # Complete retraining pipeline (uses V3 ELO)
+│   ├── recalculate_tiered_elo.py  # Full tiered ELO recalculation
+│   ├── validate_tiered_elo.py     # Validation & sanity checks
+│   ├── capture_baseline.py        # Database metrics snapshot
+│   └── migrate_venues.py          # Venue schema migration
 ├── data/
 │   ├── raw/             # Cricsheet JSON files
 │   ├── processed/       # Training data, models, distributions
@@ -174,11 +179,21 @@ Visit `http://localhost:5001` in your browser.
 |----------|--------|-------------|
 | `/api/simulate-stream` | POST | Run simulation with real-time progress stream |
 
-### Rankings
+### Rankings (Tiered ELO System V3)
 | Endpoint | Method | Description |
 |----------|--------|-------------|
-| `/api/rankings/teams` | GET | Team ELO rankings |
-| `/api/rankings/players` | GET | Player ELO rankings |
+| `/api/rankings/teams` | GET | Team ELO rankings with tier filtering (`?tier=1&format=T20&gender=male`) |
+| `/api/rankings/batting` | GET | Player batting ELO rankings |
+| `/api/rankings/bowling` | GET | Player bowling ELO rankings |
+| `/api/rankings/tier-stats` | GET | Team counts by tier and pending promotion flags |
+| `/api/rankings/months` | GET | Available historical months for rankings |
+
+### Admin (Tier Management)
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/api/admin/promotion-flags` | GET | List pending tier promotion/demotion reviews |
+| `/api/admin/promotion-flags/<id>/approve` | POST | Approve tier change for a team |
+| `/api/admin/promotion-flags/<id>/reject` | POST | Reject tier change request |
 
 ### Data & Training Management
 | Endpoint | Method | Description |
@@ -215,6 +230,10 @@ Optimized for Apple Silicon (M2 Pro):
 - **Smart Venue Matching**: Fuzzy matching with gender-aware filtering and match count tie-breakers
 
 ### Recent Improvements
+- **Tiered ELO System (V3)**: Complete 5-tier classification with cross-pool normalization, prestige adjustments, and automatic promotion review
+- **Realistic Rankings**: India (1929) >> Somerset (1407) now reflects actual team strength hierarchy
+- **Tier Badges & UI**: International/Regional/Domestic tabs with color-coded tier badges and 30-day ELO changes
+- **Validation Framework**: Automated sanity checks and validation reports for ELO system integrity
 - **UTC Timestamp Handling**: Proper parsing of database timestamps for timezone conversion
 - **Navbar Consistency**: Global timezone selector visible on all pages
 - **Match Type Column**: Future-proofing for ODI/Test model support
