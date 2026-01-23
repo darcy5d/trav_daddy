@@ -2458,6 +2458,256 @@ def get_espn_match():
 
 
 # ============================================================================
+# CREX Endpoints (Web Scraping - replaces ESPN)
+# ============================================================================
+
+_crex_scraper = None
+
+
+def get_crex_scraper():
+    """Get or initialize the CREX scraper."""
+    global _crex_scraper
+    if _crex_scraper is None:
+        from src.api.crex_scraper import CREXScraper
+        _crex_scraper = CREXScraper(request_delay=1.0)
+        logger.info("CREX scraper initialized")
+    return _crex_scraper
+
+
+@app.route('/api/crex/upcoming', methods=['GET'])
+def get_crex_upcoming():
+    """
+    Get upcoming T20 matches from CREX.
+    
+    Query params:
+        format: 'T20' or 'ODI' (default 'T20')
+        
+    Returns:
+        List of upcoming matches with basic info, grouped by series
+    """
+    try:
+        format_type = request.args.get('format', 'T20')
+        formats = [format_type] if format_type else None
+        
+        scraper = get_crex_scraper()
+        matches = scraper.get_schedule(formats=formats)
+        
+        # Group by series
+        series_dict = {}
+        for m in matches:
+            series_key = m.series_name or 'Other'
+            if series_key not in series_dict:
+                series_dict[series_key] = {
+                    'series_name': m.series_name,
+                    'series_id': m.series_id,
+                    'gender': m.gender,
+                    'matches': []
+                }
+            
+            series_dict[series_key]['matches'].append({
+                'crex_id': m.crex_id,
+                'title': m.title,
+                'team1': m.team1_name,
+                'team2': m.team2_name,
+                'team1_id': m.team1_id,
+                'team2_id': m.team2_id,
+                'match_type': m.match_type,
+                'format': m.format_type,
+                'slug': m.slug,
+                'status': m.status,
+                'start_date': m.start_date,
+                'start_time': m.start_time,
+                'date_time_gmt': m.date_time_gmt,
+                'match_url': m.match_url,
+                'gender': m.gender
+            })
+        
+        result = {
+            'success': True,
+            'source': 'crex',
+            'matches_by_series': list(series_dict.values()),
+            'total_matches': len(matches)
+        }
+        
+        return jsonify(result)
+    
+    except Exception as e:
+        logger.error(f"Error fetching CREX upcoming matches: {e}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/crex/match', methods=['GET'])
+def get_crex_match():
+    """
+    Get full match details from CREX including venue and squads.
+    
+    Query params:
+        url: The match info URL from CREX
+        
+    Returns:
+        Match details with venue, venue stats, and squad data matched to database
+    """
+    try:
+        match_url = request.args.get('url')
+        if not match_url:
+            return jsonify({'success': False, 'error': 'url parameter required'}), 400
+        
+        scraper = get_crex_scraper()
+        match = scraper.get_match_details(match_url)
+        
+        if not match:
+            return jsonify({'success': False, 'error': 'Failed to fetch match from CREX'}), 404
+        
+        # Match venue to database
+        venue_db = None
+        if match.venue:
+            venue_match = scraper.match_venue_to_db(match.venue, match.gender)
+            if venue_match:
+                venue_db = {'venue_id': venue_match[0], 'name': venue_match[1]}
+        
+        # Match teams to database
+        team1_db = None
+        team2_db = None
+        if match.team1:
+            team_match = scraper.match_team_to_db(match.team1, match.gender)
+            if team_match:
+                team1_db = {'team_id': team_match[0], 'name': team_match[1]}
+                # Match players
+                scraper.match_players_to_db(match.team1, team_match[1], match.gender)
+        
+        if match.team2:
+            team_match = scraper.match_team_to_db(match.team2, match.gender)
+            if team_match:
+                team2_db = {'team_id': team_match[0], 'name': team_match[1]}
+                # Match players
+                scraper.match_players_to_db(match.team2, team_match[1], match.gender)
+        
+        def team_to_dict(team):
+            if not team:
+                return None
+            return {
+                'crex_id': team.crex_id,
+                'name': team.name,
+                'abbreviation': team.abbreviation,
+                'db_team_id': team.db_team_id,
+                'players': [
+                    {
+                        'crex_id': p.crex_id,
+                        'name': p.name,
+                        'short_name': p.short_name,
+                        'role': p.role,
+                        'is_captain': p.is_captain,
+                        'is_wicketkeeper': p.is_wicketkeeper,
+                        'is_overseas': p.is_overseas,
+                        'db_player_id': p.db_player_id
+                    }
+                    for p in team.players
+                ]
+            }
+        
+        def venue_stats_to_dict(stats):
+            if not stats:
+                return None
+            return {
+                'matches_played': stats.matches_played,
+                'win_bat_first_pct': stats.win_bat_first_pct,
+                'win_bowl_first_pct': stats.win_bowl_first_pct,
+                'avg_first_innings': stats.avg_first_innings,
+                'avg_second_innings': stats.avg_second_innings,
+                'pace_wickets': stats.pace_wickets,
+                'spin_wickets': stats.spin_wickets,
+                'pace_pct': stats.pace_pct,
+                'spin_pct': stats.spin_pct
+            }
+        
+        result = {
+            'success': True,
+            'source': 'crex',
+            'match': {
+                'crex_id': match.crex_id,
+                'title': match.title,
+                'series_name': match.series_name,
+                'series_id': match.series_id,
+                'match_type': match.match_type,
+                'format': match.format_type,
+                'status': match.status,
+                'start_date': match.start_date,
+                'start_time': match.start_time,
+                'date_time_gmt': match.date_time_gmt,
+                'gender': match.gender,
+                'has_squads': match.has_squads,
+                'venue': {
+                    'name': match.venue.name if match.venue else None,
+                    'city': match.venue.city if match.venue else None,
+                    'db_venue_id': venue_db['venue_id'] if venue_db else None,
+                    'db_venue_name': venue_db['name'] if venue_db else None
+                } if match.venue else None,
+                'venue_stats': venue_stats_to_dict(match.venue_stats),
+                'team1': team_to_dict(match.team1),
+                'team2': team_to_dict(match.team2),
+                'team1_db': team1_db,
+                'team2_db': team2_db,
+                'toss_winner': match.toss_winner,
+                'toss_decision': match.toss_decision
+            }
+        }
+        
+        return jsonify(result)
+    
+    except Exception as e:
+        logger.error(f"Error fetching CREX match: {e}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/crex/live', methods=['GET'])
+def get_crex_live_match():
+    """
+    Get live match details from CREX including toss and playing XI.
+    
+    Query params:
+        url: The match URL from CREX
+        
+    Returns:
+        Match details with toss info and playing XI if available
+    """
+    try:
+        match_url = request.args.get('url')
+        if not match_url:
+            return jsonify({'success': False, 'error': 'url parameter required'}), 400
+        
+        scraper = get_crex_scraper()
+        match = scraper.get_live_match(match_url)
+        
+        if not match:
+            return jsonify({'success': False, 'error': 'Failed to fetch live match from CREX'}), 404
+        
+        result = {
+            'success': True,
+            'source': 'crex',
+            'match': {
+                'crex_id': match.crex_id,
+                'title': match.title,
+                'status': match.status,
+                'toss_winner': match.toss_winner,
+                'toss_decision': match.toss_decision,
+                'playing_xi_available': match.playing_xi_available
+            }
+        }
+        
+        return jsonify(result)
+    
+    except Exception as e:
+        logger.error(f"Error fetching CREX live match: {e}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+# ============================================================================
 # Training / Data Management API Routes
 # ============================================================================
 
