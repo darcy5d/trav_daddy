@@ -199,6 +199,274 @@
         color: white;
         border-color: var(--accent-primary);
     }
+    
+    /* ========================================
+       Two-Panel Player Selection Styles
+       ======================================== */
+    
+    .team-panels-container {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 1rem;
+        margin-top: 1rem;
+    }
+    
+    .player-panel {
+        background: var(--bg-secondary);
+        border-radius: 8px;
+        border: 1px solid var(--border-color);
+        overflow: hidden;
+    }
+    
+    .panel-header {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        padding: 0.75rem 1rem;
+        background: var(--bg-tertiary);
+        border-bottom: 1px solid var(--border-color);
+        font-weight: 600;
+        font-size: 0.9rem;
+    }
+    
+    .panel-header .count {
+        background: var(--accent-primary);
+        color: white;
+        padding: 0.2rem 0.6rem;
+        border-radius: 12px;
+        font-size: 0.75rem;
+    }
+    
+    .panel-header.selected .count {
+        background: #10b981;
+    }
+    
+    .panel-header.selected.incomplete .count {
+        background: #f59e0b;
+    }
+    
+    .player-list {
+        max-height: 400px;
+        overflow-y: auto;
+        padding: 0.5rem;
+    }
+    
+    .player-item {
+        display: flex;
+        align-items: center;
+        gap: 0.75rem;
+        padding: 0.6rem 0.75rem;
+        margin: 0.25rem 0;
+        background: var(--bg-primary);
+        border-radius: 6px;
+        cursor: pointer;
+        transition: all 0.15s ease;
+        border: 1px solid transparent;
+    }
+    
+    .player-item:hover {
+        background: var(--bg-tertiary);
+        border-color: var(--accent-primary);
+    }
+    
+    .player-item.in-xi {
+        opacity: 0.5;
+        pointer-events: none;
+    }
+    
+    .player-item .order-num {
+        width: 24px;
+        height: 24px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        background: var(--accent-primary);
+        color: white;
+        border-radius: 50%;
+        font-size: 0.75rem;
+        font-weight: 600;
+        flex-shrink: 0;
+    }
+    
+    .player-item .add-icon {
+        width: 24px;
+        height: 24px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        background: var(--bg-tertiary);
+        color: var(--text-muted);
+        border-radius: 50%;
+        font-size: 1rem;
+        flex-shrink: 0;
+    }
+    
+    .player-item:hover .add-icon {
+        background: var(--accent-primary);
+        color: white;
+    }
+    
+    .player-info {
+        flex: 1;
+        min-width: 0;
+    }
+    
+    .player-name {
+        font-weight: 500;
+        font-size: 0.9rem;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+    }
+    
+    .player-stat {
+        font-size: 0.75rem;
+        color: var(--text-muted);
+    }
+    
+    .role-badge {
+        display: inline-block;
+        padding: 0.15rem 0.5rem;
+        border-radius: 4px;
+        font-size: 0.7rem;
+        font-weight: 600;
+        text-transform: uppercase;
+        flex-shrink: 0;
+    }
+    
+    .role-badge.wk {
+        background: #8b5cf6;
+        color: white;
+    }
+    
+    .role-badge.bat {
+        background: #3b82f6;
+        color: white;
+    }
+    
+    .role-badge.ar {
+        background: #10b981;
+        color: white;
+    }
+    
+    .role-badge.bowl {
+        background: #ef4444;
+        color: white;
+    }
+    
+    /* Warning Banner */
+    .squad-warning {
+        display: flex;
+        align-items: center;
+        gap: 0.75rem;
+        padding: 0.75rem 1rem;
+        background: rgba(245, 158, 11, 0.15);
+        border: 1px solid #f59e0b;
+        border-radius: 6px;
+        margin-bottom: 1rem;
+        color: #f59e0b;
+        font-size: 0.875rem;
+    }
+    
+    .squad-warning .icon {
+        font-size: 1.25rem;
+    }
+    
+    /* Suggestions Section */
+    .suggestions-section {
+        margin-top: 0.5rem;
+        padding: 0.75rem;
+        background: var(--bg-tertiary);
+        border-radius: 6px;
+        border: 1px dashed var(--border-color);
+    }
+    
+    .suggestions-header {
+        font-size: 0.8rem;
+        color: var(--text-muted);
+        margin-bottom: 0.5rem;
+        display: flex;
+        align-items: center;
+        gap: 0.5rem;
+    }
+    
+    .suggestion-item {
+        display: inline-flex;
+        align-items: center;
+        gap: 0.4rem;
+        padding: 0.4rem 0.75rem;
+        margin: 0.25rem;
+        background: var(--bg-secondary);
+        border: 1px solid var(--border-color);
+        border-radius: 16px;
+        font-size: 0.8rem;
+        cursor: pointer;
+        transition: all 0.15s ease;
+    }
+    
+    .suggestion-item:hover {
+        background: var(--accent-primary);
+        color: white;
+        border-color: var(--accent-primary);
+    }
+    
+    /* Toss Highlight */
+    .toss-highlight {
+        background: rgba(245, 158, 11, 0.2) !important;
+        border-color: #f59e0b !important;
+        animation: toss-pulse 2s ease-in-out infinite;
+    }
+    
+    @keyframes toss-pulse {
+        0%, 100% { box-shadow: 0 0 0 0 rgba(245, 158, 11, 0.4); }
+        50% { box-shadow: 0 0 0 4px rgba(245, 158, 11, 0); }
+    }
+    
+    /* Manual Mode Collapse */
+    .manual-mode-section {
+        border: 1px solid var(--border-color);
+        border-radius: 8px;
+        margin-bottom: 1rem;
+        overflow: hidden;
+    }
+    
+    .manual-mode-section.collapsed .manual-mode-content {
+        display: none;
+    }
+    
+    .manual-mode-toggle {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        padding: 0.75rem 1rem;
+        background: var(--bg-tertiary);
+        cursor: pointer;
+        font-size: 0.875rem;
+        color: var(--text-secondary);
+    }
+    
+    .manual-mode-toggle:hover {
+        color: var(--text-primary);
+    }
+    
+    .manual-mode-content {
+        padding: 1rem;
+    }
+    
+    /* Panel Actions */
+    .panel-actions {
+        display: flex;
+        gap: 0.5rem;
+        padding: 0.75rem;
+        border-top: 1px solid var(--border-color);
+        background: var(--bg-tertiary);
+    }
+    
+    .panel-actions button {
+        flex: 1;
+        padding: 0.5rem;
+        font-size: 0.8rem;
+    }
 </style>
 
 <div class="hero" style="padding: 2rem;">
@@ -266,29 +534,9 @@
 <div class="grid grid-2">
     <!-- Team 1 Selection -->
     <div class="card">
-        <h2 class="card-title" style="color: var(--accent-primary);">Team 1</h2>
-        
-        <!-- Gender Filter -->
-        <span class="team-filter-label">Gender</span>
-        <div class="segmented-control" id="team1-gender-control">
-            <button class="active" data-value="male" onclick="setTeamFilter(1, 'gender', 'male')">Men's</button>
-            <button data-value="female" onclick="setTeamFilter(1, 'gender', 'female')">Women's</button>
-        </div>
-        
-        <!-- Type Filter -->
-        <span class="team-filter-label">Team Type</span>
-        <div class="segmented-control secondary" id="team1-type-control">
-            <button class="active" data-value="all" onclick="setTeamFilter(1, 'type', 'all')">All</button>
-            <button data-value="international" onclick="setTeamFilter(1, 'type', 'international')">International</button>
-            <button data-value="club" onclick="setTeamFilter(1, 'type', 'club')">Club / Domestic</button>
-        </div>
-        
-        <div class="form-group">
-            <label>Select Team <span id="team1-count" style="color: var(--text-muted); font-weight: normal;"></span></label>
-            <select id="team1-select" onchange="clearSquadData(1); loadPlayers(1)">
-                <option value="">-- Select Team --</option>
-            </select>
-        </div>
+        <h2 class="card-title" style="color: var(--accent-primary);">
+            <span id="team1-title">Team 1</span>
+        </h2>
         
         <!-- Team Source Badge -->
         <div class="team-source-badge" id="team1-source-badge" style="display: none;">
@@ -296,87 +544,97 @@
             <span id="team1-source-text">Loading...</span>
         </div>
         
-        <!-- Squad Filter Badge -->
-        <div class="team-source-badge" id="team1-squad-badge" style="display: none; background: #3b82f6;">
-            <span>🎯</span>
-            <span id="team1-squad-text">ESPN Squad Only</span>
+        <!-- Warning Banner for Incomplete Squad -->
+        <div class="squad-warning" id="team1-warning" style="display: none;">
+            <span class="icon">⚠️</span>
+            <span id="team1-warning-text">Only 9 players matched. Add more from suggestions below.</span>
         </div>
         
-        <!-- Role-based Selection -->
-        <div class="role-section">
-            <div class="role-header">
-                <span>🧤 Wicketkeeper</span>
-                <span class="constraint">(1 required)</span>
+        <!-- Manual Mode Section (collapsed by default when match selected) -->
+        <div class="manual-mode-section collapsed" id="team1-manual-section">
+            <div class="manual-mode-toggle" onclick="toggleManualMode(1)">
+                <span>📝 Manual Team Selection</span>
+                <span id="team1-manual-arrow">▼</span>
             </div>
-            <select id="team1-keepers" size="2" onchange="validateTeamSelection(1)">
-            </select>
+            <div class="manual-mode-content">
+                <!-- Gender Filter -->
+                <span class="team-filter-label">Gender</span>
+                <div class="segmented-control" id="team1-gender-control">
+                    <button class="active" data-value="male" onclick="setTeamFilter(1, 'gender', 'male')">Men's</button>
+                    <button data-value="female" onclick="setTeamFilter(1, 'gender', 'female')">Women's</button>
+                </div>
+                
+                <!-- Type Filter -->
+                <span class="team-filter-label">Team Type</span>
+                <div class="segmented-control secondary" id="team1-type-control">
+                    <button class="active" data-value="all" onclick="setTeamFilter(1, 'type', 'all')">All</button>
+                    <button data-value="international" onclick="setTeamFilter(1, 'type', 'international')">International</button>
+                    <button data-value="club" onclick="setTeamFilter(1, 'type', 'club')">Club / Domestic</button>
+                </div>
+                
+                <div class="form-group">
+                    <label>Select Team <span id="team1-count" style="color: var(--text-muted); font-weight: normal;"></span></label>
+                    <select id="team1-select" onchange="onManualTeamSelect(1)">
+                        <option value="">-- Select Team --</option>
+                    </select>
+                </div>
+            </div>
         </div>
         
-        <div class="role-section">
-            <div class="role-header">
-                <span>🏏 Batters</span>
-                <span class="constraint">(4-7 players)</span>
+        <!-- Two-Panel Player Selection -->
+        <div class="team-panels-container" id="team1-panels">
+            <!-- Available Squad Panel -->
+            <div class="player-panel">
+                <div class="panel-header">
+                    <span>Available Squad</span>
+                    <span class="count" id="team1-available-count">0</span>
+                </div>
+                <div class="player-list" id="team1-available-list">
+                    <div style="padding: 2rem; text-align: center; color: var(--text-muted);">
+                        Select a match or team to load players
+                    </div>
+                </div>
             </div>
-            <select id="team1-batters" multiple size="8" onchange="validateTeamSelection(1)">
-            </select>
-            <small style="color: var(--text-muted);">Hold Ctrl/Cmd to select multiple</small>
+            
+            <!-- Selected XI Panel -->
+            <div class="player-panel">
+                <div class="panel-header selected" id="team1-selected-header">
+                    <span>Selected XI</span>
+                    <span class="count" id="team1-selected-count">0/11</span>
+                </div>
+                <div class="player-list" id="team1-selected-list">
+                    <div style="padding: 2rem; text-align: center; color: var(--text-muted);">
+                        Click players from Available Squad to add
+                    </div>
+                </div>
+                <div class="panel-actions">
+                    <button onclick="autoOrderXI(1)" class="btn-secondary">↕️ Re-order</button>
+                    <button onclick="clearTeam(1)" class="btn-secondary">🗑 Clear</button>
+                </div>
+            </div>
         </div>
         
-        <div class="role-section">
-            <div class="role-header">
-                <span>⚡ All-rounders</span>
-                <span class="constraint">(0-3 players)</span>
+        <!-- Suggestions Section -->
+        <div class="suggestions-section" id="team1-suggestions" style="display: none;">
+            <div class="suggestions-header">
+                <span>💡</span>
+                <span>Suggested from Database</span>
             </div>
-            <select id="team1-allrounders" multiple size="4" onchange="validateTeamSelection(1)">
-            </select>
-        </div>
-        
-        <div class="role-section">
-            <div class="role-header">
-                <span>🎯 Bowlers</span>
-                <span class="constraint">(min 4, total 5+ bowling options)</span>
+            <div id="team1-suggestions-list">
+                <!-- Populated dynamically -->
             </div>
-            <select id="team1-bowlers" multiple size="6" onchange="validateTeamSelection(1)">
-            </select>
         </div>
         
         <!-- Validation Summary -->
         <div id="team1-validation" class="validation-summary" style="display: none;">
         </div>
-        
-        <!-- Team Actions -->
-        <div class="team-actions">
-            <button onclick="reOptimizeTeam(1)" class="btn-secondary">⚙ Re-optimize from Squad</button>
-            <button onclick="loadLastMatch(1)" class="btn-secondary">📊 Load Last Match XI</button>
-            <button onclick="clearTeam(1)" class="btn-secondary">🗑 Clear Selection</button>
-        </div>
     </div>
     
     <!-- Team 2 Selection -->
     <div class="card">
-        <h2 class="card-title" style="color: var(--accent-secondary);">Team 2</h2>
-        
-        <!-- Gender Filter -->
-        <span class="team-filter-label">Gender</span>
-        <div class="segmented-control secondary" id="team2-gender-control">
-            <button class="active" data-value="male" onclick="setTeamFilter(2, 'gender', 'male')">Men's</button>
-            <button data-value="female" onclick="setTeamFilter(2, 'gender', 'female')">Women's</button>
-        </div>
-        
-        <!-- Type Filter -->
-        <span class="team-filter-label">Team Type</span>
-        <div class="segmented-control secondary" id="team2-type-control">
-            <button class="active" data-value="all" onclick="setTeamFilter(2, 'type', 'all')">All</button>
-            <button data-value="international" onclick="setTeamFilter(2, 'type', 'international')">International</button>
-            <button data-value="club" onclick="setTeamFilter(2, 'type', 'club')">Club / Domestic</button>
-        </div>
-        
-        <div class="form-group">
-            <label>Select Team <span id="team2-count" style="color: var(--text-muted); font-weight: normal;"></span></label>
-            <select id="team2-select" onchange="clearSquadData(2); loadPlayers(2)">
-                <option value="">-- Select Team --</option>
-            </select>
-        </div>
+        <h2 class="card-title" style="color: var(--accent-secondary);">
+            <span id="team2-title">Team 2</span>
+        </h2>
         
         <!-- Team Source Badge -->
         <div class="team-source-badge" id="team2-source-badge" style="display: none;">
@@ -384,59 +642,89 @@
             <span id="team2-source-text">Loading...</span>
         </div>
         
-        <!-- Squad Filter Badge -->
-        <div class="team-source-badge" id="team2-squad-badge" style="display: none; background: #3b82f6;">
-            <span>🎯</span>
-            <span id="team2-squad-text">ESPN Squad Only</span>
+        <!-- Warning Banner for Incomplete Squad -->
+        <div class="squad-warning" id="team2-warning" style="display: none;">
+            <span class="icon">⚠️</span>
+            <span id="team2-warning-text">Only 9 players matched. Add more from suggestions below.</span>
         </div>
         
-        <!-- Role-based Selection -->
-        <div class="role-section">
-            <div class="role-header">
-                <span>🧤 Wicketkeeper</span>
-                <span class="constraint">(1 required)</span>
+        <!-- Manual Mode Section (collapsed by default when match selected) -->
+        <div class="manual-mode-section collapsed" id="team2-manual-section">
+            <div class="manual-mode-toggle" onclick="toggleManualMode(2)">
+                <span>📝 Manual Team Selection</span>
+                <span id="team2-manual-arrow">▼</span>
             </div>
-            <select id="team2-keepers" size="2" onchange="validateTeamSelection(2)">
-            </select>
+            <div class="manual-mode-content">
+                <!-- Gender Filter -->
+                <span class="team-filter-label">Gender</span>
+                <div class="segmented-control secondary" id="team2-gender-control">
+                    <button class="active" data-value="male" onclick="setTeamFilter(2, 'gender', 'male')">Men's</button>
+                    <button data-value="female" onclick="setTeamFilter(2, 'gender', 'female')">Women's</button>
+                </div>
+                
+                <!-- Type Filter -->
+                <span class="team-filter-label">Team Type</span>
+                <div class="segmented-control secondary" id="team2-type-control">
+                    <button class="active" data-value="all" onclick="setTeamFilter(2, 'type', 'all')">All</button>
+                    <button data-value="international" onclick="setTeamFilter(2, 'type', 'international')">International</button>
+                    <button data-value="club" onclick="setTeamFilter(2, 'type', 'club')">Club / Domestic</button>
+                </div>
+                
+                <div class="form-group">
+                    <label>Select Team <span id="team2-count" style="color: var(--text-muted); font-weight: normal;"></span></label>
+                    <select id="team2-select" onchange="onManualTeamSelect(2)">
+                        <option value="">-- Select Team --</option>
+                    </select>
+                </div>
+            </div>
         </div>
         
-        <div class="role-section">
-            <div class="role-header">
-                <span>🏏 Batters</span>
-                <span class="constraint">(4-7 players)</span>
+        <!-- Two-Panel Player Selection -->
+        <div class="team-panels-container" id="team2-panels">
+            <!-- Available Squad Panel -->
+            <div class="player-panel">
+                <div class="panel-header">
+                    <span>Available Squad</span>
+                    <span class="count" id="team2-available-count">0</span>
+                </div>
+                <div class="player-list" id="team2-available-list">
+                    <div style="padding: 2rem; text-align: center; color: var(--text-muted);">
+                        Select a match or team to load players
+                    </div>
+                </div>
             </div>
-            <select id="team2-batters" multiple size="8" onchange="validateTeamSelection(2)">
-            </select>
-            <small style="color: var(--text-muted);">Hold Ctrl/Cmd to select multiple</small>
+            
+            <!-- Selected XI Panel -->
+            <div class="player-panel">
+                <div class="panel-header selected" id="team2-selected-header">
+                    <span>Selected XI</span>
+                    <span class="count" id="team2-selected-count">0/11</span>
+                </div>
+                <div class="player-list" id="team2-selected-list">
+                    <div style="padding: 2rem; text-align: center; color: var(--text-muted);">
+                        Click players from Available Squad to add
+                    </div>
+                </div>
+                <div class="panel-actions">
+                    <button onclick="autoOrderXI(2)" class="btn-secondary">↕️ Re-order</button>
+                    <button onclick="clearTeam(2)" class="btn-secondary">🗑 Clear</button>
+                </div>
+            </div>
         </div>
         
-        <div class="role-section">
-            <div class="role-header">
-                <span>⚡ All-rounders</span>
-                <span class="constraint">(0-3 players)</span>
+        <!-- Suggestions Section -->
+        <div class="suggestions-section" id="team2-suggestions" style="display: none;">
+            <div class="suggestions-header">
+                <span>💡</span>
+                <span>Suggested from Database</span>
             </div>
-            <select id="team2-allrounders" multiple size="4" onchange="validateTeamSelection(2)">
-            </select>
-        </div>
-        
-        <div class="role-section">
-            <div class="role-header">
-                <span>🎯 Bowlers</span>
-                <span class="constraint">(min 4, total 5+ bowling options)</span>
+            <div id="team2-suggestions-list">
+                <!-- Populated dynamically -->
             </div>
-            <select id="team2-bowlers" multiple size="6" onchange="validateTeamSelection(2)">
-            </select>
         </div>
         
         <!-- Validation Summary -->
         <div id="team2-validation" class="validation-summary" style="display: none;">
-        </div>
-        
-        <!-- Team Actions -->
-        <div class="team-actions">
-            <button onclick="reOptimizeTeam(2)" class="btn-secondary">⚙ Re-optimize from Squad</button>
-            <button onclick="loadLastMatch(2)" class="btn-secondary">📊 Load Last Match XI</button>
-            <button onclick="clearTeam(2)" class="btn-secondary">🗑 Clear Selection</button>
         </div>
     </div>
 </div>
@@ -713,6 +1001,494 @@
         1: { gender: 'male', type: 'all' },
         2: { gender: 'male', type: 'all' }
     };
+    
+    // Player panel state - stores all players and selection state
+    const teamPlayerData = {
+        1: { available: [], selected: [], teamName: '', teamDbId: null, matchUrl: null },
+        2: { available: [], selected: [], teamName: '', teamDbId: null, matchUrl: null }
+    };
+    
+    // ========================================
+    // Player Panel Functions
+    // ========================================
+    
+    /**
+     * Render the two-panel player selection UI for a team
+     * @param {number} teamNum - 1 or 2
+     * @param {Array} squad - All squad players (from scraper or DB)
+     * @param {Array} selectedXI - Players to put in Selected XI panel (optional, auto-picks if null)
+     */
+    function renderTeamPanels(teamNum, squad, selectedXI = null) {
+        console.log(`[renderTeamPanels] Team ${teamNum}: ${squad.length} squad players, ${selectedXI ? selectedXI.length : 'auto'} selected`);
+        
+        const availableList = document.getElementById(`team${teamNum}-available-list`);
+        const selectedList = document.getElementById(`team${teamNum}-selected-list`);
+        
+        if (!availableList || !selectedList) {
+            console.error(`[renderTeamPanels] Could not find panel elements for team ${teamNum}`);
+            return;
+        }
+        
+        // Determine which players go to selected vs available
+        let selected = [];
+        let available = [];
+        
+        if (selectedXI && selectedXI.length > 0) {
+            // Use provided XI
+            const selectedIds = new Set(selectedXI.map(p => p.db_player_id || p.player_id || p.id));
+            selected = selectedXI.slice(0, 11);
+            available = squad.filter(p => {
+                const pid = p.db_player_id || p.player_id || p.id;
+                return !selectedIds.has(pid);
+            });
+        } else {
+            // Auto-select first 11 (or all if less)
+            selected = squad.slice(0, Math.min(11, squad.length));
+            available = squad.slice(11);
+        }
+        
+        // Store in state
+        teamPlayerData[teamNum].available = available;
+        teamPlayerData[teamNum].selected = selected;
+        
+        // Auto-order the selected XI
+        autoOrderXI(teamNum);
+        
+        // Render both panels
+        renderAvailablePanel(teamNum);
+        renderSelectedPanel(teamNum);
+        
+        // Update validation and warnings
+        updateTeamValidation(teamNum);
+    }
+    
+    /**
+     * Render the Available Squad panel
+     */
+    function renderAvailablePanel(teamNum) {
+        const list = document.getElementById(`team${teamNum}-available-list`);
+        const countEl = document.getElementById(`team${teamNum}-available-count`);
+        const players = teamPlayerData[teamNum].available;
+        
+        countEl.textContent = players.length;
+        
+        if (players.length === 0) {
+            list.innerHTML = `<div style="padding: 1.5rem; text-align: center; color: var(--text-muted); font-size: 0.9rem;">
+                All players in Selected XI
+            </div>`;
+            return;
+        }
+        
+        list.innerHTML = players.map(p => renderPlayerItem(p, 'available', teamNum)).join('');
+    }
+    
+    /**
+     * Render the Selected XI panel
+     */
+    function renderSelectedPanel(teamNum) {
+        const list = document.getElementById(`team${teamNum}-selected-list`);
+        const countEl = document.getElementById(`team${teamNum}-selected-count`);
+        const headerEl = document.getElementById(`team${teamNum}-selected-header`);
+        const players = teamPlayerData[teamNum].selected;
+        
+        countEl.textContent = `${players.length}/11`;
+        
+        // Update header class based on completeness
+        headerEl.classList.toggle('incomplete', players.length < 11);
+        
+        if (players.length === 0) {
+            list.innerHTML = `<div style="padding: 1.5rem; text-align: center; color: var(--text-muted); font-size: 0.9rem;">
+                Click players from Available Squad to add
+            </div>`;
+            return;
+        }
+        
+        list.innerHTML = players.map((p, idx) => renderPlayerItem(p, 'selected', teamNum, idx + 1)).join('');
+    }
+    
+    /**
+     * Render a single player item
+     */
+    function renderPlayerItem(player, panel, teamNum, orderNum = null) {
+        const playerId = player.db_player_id || player.player_id || player.id;
+        const name = player.name || player.player_name || 'Unknown';
+        const role = normalizeRole(player.role || player.player_role || 'Unknown');
+        const roleBadgeClass = getRoleBadgeClass(role);
+        
+        // Get key stat based on role
+        const stat = getPlayerKeyStat(player, role);
+        
+        if (panel === 'available') {
+            return `
+                <div class="player-item" onclick="movePlayer(${teamNum}, '${playerId}', 'selected')">
+                    <span class="add-icon">+</span>
+                    <div class="player-info">
+                        <div class="player-name">${name}</div>
+                        <div class="player-stat">${stat}</div>
+                    </div>
+                    <span class="role-badge ${roleBadgeClass}">${role}</span>
+                </div>
+            `;
+        } else {
+            return `
+                <div class="player-item" onclick="movePlayer(${teamNum}, '${playerId}', 'available')">
+                    <span class="order-num">${orderNum}</span>
+                    <div class="player-info">
+                        <div class="player-name">${name}</div>
+                        <div class="player-stat">${stat}</div>
+                    </div>
+                    <span class="role-badge ${roleBadgeClass}">${role}</span>
+                </div>
+            `;
+        }
+    }
+    
+    /**
+     * Normalize role to standard abbreviation
+     */
+    function normalizeRole(role) {
+        if (!role) return 'BAT';
+        const r = role.toLowerCase();
+        if (r.includes('keep') || r.includes('wk')) return 'WK';
+        if (r.includes('all') || r.includes('ar')) return 'AR';
+        if (r.includes('bowl')) return 'BOWL';
+        return 'BAT';
+    }
+    
+    /**
+     * Get CSS class for role badge
+     */
+    function getRoleBadgeClass(role) {
+        switch (role) {
+            case 'WK': return 'wk';
+            case 'AR': return 'ar';
+            case 'BOWL': return 'bowl';
+            default: return 'bat';
+        }
+    }
+    
+    /**
+     * Get key stat string for a player based on role
+     */
+    function getPlayerKeyStat(player, role) {
+        if (role === 'BOWL') {
+            const econ = player.economy || player.econ;
+            const wickets = player.wickets || player.total_wickets;
+            if (econ) return `Econ: ${parseFloat(econ).toFixed(1)}`;
+            if (wickets) return `${wickets} wickets`;
+            return '';
+        } else {
+            const sr = player.strike_rate || player.sr || player.batting_sr;
+            const avg = player.batting_avg || player.average;
+            const runs = player.runs || player.total_runs;
+            if (sr) return `SR: ${parseFloat(sr).toFixed(1)}`;
+            if (avg) return `Avg: ${parseFloat(avg).toFixed(1)}`;
+            if (runs) return `${runs} runs`;
+            return '';
+        }
+    }
+    
+    /**
+     * Move a player between Available and Selected panels
+     */
+    function movePlayer(teamNum, playerId, toPanel) {
+        const data = teamPlayerData[teamNum];
+        const fromPanel = toPanel === 'selected' ? 'available' : 'selected';
+        
+        // Find player in source panel
+        const fromList = data[fromPanel];
+        const playerIdx = fromList.findIndex(p => 
+            (p.db_player_id || p.player_id || p.id) == playerId
+        );
+        
+        if (playerIdx === -1) {
+            console.warn(`[movePlayer] Player ${playerId} not found in ${fromPanel}`);
+            return;
+        }
+        
+        // Check if moving to selected would exceed 11
+        if (toPanel === 'selected' && data.selected.length >= 11) {
+            console.log(`[movePlayer] XI already has 11 players`);
+            return;
+        }
+        
+        // Move player
+        const [player] = fromList.splice(playerIdx, 1);
+        data[toPanel].push(player);
+        
+        // If adding to selected, auto-order
+        if (toPanel === 'selected') {
+            autoOrderXI(teamNum);
+        }
+        
+        // Re-render panels
+        renderAvailablePanel(teamNum);
+        renderSelectedPanel(teamNum);
+        updateTeamValidation(teamNum);
+    }
+    
+    /**
+     * Sort Selected XI by role: WK first, then BAT, AR, BOWL
+     */
+    function autoOrderXI(teamNum) {
+        const data = teamPlayerData[teamNum];
+        const roleOrder = { 'WK': 0, 'BAT': 1, 'AR': 2, 'BOWL': 3 };
+        
+        data.selected.sort((a, b) => {
+            const roleA = normalizeRole(a.role || a.player_role);
+            const roleB = normalizeRole(b.role || b.player_role);
+            const orderA = roleOrder[roleA] ?? 1;
+            const orderB = roleOrder[roleB] ?? 1;
+            
+            if (orderA !== orderB) return orderA - orderB;
+            
+            // Within same role, sort by batting average/SR for batters, wickets for bowlers
+            if (roleA === 'BOWL') {
+                return (b.wickets || 0) - (a.wickets || 0);
+            } else {
+                return (b.batting_avg || b.average || 0) - (a.batting_avg || a.average || 0);
+            }
+        });
+        
+        // Re-render if called directly (not from renderTeamPanels)
+        if (document.getElementById(`team${teamNum}-selected-list`).innerHTML !== '') {
+            renderSelectedPanel(teamNum);
+        }
+    }
+    
+    /**
+     * Update validation state for a team
+     */
+    function updateTeamValidation(teamNum) {
+        const data = teamPlayerData[teamNum];
+        const selectedCount = data.selected.length;
+        const validationEl = document.getElementById(`team${teamNum}-validation`);
+        const warningEl = document.getElementById(`team${teamNum}-warning`);
+        const warningText = document.getElementById(`team${teamNum}-warning-text`);
+        
+        // Show warning if less than 11 players
+        if (selectedCount < 11) {
+            warningEl.style.display = 'flex';
+            warningText.textContent = `Only ${selectedCount} players selected. Need ${11 - selectedCount} more.`;
+        } else {
+            warningEl.style.display = 'none';
+        }
+        
+        // Count roles in XI
+        const roles = data.selected.reduce((acc, p) => {
+            const role = normalizeRole(p.role || p.player_role);
+            acc[role] = (acc[role] || 0) + 1;
+            return acc;
+        }, {});
+        
+        const hasKeeper = (roles['WK'] || 0) >= 1;
+        const hasBowlers = (roles['BOWL'] || 0) >= 4 || ((roles['BOWL'] || 0) + (roles['AR'] || 0)) >= 5;
+        const isValid = selectedCount === 11 && hasKeeper;
+        
+        if (selectedCount > 0) {
+            validationEl.style.display = 'block';
+            validationEl.className = `validation-summary ${isValid ? 'valid' : 'invalid'}`;
+            validationEl.innerHTML = `
+                <div class="validation-item ${selectedCount === 11 ? 'valid' : 'invalid'}">
+                    <span class="icon">${selectedCount === 11 ? '✓' : '✗'}</span>
+                    <span>${selectedCount}/11 players selected</span>
+                </div>
+                <div class="validation-item ${hasKeeper ? 'valid' : 'invalid'}">
+                    <span class="icon">${hasKeeper ? '✓' : '✗'}</span>
+                    <span>Wicketkeeper: ${roles['WK'] || 0}</span>
+                </div>
+                <div class="validation-item ${hasBowlers ? 'valid' : 'warning'}">
+                    <span class="icon">${hasBowlers ? '✓' : '⚠'}</span>
+                    <span>Bowlers: ${roles['BOWL'] || 0} + ${roles['AR'] || 0} AR = ${(roles['BOWL'] || 0) + (roles['AR'] || 0)} bowling options</span>
+                </div>
+            `;
+        } else {
+            validationEl.style.display = 'none';
+        }
+        
+        // Update Run Simulation button state
+        updateSimulationButton();
+    }
+    
+    /**
+     * Clear all players from a team
+     */
+    function clearTeam(teamNum) {
+        const data = teamPlayerData[teamNum];
+        // Move all selected back to available
+        data.available = [...data.available, ...data.selected];
+        data.selected = [];
+        
+        renderAvailablePanel(teamNum);
+        renderSelectedPanel(teamNum);
+        updateTeamValidation(teamNum);
+    }
+    
+    /**
+     * Toggle manual mode section visibility
+     */
+    function toggleManualMode(teamNum) {
+        const section = document.getElementById(`team${teamNum}-manual-section`);
+        const arrow = document.getElementById(`team${teamNum}-manual-arrow`);
+        
+        section.classList.toggle('collapsed');
+        arrow.textContent = section.classList.contains('collapsed') ? '▼' : '▲';
+    }
+    
+    /**
+     * Update the Run Simulation button based on team validity
+     */
+    function updateSimulationButton() {
+        const team1Valid = teamPlayerData[1].selected.length === 11;
+        const team2Valid = teamPlayerData[2].selected.length === 11;
+        
+        const btn = document.querySelector('button[onclick="runSimulation()"]');
+        if (btn) {
+            btn.disabled = !(team1Valid && team2Valid);
+            btn.style.opacity = (team1Valid && team2Valid) ? '1' : '0.5';
+        }
+    }
+    
+    /**
+     * Load player suggestions from database for incomplete squads
+     */
+    async function loadSuggestions(teamNum, teamDbId) {
+        const suggestionsSection = document.getElementById(`team${teamNum}-suggestions`);
+        const suggestionsList = document.getElementById(`team${teamNum}-suggestions-list`);
+        
+        if (!teamDbId) {
+            suggestionsSection.style.display = 'none';
+            return;
+        }
+        
+        try {
+            const gender = teamFilters[teamNum].gender;
+            const response = await fetch(`/api/team/${teamDbId}/recent-lineup?gender=${gender}`);
+            const data = await response.json();
+            
+            if (data.success && data.players) {
+                // Filter out players already in squad
+                const currentPlayerIds = new Set([
+                    ...teamPlayerData[teamNum].available.map(p => p.db_player_id || p.player_id || p.id),
+                    ...teamPlayerData[teamNum].selected.map(p => p.db_player_id || p.player_id || p.id)
+                ]);
+                
+                const suggestions = data.players
+                    .filter(p => !currentPlayerIds.has(p.player_id))
+                    .slice(0, 10);  // Limit to 10 suggestions
+                
+                if (suggestions.length > 0) {
+                    suggestionsSection.style.display = 'block';
+                    suggestionsList.innerHTML = suggestions.map(p => `
+                        <span class="suggestion-item" onclick="addSuggestion(${teamNum}, ${JSON.stringify(p).replace(/"/g, '&quot;')})">
+                            <span>+</span>
+                            <span>${p.name}</span>
+                            <span class="role-badge ${getRoleBadgeClass(normalizeRole(p.role))}">${normalizeRole(p.role)}</span>
+                        </span>
+                    `).join('');
+                } else {
+                    suggestionsSection.style.display = 'none';
+                }
+            }
+        } catch (error) {
+            console.error('Error loading suggestions:', error);
+            suggestionsSection.style.display = 'none';
+        }
+    }
+    
+    /**
+     * Add a suggested player to the available squad
+     */
+    function addSuggestion(teamNum, player) {
+        // Convert player format to match squad format
+        const squadPlayer = {
+            db_player_id: player.player_id,
+            player_id: player.player_id,
+            name: player.name,
+            role: player.role,
+            player_role: player.role,
+            batting_avg: player.stats?.runs ? (player.stats.runs / Math.max(1, player.stats.matches)) : 0,
+            wickets: player.stats?.wickets || 0
+        };
+        
+        // Add to available
+        teamPlayerData[teamNum].available.push(squadPlayer);
+        
+        // Re-render
+        renderAvailablePanel(teamNum);
+        
+        // Remove from suggestions
+        const suggestionsList = document.getElementById(`team${teamNum}-suggestions-list`);
+        const items = suggestionsList.querySelectorAll('.suggestion-item');
+        items.forEach(item => {
+            if (item.textContent.includes(player.name)) {
+                item.remove();
+            }
+        });
+        
+        // Hide suggestions section if empty
+        if (suggestionsList.children.length === 0) {
+            document.getElementById(`team${teamNum}-suggestions`).style.display = 'none';
+        }
+    }
+    
+    /**
+     * Handle manual team selection from dropdown
+     */
+    async function onManualTeamSelect(teamNum) {
+        const teamSelect = document.getElementById(`team${teamNum}-select`);
+        const teamId = teamSelect.value;
+        
+        if (!teamId) {
+            // Clear panels
+            teamPlayerData[teamNum].available = [];
+            teamPlayerData[teamNum].selected = [];
+            renderAvailablePanel(teamNum);
+            renderSelectedPanel(teamNum);
+            return;
+        }
+        
+        const teamName = teamSelect.options[teamSelect.selectedIndex].text;
+        
+        // Update team title
+        document.getElementById(`team${teamNum}-title`).textContent = teamName;
+        
+        // Store team data
+        teamPlayerData[teamNum].teamName = teamName;
+        teamPlayerData[teamNum].teamDbId = parseInt(teamId);
+        teamPlayerData[teamNum].matchUrl = null;
+        
+        // Show source badge
+        const badge = document.getElementById(`team${teamNum}-source-badge`);
+        document.getElementById(`team${teamNum}-source-icon`).textContent = '📋';
+        document.getElementById(`team${teamNum}-source-text`).textContent = 'Manual Selection';
+        badge.style.display = 'inline-flex';
+        
+        // Load players from database
+        try {
+            const gender = teamFilters[teamNum].gender;
+            const response = await fetch(`/api/team/${teamId}/recent-lineup?gender=${gender}`);
+            const data = await response.json();
+            
+            if (data.success && data.players) {
+                // Convert to squad format
+                const squad = data.players.map(p => ({
+                    db_player_id: p.player_id,
+                    player_id: p.player_id,
+                    name: p.name,
+                    role: p.role,
+                    player_role: p.role,
+                    batting_avg: p.stats?.runs ? (p.stats.runs / Math.max(1, p.stats.matches)) : 0,
+                    wickets: p.stats?.wickets || 0,
+                    strike_rate: 0  // Will be fetched if needed
+                }));
+                
+                renderTeamPanels(teamNum, squad, null);
+            }
+        } catch (error) {
+            console.error('Error loading team players:', error);
+        }
+    }
     
     // Initialize on page load
     document.addEventListener('DOMContentLoaded', () => {
@@ -1156,9 +1932,11 @@
             if (data.success && data.match) {
                 const match = data.match;
                 
-                // Show match info
+                // Get team names
                 const team1Name = match.team1?.name || match.team1_db?.name || 'Team 1';
                 const team2Name = match.team2?.name || match.team2_db?.name || 'Team 2';
+                
+                // Update match info display
                 document.getElementById('t20-match-name').textContent = `${team1Name} vs ${team2Name}`;
                 document.getElementById('t20-match-date').textContent = `${match.start_date || ''} ${match.start_time || ''}`;
                 
@@ -1174,67 +1952,125 @@
                 console.log(`CREX match loaded: ${team1Name} vs ${team2Name}`);
                 console.log(`  Series: ${match.series_name}`);
                 console.log(`  Venue: ${match.venue?.name} -> DB: ${match.venue?.db_venue_name}`);
-                console.log(`  Team 1 Squad: ${match.team1?.players?.length || 0} players`);
-                console.log(`  Team 2 Squad: ${match.team2?.players?.length || 0} players`);
+                console.log(`  Team 1 Squad: ${team1Players} players (${team1Matched} matched)`);
+                console.log(`  Team 2 Squad: ${team2Players} players (${team2Matched} matched)`);
                 
-                // Show toss info if available
-                if (match.toss_winner) {
-                    console.log(`  Toss: ${match.toss_winner} elected to ${match.toss_decision}`);
-                }
+                // Store match URL for later use
+                window.currentMatchUrl = matchUrl;
                 
-                // Store squad data globally for filtering (reuse espnSquadData for compatibility)
+                // Store squad data globally
                 window.espnSquadData = {
                     team1: match.team1?.players || [],
                     team2: match.team2?.players || []
                 };
                 
-                // Auto-fill teams using waterfall selection
-                if (match.team1_db) {
-                    // Select team in dropdown first
-                    const team1Select = document.getElementById('team1-select');
-                    for (let opt of team1Select.options) {
-                        if (opt.textContent === match.team1_db.name) {
-                            team1Select.value = opt.value;
-                            break;
-                        }
+                // ========================================
+                // AUTO-POPULATE TEAM 1 using new panel system
+                // ========================================
+                const team1Squad = (match.team1?.players || []).filter(p => p.db_player_id);
+                if (team1Squad.length > 0) {
+                    // Update team title
+                    document.getElementById('team1-title').textContent = team1Name;
+                    
+                    // Store team data
+                    teamPlayerData[1].teamName = team1Name;
+                    teamPlayerData[1].teamDbId = match.team1_db?.team_id || null;
+                    teamPlayerData[1].matchUrl = matchUrl;
+                    
+                    // Collapse manual mode section
+                    document.getElementById('team1-manual-section').classList.add('collapsed');
+                    document.getElementById('team1-manual-arrow').textContent = '▼';
+                    
+                    // Show source badge
+                    const badge = document.getElementById('team1-source-badge');
+                    document.getElementById('team1-source-icon').textContent = '🏏';
+                    document.getElementById('team1-source-text').textContent = `CREX: ${team1Squad.length} players`;
+                    badge.style.display = 'inline-flex';
+                    
+                    // Determine playing XI vs bench (if available from live match)
+                    let playingXI = null;
+                    if (match.team1?.playing_xi && match.team1.playing_xi.length > 0) {
+                        playingXI = match.team1.playing_xi;
+                        console.log(`  Team 1 Playing XI: ${playingXI.length} players`);
                     }
-                    // Use waterfall selection with match_url (backend auto-detects CREX)
-                    await waterfallLoadTeam(1, null, match.team1_db.team_id, matchUrl);
-                } else if (match.team1?.players?.some(p => p.db_player_id)) {
-                    // Team doesn't match but players do (franchise team)
-                    // Load players directly from matched squad
-                    console.log(`Team 1 is a franchise team - loading ${match.team1.players.filter(p => p.db_player_id).length} matched players directly`);
-                    await loadPlayersFromSquad(1, match.team1.players, match.team1.name);
+                    
+                    // Render the panels
+                    renderTeamPanels(1, team1Squad, playingXI);
+                    
+                    // Check if we need suggestions (less than 11 matched)
+                    if (team1Squad.length < 11 && match.team1_db?.team_id) {
+                        loadSuggestions(1, match.team1_db.team_id);
+                    }
                 }
                 
-                if (match.team2_db) {
-                    // Select team in dropdown first
-                    const team2Select = document.getElementById('team2-select');
-                    for (let opt of team2Select.options) {
-                        if (opt.textContent === match.team2_db.name) {
-                            team2Select.value = opt.value;
-                            break;
-                        }
+                // ========================================
+                // AUTO-POPULATE TEAM 2 using new panel system
+                // ========================================
+                const team2Squad = (match.team2?.players || []).filter(p => p.db_player_id);
+                if (team2Squad.length > 0) {
+                    // Update team title
+                    document.getElementById('team2-title').textContent = team2Name;
+                    
+                    // Store team data
+                    teamPlayerData[2].teamName = team2Name;
+                    teamPlayerData[2].teamDbId = match.team2_db?.team_id || null;
+                    teamPlayerData[2].matchUrl = matchUrl;
+                    
+                    // Collapse manual mode section
+                    document.getElementById('team2-manual-section').classList.add('collapsed');
+                    document.getElementById('team2-manual-arrow').textContent = '▼';
+                    
+                    // Show source badge
+                    const badge = document.getElementById('team2-source-badge');
+                    document.getElementById('team2-source-icon').textContent = '🏏';
+                    document.getElementById('team2-source-text').textContent = `CREX: ${team2Squad.length} players`;
+                    badge.style.display = 'inline-flex';
+                    
+                    // Determine playing XI vs bench (if available from live match)
+                    let playingXI = null;
+                    if (match.team2?.playing_xi && match.team2.playing_xi.length > 0) {
+                        playingXI = match.team2.playing_xi;
+                        console.log(`  Team 2 Playing XI: ${playingXI.length} players`);
                     }
-                    // Use waterfall selection with match_url (backend auto-detects CREX)
-                    await waterfallLoadTeam(2, null, match.team2_db.team_id, matchUrl);
-                } else if (match.team2?.players?.some(p => p.db_player_id)) {
-                    // Team doesn't match but players do (franchise team)
-                    console.log(`Team 2 is a franchise team - loading ${match.team2.players.filter(p => p.db_player_id).length} matched players directly`);
-                    await loadPlayersFromSquad(2, match.team2.players, match.team2.name);
+                    
+                    // Render the panels
+                    renderTeamPanels(2, team2Squad, playingXI);
+                    
+                    // Check if we need suggestions (less than 11 matched)
+                    if (team2Squad.length < 11 && match.team2_db?.team_id) {
+                        loadSuggestions(2, match.team2_db.team_id);
+                    }
                 }
                 
-                // Auto-select venue if matched
+                // ========================================
+                // AUTO-SELECT VENUE
+                // ========================================
                 if (match.venue?.db_venue_id) {
                     const venueSelect = document.getElementById('venue-select');
                     venueSelect.value = match.venue.db_venue_id;
                     console.log(`Auto-selected venue: ${match.venue.db_venue_name} (ID: ${match.venue.db_venue_id})`);
                 }
                 
-                // Enable toss simulation
-                document.getElementById('use-toss').checked = true;
-                
-                // If toss info is available, we could pre-set it (future enhancement)
+                // ========================================
+                // HANDLE TOSS (highlight if available)
+                // ========================================
+                const useTossCheckbox = document.getElementById('use-toss');
+                if (match.toss_winner && match.toss_decision) {
+                    console.log(`  Toss: ${match.toss_winner} elected to ${match.toss_decision}`);
+                    // Pre-set toss and highlight
+                    useTossCheckbox.checked = false;  // Don't simulate - we know the result
+                    useTossCheckbox.parentElement.classList.add('toss-highlight');
+                    
+                    // Store toss info for simulation
+                    window.tossResult = {
+                        winner: match.toss_winner,
+                        decision: match.toss_decision
+                    };
+                } else {
+                    useTossCheckbox.checked = true;
+                    useTossCheckbox.parentElement.classList.remove('toss-highlight');
+                    window.tossResult = null;
+                }
                 
             } else {
                 alert('Error loading CREX match: ' + (data.error || 'Unknown error'));
@@ -1265,9 +2101,11 @@
             if (data.success && data.match) {
                 const match = data.match;
                 
-                // Show match info
+                // Get team names
                 const team1Name = match.team1?.long_name || match.team1_db?.name || 'Team 1';
                 const team2Name = match.team2?.long_name || match.team2_db?.name || 'Team 2';
+                
+                // Update match info display
                 document.getElementById('t20-match-name').textContent = `${team1Name} vs ${team2Name}`;
                 document.getElementById('t20-match-date').textContent = `${match.start_date} ${match.start_time || ''}`;
                 
@@ -1282,42 +2120,85 @@
                 
                 console.log(`ESPN match loaded: ${team1Name} vs ${team2Name}`);
                 console.log(`  Venue: ${match.venue?.name} -> DB: ${match.venue?.db_venue_name}`);
-                console.log(`  Team 1 Squad: ${match.team1?.players?.length || 0} players`);
-                console.log(`  Team 2 Squad: ${match.team2?.players?.length || 0} players`);
+                console.log(`  Team 1 Squad: ${team1Players} players (${team1Matched} matched)`);
+                console.log(`  Team 2 Squad: ${team2Players} players (${team2Matched} matched)`);
                 
-                // Store squad data globally for filtering
+                // Store match URL for later use
+                window.currentMatchUrl = matchUrl;
+                
+                // Store squad data globally
                 window.espnSquadData = {
                     team1: match.team1?.players || [],
                     team2: match.team2?.players || []
                 };
                 
-                // Auto-fill teams using waterfall selection
-                if (match.team1_db) {
-                    // Select team in dropdown first
-                    const team1Select = document.getElementById('team1-select');
-                    for (let opt of team1Select.options) {
-                        if (opt.textContent === match.team1_db.name) {
-                            team1Select.value = opt.value;
-                            break;
-                        }
+                // ========================================
+                // AUTO-POPULATE TEAM 1 using new panel system
+                // ========================================
+                const team1Squad = (match.team1?.players || []).filter(p => p.db_player_id);
+                if (team1Squad.length > 0) {
+                    // Update team title
+                    document.getElementById('team1-title').textContent = team1Name;
+                    
+                    // Store team data
+                    teamPlayerData[1].teamName = team1Name;
+                    teamPlayerData[1].teamDbId = match.team1_db?.team_id || null;
+                    teamPlayerData[1].matchUrl = matchUrl;
+                    
+                    // Collapse manual mode section
+                    document.getElementById('team1-manual-section').classList.add('collapsed');
+                    document.getElementById('team1-manual-arrow').textContent = '▼';
+                    
+                    // Show source badge
+                    const badge = document.getElementById('team1-source-badge');
+                    document.getElementById('team1-source-icon').textContent = '📊';
+                    document.getElementById('team1-source-text').textContent = `ESPN: ${team1Squad.length} players`;
+                    badge.style.display = 'inline-flex';
+                    
+                    // Render the panels
+                    renderTeamPanels(1, team1Squad, null);
+                    
+                    // Check if we need suggestions (less than 11 matched)
+                    if (team1Squad.length < 11 && match.team1_db?.team_id) {
+                        loadSuggestions(1, match.team1_db.team_id);
                     }
-                    // Use waterfall selection with match_url
-                    await waterfallLoadTeam(1, null, match.team1_db.team_id, matchUrl);
-                }
-                if (match.team2_db) {
-                    // Select team in dropdown first
-                    const team2Select = document.getElementById('team2-select');
-                    for (let opt of team2Select.options) {
-                        if (opt.textContent === match.team2_db.name) {
-                            team2Select.value = opt.value;
-                            break;
-                        }
-                    }
-                    // Use waterfall selection with match_url
-                    await waterfallLoadTeam(2, null, match.team2_db.team_id, matchUrl);
                 }
                 
-                // Auto-select venue if matched
+                // ========================================
+                // AUTO-POPULATE TEAM 2 using new panel system
+                // ========================================
+                const team2Squad = (match.team2?.players || []).filter(p => p.db_player_id);
+                if (team2Squad.length > 0) {
+                    // Update team title
+                    document.getElementById('team2-title').textContent = team2Name;
+                    
+                    // Store team data
+                    teamPlayerData[2].teamName = team2Name;
+                    teamPlayerData[2].teamDbId = match.team2_db?.team_id || null;
+                    teamPlayerData[2].matchUrl = matchUrl;
+                    
+                    // Collapse manual mode section
+                    document.getElementById('team2-manual-section').classList.add('collapsed');
+                    document.getElementById('team2-manual-arrow').textContent = '▼';
+                    
+                    // Show source badge
+                    const badge = document.getElementById('team2-source-badge');
+                    document.getElementById('team2-source-icon').textContent = '📊';
+                    document.getElementById('team2-source-text').textContent = `ESPN: ${team2Squad.length} players`;
+                    badge.style.display = 'inline-flex';
+                    
+                    // Render the panels
+                    renderTeamPanels(2, team2Squad, null);
+                    
+                    // Check if we need suggestions (less than 11 matched)
+                    if (team2Squad.length < 11 && match.team2_db?.team_id) {
+                        loadSuggestions(2, match.team2_db.team_id);
+                    }
+                }
+                
+                // ========================================
+                // AUTO-SELECT VENUE
+                // ========================================
                 if (match.venue?.db_venue_id) {
                     const venueSelect = document.getElementById('venue-select');
                     venueSelect.value = match.venue.db_venue_id;
@@ -2482,44 +3363,45 @@
     }
     
     async function runSimulation() {
-        const team1Name = document.getElementById('team1-select').selectedOptions[0]?.text || 'Team 1';
-        const team2Name = document.getElementById('team2-select').selectedOptions[0]?.text || 'Team 2';
+        // Get team names from panel data or dropdown
+        const team1Name = teamPlayerData[1].teamName || document.getElementById('team1-select').selectedOptions[0]?.text || 'Team 1';
+        const team2Name = teamPlayerData[2].teamName || document.getElementById('team2-select').selectedOptions[0]?.text || 'Team 2';
         
-        // Collect all players from role-based dropdowns
-        const team1Keepers = getSelectedValues('team1-keepers');
-        const team1Batters = getSelectedValues('team1-batters');
-        const team1Allrounders = getSelectedValues('team1-allrounders');
-        const team1Bowlers = getSelectedValues('team1-bowlers');
+        // Get players from the new panel system
+        const team1Selected = teamPlayerData[1].selected;
+        const team2Selected = teamPlayerData[2].selected;
         
-        const team2Keepers = getSelectedValues('team2-keepers');
-        const team2Batters = getSelectedValues('team2-batters');
-        const team2Allrounders = getSelectedValues('team2-allrounders');
-        const team2Bowlers = getSelectedValues('team2-bowlers');
-        
-        // Combine all players (batters = everyone, bowlers = allrounders + bowlers)
-        const team1AllPlayers = [...team1Keepers, ...team1Batters, ...team1Allrounders, ...team1Bowlers];
-        const team2AllPlayers = [...team2Keepers, ...team2Batters, ...team2Allrounders, ...team2Bowlers];
-        
-        const team1BowlingPlayers = [...team1Allrounders, ...team1Bowlers];
-        const team2BowlingPlayers = [...team2Allrounders, ...team2Bowlers];
-        
-        if (team1AllPlayers.length === 0 || team2AllPlayers.length === 0) {
+        if (team1Selected.length === 0 || team2Selected.length === 0) {
             alert('Please select players for both teams');
             return;
         }
         
-        // Deduplicate (shouldn't happen with role-based selection, but just in case)
-        const uniqueTeam1Batters = [...new Set(team1AllPlayers)];
-        const uniqueTeam2Batters = [...new Set(team2AllPlayers)];
-        const uniqueTeam1Bowlers = [...new Set(team1BowlingPlayers)];
-        const uniqueTeam2Bowlers = [...new Set(team2BowlingPlayers)];
+        if (team1Selected.length < 11 || team2Selected.length < 11) {
+            const proceed = confirm(`Teams are incomplete (${team1Selected.length}/11 and ${team2Selected.length}/11). Continue anyway?`);
+            if (!proceed) return;
+        }
         
-        if (uniqueTeam1Batters.length < team1AllPlayers.length) {
-            console.warn(`Removed ${team1AllPlayers.length - uniqueTeam1Batters.length} duplicate Team 1 players`);
-        }
-        if (uniqueTeam2Batters.length < team2AllPlayers.length) {
-            console.warn(`Removed ${team2AllPlayers.length - uniqueTeam2Batters.length} duplicate Team 2 players`);
-        }
+        // Extract player IDs from panel data
+        const uniqueTeam1Batters = team1Selected.map(p => String(p.db_player_id || p.player_id || p.id));
+        const uniqueTeam2Batters = team2Selected.map(p => String(p.db_player_id || p.player_id || p.id));
+        
+        // Determine bowlers (role = BOWL or AR)
+        const uniqueTeam1Bowlers = team1Selected
+            .filter(p => {
+                const role = normalizeRole(p.role || p.player_role);
+                return role === 'BOWL' || role === 'AR';
+            })
+            .map(p => String(p.db_player_id || p.player_id || p.id));
+        
+        const uniqueTeam2Bowlers = team2Selected
+            .filter(p => {
+                const role = normalizeRole(p.role || p.player_role);
+                return role === 'BOWL' || role === 'AR';
+            })
+            .map(p => String(p.db_player_id || p.player_id || p.id));
+        
+        console.log(`Team 1: ${uniqueTeam1Batters.length} batters, ${uniqueTeam1Bowlers.length} bowlers`);
+        console.log(`Team 2: ${uniqueTeam2Batters.length} batters, ${uniqueTeam2Bowlers.length} bowlers`);
         
         // Get venue and toss options
         const venueSelect = document.getElementById('venue-select');
