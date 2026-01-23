@@ -666,10 +666,14 @@ class CREXScraper:
         """
         Parse squad from match info page.
         
-        Players are in links like: /player/quinton-de-kock-92
-        With roles like: "Batter", "Bowler", "All Rounder"
-        Captain marked with "(C)", WK marked with "(WK)"
-        Overseas players have airplane emoji
+        NOTE: CREX uses JavaScript tabs to show squad data. The initial HTML only
+        contains ONE team's squad (usually the second team in the URL). The other
+        team's data is loaded via JavaScript when the tab is clicked.
+        
+        This method now:
+        1. Extracts all players from the HTML
+        2. Identifies which team they belong to from the tab structure
+        3. Returns the full squad for the matching team, None for the other
         """
         try:
             players = []
@@ -677,15 +681,18 @@ class CREXScraper:
             # Find all player links
             player_links = soup.select('a[href*="/player/"]')
             
-            # We need to identify which players belong to which team
-            # CREX shows both squads, usually in order (team1 first, then team2)
-            # Look for squad section headers or team indicators
+            # Find which team's tab is active/visible
+            # Look for pattern: "Squads SEC PR" where first abbreviation after "Squads" is active
+            page_text = soup.get_text(' ', strip=True)
+            squad_match = re.search(r'Squads?\s+([A-Z]{2,5})\s+([A-Z]{2,5})', page_text)
             
-            squad_sections = soup.find_all(string=re.compile(r'Squads?', re.I))
+            active_team_abbr = None
+            if squad_match:
+                # The first abbreviation after "Squads" is the active/visible tab
+                active_team_abbr = squad_match.group(1)
+                logger.debug(f"Active squad tab: {active_team_abbr}")
             
-            # Find player cards - they're usually in a specific structure
-            # Each player card contains: image, name link, role badge
-            
+            # Parse all players
             for link in player_links:
                 href = link.get('href', '')
                 
@@ -699,50 +706,44 @@ class CREXScraper:
                 # Get player name from link text or title
                 name = link.get('title', '') or link.get_text(strip=True)
                 
-                # Clean up name - remove abbreviations if we have full name
+                # Clean up name - remove role text that got concatenated
+                name = re.sub(r'(Batter|Bowler|All Rounder|Wicket Keeper|✈️|\(C\)|\(WK\))+', '', name).strip()
+                
                 if not name:
                     # Extract from URL: quinton-de-kock -> Quinton De Kock
                     name_from_url = href.split('/')[-1].rsplit('-', 1)[0]
                     name = name_from_url.replace('-', ' ').title()
                 
                 # Get short name (shown on card)
-                short_name = link.get_text(strip=True) if link.get_text(strip=True) else name.split()[0]
+                short_name = name.split()[0] if name else 'Unknown'
                 
-                # Look for role in parent/sibling elements
+                # Look for role in parent element ONLY (not grandparent)
+                # Grandparent contains all players' text and causes false matches
                 parent = link.parent
-                if parent:
-                    parent_text = parent.get_text(' ', strip=True)
-                else:
-                    parent_text = ''
+                parent_text = parent.get_text(' ', strip=True) if parent else ''
                 
-                # Also check grandparent
-                grandparent = parent.parent if parent else None
-                if grandparent:
-                    grandparent_text = grandparent.get_text(' ', strip=True)
-                else:
-                    grandparent_text = ''
+                # Use only parent text for role detection
+                context_text = parent_text
                 
-                context_text = parent_text + ' ' + grandparent_text
-                
-                # Detect role
-                role = 'Unknown'
+                # Detect role from the parent text (e.g., "Q d Kock (WK) Batter")
+                role = 'Batter'  # Default
                 if 'All Rounder' in context_text or 'All-Rounder' in context_text:
                     role = 'All Rounder'
                 elif 'Bowler' in context_text:
                     role = 'Bowler'
                 elif 'Batter' in context_text:
                     role = 'Batter'
-                elif 'WK' in context_text or 'Wicketkeeper' in context_text:
+                
+                # Detect wicketkeeper from (WK) marker in THIS player's text
+                is_wicketkeeper = '(WK)' in context_text
+                if is_wicketkeeper:
                     role = 'WK'
                 
-                # Detect captain
-                is_captain = '(C)' in context_text or '(c)' in context_text
+                # Detect captain from (C) marker
+                is_captain = '(C)' in context_text
                 
-                # Detect wicketkeeper
-                is_wicketkeeper = '(WK)' in context_text or 'WK' in context_text or 'Wicketkeeper' in context_text.lower()
-                
-                # Detect overseas (airplane emoji or text)
-                is_overseas = '✈️' in context_text or '✈' in context_text or 'overseas' in context_text.lower()
+                # Detect overseas (airplane emoji) in this player's text
+                is_overseas = '✈️' in context_text or '✈' in context_text
                 
                 player = CREXPlayer(
                     crex_id=crex_player_id,
@@ -758,23 +759,41 @@ class CREXScraper:
                 if not any(p.crex_id == player.crex_id for p in players):
                     players.append(player)
             
-            # Split players between teams (first half = team1, second half = team2)
-            # This is a simplification - ideally we'd identify team sections properly
-            if players:
-                mid = len(players) // 2
-                team_players = players[:mid] if is_first_team else players[mid:]
-            else:
-                team_players = []
+            logger.debug(f"Parsed {len(players)} players from HTML")
             
-            if team_players:
+            # Determine if this team's data is in the HTML
+            # The active tab abbreviation should match the team_id
+            # team_id comes from the URL (e.g., "MY", "N0")
+            
+            # Check if this team's data is visible (active tab matches)
+            is_visible_team = False
+            if active_team_abbr:
+                # Compare abbreviations (team_id might be e.g., "N0" for SEC)
+                if team_id == active_team_abbr or team_id.upper() == active_team_abbr:
+                    is_visible_team = True
+                # Also check if team_name abbreviation matches
+                team_abbr = ''.join([w[0] for w in team_name.split()]).upper()
+                if team_abbr == active_team_abbr:
+                    is_visible_team = True
+            
+            # If we can't determine from tabs, use team_name to match player names
+            if not is_visible_team and players:
+                # Try to identify team from known player names
+                # Check if any player in our parsed list matches what we expect for this team
+                # This is a heuristic - we check if we can match players to the team
+                is_visible_team = not is_first_team  # Default: second team is usually visible
+            
+            if is_visible_team and players:
+                logger.info(f"CREX HTML contains {len(players)} players for {team_name}")
                 return CREXTeam(
                     crex_id=team_id,
                     name=team_name,
                     abbreviation=team_id,
-                    players=team_players
+                    players=players
                 )
-            
-            return None
+            else:
+                logger.info(f"CREX HTML does not contain squad data for {team_name} (loaded via JavaScript)")
+                return None
         
         except Exception as e:
             logger.debug(f"Failed to parse squad for {team_name}: {e}")

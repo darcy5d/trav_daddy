@@ -2666,6 +2666,75 @@ def get_crex_match():
         # Match teams to database
         team1_db = None
         team2_db = None
+        
+        # Helper function to load team from database
+        def load_team_from_db(team_id, team_name, gender):
+            """Load recent lineup from database for a team."""
+            from src.utils.role_classifier import infer_role_from_stats
+            
+            conn = get_connection()
+            cursor = conn.cursor()
+            
+            # Get the most recent match for this team
+            cursor.execute("""
+                SELECT m.match_id FROM matches m
+                WHERE (m.team1_id = ? OR m.team2_id = ?)
+                  AND m.match_type = 'T20' AND m.gender = ?
+                ORDER BY m.date DESC LIMIT 1
+            """, (team_id, team_id, gender))
+            match_row = cursor.fetchone()
+            
+            if not match_row:
+                conn.close()
+                return []
+            
+            match_id = match_row['match_id']
+            
+            # Get players from that match
+            cursor.execute("""
+                SELECT 
+                    p.player_id, p.name,
+                    (SELECT SUM(overs_bowled) FROM player_match_stats WHERE player_id = p.player_id) as overs,
+                    (SELECT SUM(wickets_taken) FROM player_match_stats WHERE player_id = p.player_id) as wickets,
+                    (SELECT SUM(runs_scored) FROM player_match_stats WHERE player_id = p.player_id) as runs,
+                    (SELECT SUM(balls_faced) FROM player_match_stats WHERE player_id = p.player_id) as balls,
+                    (SELECT SUM(stumpings) FROM player_match_stats WHERE player_id = p.player_id) as stumpings
+                FROM player_match_stats pms
+                JOIN players p ON pms.player_id = p.player_id
+                WHERE pms.match_id = ? AND pms.team_id = ?
+                ORDER BY pms.batting_position
+            """, (match_id, team_id))
+            
+            players = []
+            for row in cursor.fetchall():
+                stats = {
+                    'total_matches': 1,
+                    'runs_scored': row['runs'] or 0,
+                    'balls_faced': row['balls'] or 0,
+                    'overs_bowled': row['overs'] or 0,
+                    'wickets_taken': row['wickets'] or 0,
+                    'stumpings': row['stumpings'] or 0
+                }
+                role = infer_role_from_stats(stats)
+                # role can be an enum or string, handle both
+                role_name = role.value if hasattr(role, 'value') else str(role)
+                role_str = 'WK' if 'keeper' in role_name.lower() else ('All Rounder' if 'all' in role_name.lower() else ('Bowler' if 'bowl' in role_name.lower() else 'Batter'))
+                
+                players.append({
+                    'crex_id': None,
+                    'name': row['name'],
+                    'short_name': row['name'].split()[0] if row['name'] else 'Unknown',
+                    'role': role_str,
+                    'is_captain': False,
+                    'is_wicketkeeper': 'keeper' in role_name.lower(),
+                    'is_overseas': False,
+                    'db_player_id': row['player_id']
+                })
+            
+            conn.close()
+            logger.info(f"Loaded {len(players)} players from database for {team_name}")
+            return players
+        
         if match.team1:
             team_match = scraper.match_team_to_db(match.team1, match.gender)
             if team_match:
@@ -2682,6 +2751,122 @@ def get_crex_match():
             # Always try to match players, even if team doesn't match
             team_name_for_matching = team_match[1] if team_match else None
             scraper.match_players_to_db(match.team2, team_name_for_matching, match.gender)
+        
+        # CREX uses JavaScript tabs for squads - only one team's data is in the HTML
+        # If a team has no players, load from database as fallback
+        if match.team1 and not match.team1.players and team1_db:
+            logger.info(f"Loading {match.team1.name} squad from database (not in CREX HTML)")
+            db_players = load_team_from_db(team1_db['team_id'], team1_db['name'], match.gender)
+            # Convert to CREXPlayer format and add to team
+            for p in db_players:
+                from src.api.crex_scraper import CREXPlayer
+                match.team1.players.append(CREXPlayer(
+                    crex_id=p['crex_id'],
+                    name=p['name'],
+                    short_name=p['short_name'],
+                    role=p['role'],
+                    is_captain=p['is_captain'],
+                    is_wicketkeeper=p['is_wicketkeeper'],
+                    is_overseas=p['is_overseas'],
+                    db_player_id=p['db_player_id']
+                ))
+        
+        if match.team2 and not match.team2.players and team2_db:
+            logger.info(f"Loading {match.team2.name} squad from database (not in CREX HTML)")
+            db_players = load_team_from_db(team2_db['team_id'], team2_db['name'], match.gender)
+            for p in db_players:
+                from src.api.crex_scraper import CREXPlayer
+                match.team2.players.append(CREXPlayer(
+                    crex_id=p['crex_id'],
+                    name=p['name'],
+                    short_name=p['short_name'],
+                    role=p['role'],
+                    is_captain=p['is_captain'],
+                    is_wicketkeeper=p['is_wicketkeeper'],
+                    is_overseas=p['is_overseas'],
+                    db_player_id=p['db_player_id']
+                ))
+        
+        # Also handle case where team object is None (CREX couldn't create it)
+        # First, try to match team names to database if we don't have team_db yet
+        def find_team_in_db(team_name, gender):
+            """Find team in database by name using fuzzy matching."""
+            from difflib import SequenceMatcher
+            conn = get_connection()
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT DISTINCT t.team_id, t.name 
+                FROM teams t
+                JOIN matches m ON t.team_id IN (m.team1_id, m.team2_id)
+                WHERE m.gender = ? AND m.match_type = 'T20'
+            """, (gender,))
+            teams = cursor.fetchall()
+            conn.close()
+            
+            best_match = None
+            best_score = 0
+            for row in teams:
+                score = SequenceMatcher(None, team_name.lower(), row['name'].lower()).ratio()
+                if score > best_score and score >= 0.7:
+                    best_score = score
+                    best_match = (row['team_id'], row['name'])
+            return best_match
+        
+        if not team1_db and hasattr(match, 'team1_name') and match.team1_name:
+            team_match = find_team_in_db(match.team1_name, match.gender)
+            if team_match:
+                team1_db = {'team_id': team_match[0], 'name': team_match[1]}
+                logger.info(f"Matched team name '{match.team1_name}' to DB: {team1_db['name']}")
+        
+        if not team2_db and hasattr(match, 'team2_name') and match.team2_name:
+            team_match = find_team_in_db(match.team2_name, match.gender)
+            if team_match:
+                team2_db = {'team_id': team_match[0], 'name': team_match[1]}
+                logger.info(f"Matched team name '{match.team2_name}' to DB: {team2_db['name']}")
+        
+        if not match.team1 and team1_db:
+            team_name = match.team1_name if hasattr(match, 'team1_name') else team1_db['name']
+            logger.info(f"Creating {team_name} from database (no CREX data)")
+            from src.api.crex_scraper import CREXTeam, CREXPlayer
+            db_players = load_team_from_db(team1_db['team_id'], team1_db['name'], match.gender)
+            if db_players:
+                match.team1 = CREXTeam(
+                    crex_id=getattr(match, 'team1_id', ''),
+                    name=team_name,
+                    abbreviation='',
+                    players=[CREXPlayer(
+                        crex_id=p['crex_id'],
+                        name=p['name'],
+                        short_name=p['short_name'],
+                        role=p['role'],
+                        is_captain=p['is_captain'],
+                        is_wicketkeeper=p['is_wicketkeeper'],
+                        is_overseas=p['is_overseas'],
+                        db_player_id=p['db_player_id']
+                    ) for p in db_players]
+                )
+        
+        if not match.team2 and team2_db:
+            team_name = match.team2_name if hasattr(match, 'team2_name') else team2_db['name']
+            logger.info(f"Creating {team_name} from database (no CREX data)")
+            from src.api.crex_scraper import CREXTeam, CREXPlayer
+            db_players = load_team_from_db(team2_db['team_id'], team2_db['name'], match.gender)
+            if db_players:
+                match.team2 = CREXTeam(
+                    crex_id=getattr(match, 'team2_id', ''),
+                    name=team_name,
+                    abbreviation='',
+                    players=[CREXPlayer(
+                        crex_id=p['crex_id'],
+                        name=p['name'],
+                        short_name=p['short_name'],
+                        role=p['role'],
+                        is_captain=p['is_captain'],
+                        is_wicketkeeper=p['is_wicketkeeper'],
+                        is_overseas=p['is_overseas'],
+                        db_player_id=p['db_player_id']
+                    ) for p in db_players]
+                )
         
         def team_to_dict(team):
             if not team:
