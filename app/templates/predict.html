@@ -1042,9 +1042,68 @@
                 return !selectedIds.has(pid);
             });
         } else {
-            // Auto-select first 11 (or all if less)
-            selected = squad.slice(0, Math.min(11, squad.length));
-            available = squad.slice(11);
+            // Smart auto-select: prioritize by role (WK first, then balanced team)
+            // 1. Get all wicketkeepers first
+            const wicketkeepers = squad.filter(p => {
+                const role = normalizeRole(p.role || p.player_role);
+                return role === 'WK' || p.is_wicketkeeper;
+            });
+            
+            // 2. Get other players by role
+            const batters = squad.filter(p => {
+                const role = normalizeRole(p.role || p.player_role);
+                return role === 'BAT' && !p.is_wicketkeeper;
+            });
+            const allrounders = squad.filter(p => {
+                const role = normalizeRole(p.role || p.player_role);
+                return role === 'AR';
+            });
+            const bowlers = squad.filter(p => {
+                const role = normalizeRole(p.role || p.player_role);
+                return role === 'BOWL';
+            });
+            
+            // 3. Build optimal XI: 1 WK, batters, all-rounders, bowlers
+            selected = [];
+            
+            // Add at least 1 WK (all if only 1-2)
+            const wkCount = Math.min(wicketkeepers.length, Math.max(1, wicketkeepers.length <= 2 ? wicketkeepers.length : 1));
+            selected.push(...wicketkeepers.slice(0, wkCount));
+            
+            // Add batters (aim for 3-4)
+            const batCount = Math.min(batters.length, 4);
+            selected.push(...batters.slice(0, batCount));
+            
+            // Add all-rounders (aim for 2-3)
+            const arCount = Math.min(allrounders.length, 3);
+            selected.push(...allrounders.slice(0, arCount));
+            
+            // Add bowlers (aim for 3-4)
+            const bowlCount = Math.min(bowlers.length, 4);
+            selected.push(...bowlers.slice(0, bowlCount));
+            
+            // Fill remaining slots if needed (up to 11)
+            if (selected.length < 11) {
+                const selectedIds = new Set(selected.map(p => p.db_player_id || p.player_id || p.crex_id));
+                const remaining = squad.filter(p => {
+                    const pid = p.db_player_id || p.player_id || p.crex_id;
+                    return !selectedIds.has(pid);
+                });
+                const needed = 11 - selected.length;
+                selected.push(...remaining.slice(0, needed));
+            }
+            
+            // Trim to 11 if over
+            selected = selected.slice(0, 11);
+            
+            // Available = everyone not selected
+            const selectedIds = new Set(selected.map(p => p.db_player_id || p.player_id || p.crex_id));
+            available = squad.filter(p => {
+                const pid = p.db_player_id || p.player_id || p.crex_id;
+                return !selectedIds.has(pid);
+            });
+            
+            console.log(`[renderTeamPanels] Smart selection: ${wicketkeepers.length} WK, ${batters.length} BAT, ${allrounders.length} AR, ${bowlers.length} BOWL -> Selected ${selected.length}`);
         }
         
         // Store in state
