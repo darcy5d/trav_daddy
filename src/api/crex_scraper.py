@@ -194,12 +194,15 @@ class CREXScraper:
         """
         Parse CREX date/time formats.
         
+        CREX is based in India, so all times are in IST (UTC+5:30).
+        We convert to UTC for date_time_gmt.
+        
         Args:
             date_str: e.g., "Saturday, 24 January, 10:00 AM" or "Friday, 23 January"
             time_str: Optional separate time string
             
         Returns:
-            (start_date YYYY-MM-DD, start_time HH:MM AM/PM, date_time_gmt ISO)
+            (start_date YYYY-MM-DD, start_time HH:MM AM/PM in IST, date_time_gmt ISO in UTC)
         """
         try:
             # Try to extract time from date_str if it contains it
@@ -233,7 +236,7 @@ class CREXScraper:
                 
                 start_date = dt.strftime("%Y-%m-%d")
                 
-                # Parse time if available
+                # Parse time if available (CREX times are in IST = UTC+5:30)
                 start_time = None
                 date_time_gmt = None
                 
@@ -242,7 +245,11 @@ class CREXScraper:
                     try:
                         time_obj = datetime.strptime(time_str.strip(), "%I:%M %p")
                         dt = dt.replace(hour=time_obj.hour, minute=time_obj.minute)
-                        date_time_gmt = dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+                        
+                        # Convert IST to UTC (subtract 5 hours 30 minutes)
+                        # IST is UTC+5:30
+                        dt_utc = dt - timedelta(hours=5, minutes=30)
+                        date_time_gmt = dt_utc.strftime("%Y-%m-%dT%H:%M:%SZ")
                     except ValueError:
                         pass
                 

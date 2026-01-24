@@ -1396,6 +1396,7 @@ def simulate_match_stream():
     venue_id = data.get('venue_id')
     use_toss = data.get('use_toss', False)
     gender = data.get('gender', 'male')
+    frontend_player_names = data.get('player_names', {})  # Names from frontend
     
     # CRICKET XI LOGIC: Batting order = top-order batters + bowlers at tail
     # This ensures 11 UNIQUE players (no duplicates possible)
@@ -1569,7 +1570,12 @@ def simulate_match_stream():
             # Generate scorecard for NN simulator
             if simulator_type == 'nn' and hasattr(simulator, 'simulate_detailed_match'):
                 try:
-                    player_names = _get_player_names(team1_batting_order + team2_batting_order + team1_bowlers + team2_bowlers)
+                    # Get player names from database, then fall back to frontend-provided names
+                    db_player_names = _get_player_names(team1_batting_order + team2_batting_order + team1_bowlers + team2_bowlers)
+                    # Merge: DB names take precedence, then frontend names, then fallback
+                    player_names = {**frontend_player_names}  # Start with frontend names
+                    player_names.update({str(k): v for k, v in db_player_names.items()})  # Override with DB names
+                    
                     scorecard = simulator.simulate_detailed_match(
                         team1_batting_order,  # 11 unique players in batting order
                         team1_bowlers[:5],
@@ -1579,13 +1585,17 @@ def simulate_match_stream():
                         team1_bats_first=True
                     )
                     for b in scorecard['team1_batting']:
-                        b['name'] = player_names.get(b['player_id'], f"Player {b['player_id']}")
+                        pid = str(b['player_id'])
+                        b['name'] = player_names.get(pid, f"Player {pid}")
                     for b in scorecard['team2_batting']:
-                        b['name'] = player_names.get(b['player_id'], f"Player {b['player_id']}")
+                        pid = str(b['player_id'])
+                        b['name'] = player_names.get(pid, f"Player {pid}")
                     for b in scorecard['team1_bowling']:
-                        b['name'] = player_names.get(b['player_id'], f"Player {b['player_id']}")
+                        pid = str(b['player_id'])
+                        b['name'] = player_names.get(pid, f"Player {pid}")
                     for b in scorecard['team2_bowling']:
-                        b['name'] = player_names.get(b['player_id'], f"Player {b['player_id']}")
+                        pid = str(b['player_id'])
+                        b['name'] = player_names.get(pid, f"Player {pid}")
                     result['scorecard'] = scorecard
                 except Exception as e:
                     logger.warning(f"Could not generate scorecard: {e}")
@@ -2790,7 +2800,7 @@ def get_crex_match():
         # Also handle case where team object is None (CREX couldn't create it)
         # First, try to match team names to database if we don't have team_db yet
         def find_team_in_db(team_name, gender):
-            """Find team in database by name using fuzzy matching."""
+            """Find team in database by name using improved matching."""
             from difflib import SequenceMatcher
             conn = get_connection()
             cursor = conn.cursor()
@@ -2803,13 +2813,39 @@ def get_crex_match():
             teams = cursor.fetchall()
             conn.close()
             
+            # Direction words that must match exactly
+            directions = {'northern', 'southern', 'eastern', 'western', 'central'}
+            
+            def get_direction(name):
+                words = name.lower().split()
+                for word in words:
+                    if word in directions:
+                        return word
+                return None
+            
+            search_direction = get_direction(team_name)
+            
             best_match = None
             best_score = 0
             for row in teams:
-                score = SequenceMatcher(None, team_name.lower(), row['name'].lower()).ratio()
-                if score > best_score and score >= 0.7:
+                db_name = row['name']
+                db_direction = get_direction(db_name)
+                
+                # If both have direction words, they MUST match
+                if search_direction and db_direction:
+                    if search_direction != db_direction:
+                        continue  # Skip - wrong direction (Northern vs Southern)
+                
+                score = SequenceMatcher(None, team_name.lower(), db_name.lower()).ratio()
+                
+                # Require higher threshold (0.8 instead of 0.7)
+                if score > best_score and score >= 0.8:
                     best_score = score
-                    best_match = (row['team_id'], row['name'])
+                    best_match = (row['team_id'], db_name)
+            
+            if best_match:
+                logger.info(f"Matched team '{team_name}' to '{best_match[1]}' (score: {best_score:.2f})")
+            
             return best_match
         
         if not team1_db and hasattr(match, 'team1_name') and match.team1_name:

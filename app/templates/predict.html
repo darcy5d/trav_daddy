@@ -3554,6 +3554,13 @@
             }
         }, 50);
         
+        // Build player name map for scorecard display
+        const playerNames = {};
+        [...team1Selected, ...team2Selected].forEach(p => {
+            const pid = String(p.db_player_id || p.player_id || p.id);
+            playerNames[pid] = p.name || p.player_name || `Player ${pid}`;
+        });
+        
         const payload = {
             team1_batters: uniqueTeam1Batters,
             team1_bowlers: uniqueTeam1Bowlers,
@@ -3563,7 +3570,8 @@
             n_simulations: nSimulations,
             venue_id: venueId,
             use_toss: useToss,
-            gender: currentGender
+            gender: currentGender,
+            player_names: playerNames  // Include names for scorecard
         };
         
         try {
