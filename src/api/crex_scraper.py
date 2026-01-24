@@ -274,6 +274,8 @@ class CREXScraper:
         Returns:
             List of CREXMatch objects with basic info
         """
+        from bs4 import NavigableString
+        
         html = self._fetch(self.SCHEDULE_URL)
         if not html:
             return []
@@ -281,32 +283,44 @@ class CREXScraper:
         soup = BeautifulSoup(html, 'html.parser')
         matches = []
         
-        # Find all match links - they point to /scoreboard/...
-        for link in soup.select('a[href*="/scoreboard/"]'):
-            href = link.get('href', '')
-            
-            # Skip if not a valid match URL
-            if '/scoreboard/' not in href:
-                continue
-            
-            # Parse match from the link
-            match = self._parse_schedule_entry(link, href)
-            if match:
-                # Filter by format if specified
-                if formats and match.format_type not in formats:
-                    continue
-                matches.append(match)
+        # Date pattern for headers like "Sat, 24 Jan 2026"
+        date_pattern = re.compile(r'^(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun)[a-z]*,?\s+\d{1,2}\s+[A-Za-z]+(?:\s+\d{4})?$', re.I)
+        
+        # Track current date as we traverse the DOM
+        current_date = None
+        match_hrefs_seen = set()
+        
+        # Traverse all elements in document order
+        for element in soup.body.descendants if soup.body else []:
+            if isinstance(element, NavigableString):
+                text = str(element).strip()
+                # Check if this is a date header
+                if date_pattern.match(text):
+                    current_date = text
+            elif hasattr(element, 'name') and element.name == 'a':
+                href = element.get('href', '')
+                if '/scoreboard/' in href and href not in match_hrefs_seen:
+                    match_hrefs_seen.add(href)
+                    
+                    # Parse match from the link with current date
+                    match = self._parse_schedule_entry(element, href, current_date)
+                    if match:
+                        # Filter by format if specified
+                        if formats and match.format_type not in formats:
+                            continue
+                        matches.append(match)
         
         logger.info(f"Found {len(matches)} matches from CREX schedule")
         return matches
     
-    def _parse_schedule_entry(self, link_element, href: str) -> Optional[CREXMatch]:
+    def _parse_schedule_entry(self, link_element, href: str, date_str: str = None) -> Optional[CREXMatch]:
         """
         Parse a match entry from the schedule page.
         
         Args:
             link_element: BeautifulSoup element for the match link
             href: Link URL
+            date_str: Date string from section header (e.g., "Sat, 24 Jan 2026")
             
         Returns:
             CREXMatch or None
@@ -391,6 +405,19 @@ class CREXScraper:
             time_match = re.search(r'(\d{1,2}:\d{2}\s*(?:AM|PM))', text, re.I)
             start_time = time_match.group(1) if time_match else None
             
+            # Build date_time_gmt from date_str + start_time (CREX times are in IST)
+            start_date = None
+            date_time_gmt = None
+            if date_str and start_time:
+                # Parse date string like "Sat, 24 Jan" or "Sat, 24 Jan 2026"
+                parsed_date, parsed_time, parsed_gmt = self._parse_crex_datetime(date_str, start_time)
+                start_date = parsed_date
+                date_time_gmt = parsed_gmt
+            elif date_str:
+                # Just date, no time
+                parsed_date, _, _ = self._parse_crex_datetime(date_str)
+                start_date = parsed_date
+            
             # Detect gender
             gender = self._detect_gender(text + team1_name + team2_name + slug)
             
@@ -417,7 +444,9 @@ class CREXScraper:
                 series_name=series_name,
                 format_type=format_type,
                 status=status,
+                start_date=start_date,
                 start_time=start_time,
+                date_time_gmt=date_time_gmt,
                 match_url=match_url,
                 gender=gender
             )
