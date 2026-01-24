@@ -619,15 +619,19 @@ class CREXScraper:
         
         # Venue is usually on its own line near the date
         # Look for venue patterns (Stadium, Ground, Oval, etc.)
+        # Stop at "Team Form" or other section boundaries
         venue_patterns = [
-            r'([A-Za-z\s]+(?:Stadium|Ground|Oval|Arena|Park|Centre|Center)[^,\n]*(?:,\s*[A-Za-z\s]+)?)',
-            r'(The\s+[A-Za-z\s]+,\s*[A-Za-z]+)',
+            # Match venue name + optional city, stop at Team Form or other sections
+            r'([A-Za-z\s\-\']+(?:Stadium|Ground|Oval|Arena|Park|Centre|Center|International Cricket Ground)(?:,\s*[A-Za-z\s\-]+)?)\s*(?:Team Form|Head to Head|Match|$)',
+            r'(The\s+[A-Za-z\s\-\']+,\s*[A-Za-z]+)\s*(?:Team Form|Head to Head|Match|$)',
         ]
         
         for pattern in venue_patterns:
             venue_match = re.search(pattern, all_text)
             if venue_match:
                 venue_name = venue_match.group(1).strip()
+                # Clean up any trailing whitespace or punctuation
+                venue_name = re.sub(r'\s+$', '', venue_name)
                 break
         
         # Parse date/time
