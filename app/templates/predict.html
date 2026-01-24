@@ -278,6 +278,22 @@
         pointer-events: none;
     }
     
+    .player-item.unmatched {
+        border-left: 3px solid #f59e0b;
+        background: rgba(245, 158, 11, 0.1);
+    }
+    
+    .player-item.unmatched:hover {
+        border-color: #f59e0b;
+    }
+    
+    .unmatched-icon {
+        color: #f59e0b;
+        font-size: 0.8rem;
+        margin-left: 0.25rem;
+        cursor: help;
+    }
+    
     .player-item .order-num {
         width: 24px;
         height: 24px;
@@ -1215,15 +1231,20 @@
         const role = normalizeRole(player.role || player.player_role || 'Unknown');
         const roleBadgeClass = getRoleBadgeClass(role);
         
+        // Check if player is matched to database (has numeric db_player_id)
+        const isMatched = player.db_player_id && !isNaN(parseInt(player.db_player_id));
+        const matchClass = isMatched ? 'matched' : 'unmatched';
+        const matchIcon = isMatched ? '' : '<span class="unmatched-icon" title="Not in database - stats unavailable">⚠</span>';
+        
         // Get key stat based on role
         const stat = getPlayerKeyStat(player, role);
         
         if (panel === 'available') {
             return `
-                <div class="player-item" onclick="movePlayer(${teamNum}, '${playerId}', 'selected')">
+                <div class="player-item ${matchClass}" onclick="movePlayer(${teamNum}, '${playerId}', 'selected')">
                     <span class="add-icon">+</span>
                     <div class="player-info">
-                        <div class="player-name">${name}</div>
+                        <div class="player-name">${name} ${matchIcon}</div>
                         <div class="player-stat">${stat}</div>
                     </div>
                     <span class="role-badge ${roleBadgeClass}">${role}</span>
@@ -1231,10 +1252,10 @@
             `;
         } else {
             return `
-                <div class="player-item" onclick="movePlayer(${teamNum}, '${playerId}', 'available')">
+                <div class="player-item ${matchClass}" onclick="movePlayer(${teamNum}, '${playerId}', 'available')">
                     <span class="order-num">${orderNum}</span>
                     <div class="player-info">
-                        <div class="player-name">${name}</div>
+                        <div class="player-name">${name} ${matchIcon}</div>
                         <div class="player-stat">${stat}</div>
                     </div>
                     <span class="role-badge ${roleBadgeClass}">${role}</span>
@@ -1381,18 +1402,27 @@
             return acc;
         }, {});
         
+        // Count matched vs unmatched players
+        const matchedCount = data.selected.filter(p => p.db_player_id && !isNaN(parseInt(p.db_player_id))).length;
+        const unmatchedCount = selectedCount - matchedCount;
+        
         const wkCount = roles['WK'] || 0;
         const hasBowlers = (roles['BOWL'] || 0) >= 4 || ((roles['BOWL'] || 0) + (roles['AR'] || 0)) >= 5;
+        const allMatched = unmatchedCount === 0;
         // Only require 11 players - WK info is not always available from CREX
         const isValid = selectedCount === 11;
         
         if (selectedCount > 0) {
             validationEl.style.display = 'block';
-            validationEl.className = `validation-summary ${isValid ? 'valid' : 'invalid'}`;
+            validationEl.className = `validation-summary ${isValid && allMatched ? 'valid' : isValid ? 'warning' : 'invalid'}`;
             validationEl.innerHTML = `
                 <div class="validation-item ${selectedCount === 11 ? 'valid' : 'invalid'}">
                     <span class="icon">${selectedCount === 11 ? '✓' : '✗'}</span>
                     <span>${selectedCount}/11 players selected</span>
+                </div>
+                <div class="validation-item ${allMatched ? 'valid' : 'warning'}">
+                    <span class="icon">${allMatched ? '✓' : '⚠'}</span>
+                    <span>Database: ${matchedCount}/11 matched${unmatchedCount > 0 ? ` (${unmatchedCount} missing stats)` : ''}</span>
                 </div>
                 <div class="validation-item info">
                     <span class="icon">ℹ</span>
@@ -3479,6 +3509,25 @@
         
         if (team1Selected.length < 11 || team2Selected.length < 11) {
             const proceed = confirm(`Teams are incomplete (${team1Selected.length}/11 and ${team2Selected.length}/11). Continue anyway?`);
+            if (!proceed) return;
+        }
+        
+        // Check for unmatched players (no db_player_id)
+        const team1Unmatched = team1Selected.filter(p => !p.db_player_id || isNaN(parseInt(p.db_player_id)));
+        const team2Unmatched = team2Selected.filter(p => !p.db_player_id || isNaN(parseInt(p.db_player_id)));
+        
+        if (team1Unmatched.length > 0 || team2Unmatched.length > 0) {
+            const unmatchedNames = [
+                ...team1Unmatched.map(p => `${team1Name}: ${p.name}`),
+                ...team2Unmatched.map(p => `${team2Name}: ${p.name}`)
+            ].join('\n');
+            
+            const proceed = confirm(
+                `⚠️ ${team1Unmatched.length + team2Unmatched.length} players not found in database:\n\n` +
+                unmatchedNames + '\n\n' +
+                'These players will use average stats instead of actual performance data.\n' +
+                'Results may be less accurate. Continue anyway?'
+            );
             if (!proceed) return;
         }
         
