@@ -1231,6 +1231,25 @@ class CREXScraper:
         
         team_names = [team.name, team.abbreviation]
         
+        # NZ Super Smash team rebrandings (new name -> old database name)
+        nz_rebrand_aliases = {
+            'northern brave': 'northern districts',
+            'southern brave': 'southern districts', 
+            'central stags': 'central districts',
+            'otago volts': 'otago',
+            'auckland aces': 'auckland',
+            'wellington firebirds': 'wellington',
+            'canterbury kings': 'canterbury',
+        }
+        
+        # Add aliases for rebranded teams
+        for alias_from, alias_to in nz_rebrand_aliases.items():
+            for name in list(team_names):
+                name_norm = name.lower().replace(' women', '').replace('-w', '').strip()
+                if alias_from in name_norm:
+                    team_names.append(alias_to)
+                    team_names.append(alias_to + ' women')
+        
         # Direction words that must match exactly
         directions = {'northern', 'southern', 'eastern', 'western', 'central'}
         
