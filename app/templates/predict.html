@@ -1103,7 +1103,44 @@
                 return !selectedIds.has(pid);
             });
             
-            console.log(`[renderTeamPanels] Smart selection: ${wicketkeepers.length} WK, ${batters.length} BAT, ${allrounders.length} AR, ${bowlers.length} BOWL -> Selected ${selected.length}`);
+            console.log(`[renderTeamPanels] Smart selection breakdown:`);
+            console.log(`  WKs (${wicketkeepers.length}):`, wicketkeepers.map(p => `${p.name} [role=${p.role}, is_wk=${p.is_wicketkeeper}]`));
+            console.log(`  BATs (${batters.length}):`, batters.map(p => p.name));
+            console.log(`  ARs (${allrounders.length}):`, allrounders.map(p => p.name));
+            console.log(`  BOWLs (${bowlers.length}):`, bowlers.map(p => p.name));
+            console.log(`  Final XI (${selected.length}):`, selected.map(p => `${p.name} [${normalizeRole(p.role)}]`));
+            
+            // SAFETY CHECK: Ensure at least 1 WK is selected
+            const selectedWKs = selected.filter(p => normalizeRole(p.role || p.player_role) === 'WK' || p.is_wicketkeeper);
+            if (selectedWKs.length === 0 && wicketkeepers.length > 0) {
+                console.warn('[renderTeamPanels] No WK in selected XI! Adding first available WK.');
+                // Find a WK not in selected and add them
+                const wkToAdd = wicketkeepers[0];
+                const wkId = wkToAdd.db_player_id || wkToAdd.player_id || wkToAdd.crex_id;
+                
+                // Remove last non-WK to make room
+                if (selected.length >= 11) {
+                    // Find a non-essential player to swap out (prefer removing extra AR)
+                    const selectedARs = selected.filter(p => normalizeRole(p.role) === 'AR');
+                    if (selectedARs.length > 2) {
+                        const toRemove = selectedARs[selectedARs.length - 1];
+                        selected = selected.filter(p => p !== toRemove);
+                        available.push(toRemove);
+                    } else {
+                        // Just remove the last player
+                        available.push(selected.pop());
+                    }
+                }
+                
+                // Add the WK
+                selected.unshift(wkToAdd);  // Add WK at the beginning
+                available = available.filter(p => {
+                    const pid = p.db_player_id || p.player_id || p.crex_id;
+                    return pid !== wkId;
+                });
+                
+                console.log(`[renderTeamPanels] Added WK: ${wkToAdd.name}`);
+            }
         }
         
         // Store in state
