@@ -1235,21 +1235,47 @@ class CREXScraper:
         db_venues = cursor.fetchall()
         conn.close()
         
+        # Clean venue name - strip common sponsor prefixes and suffixes
+        def normalize_venue_name(name: str) -> str:
+            if not name:
+                return ""
+            # Strip common sponsor/naming prefixes (2-3 letter codes often sponsors)
+            # E.g., "AM Gelephu" -> "Gelephu", "JW Marriott Stadium" -> "Marriott Stadium"
+            cleaned = re.sub(r'^[A-Z]{1,3}\s+', '', name.strip())
+            # Also strip "The " prefix
+            cleaned = re.sub(r'^The\s+', '', cleaned, flags=re.I)
+            # Remove trailing notes like "Team Form" that CREX sometimes includes
+            cleaned = re.sub(r'\s+Team Form$', '', cleaned, flags=re.I)
+            return cleaned
+        
+        venue_name_clean = normalize_venue_name(venue.name)
+        
+        # Create list of names to try matching
+        names_to_try = [venue.name]
+        if venue_name_clean != venue.name:
+            names_to_try.append(venue_name_clean)
+        
         best_match = None
         best_score = 0.0
         
-        for row in db_venues:
-            db_name = row['name']
-            score = venue_similarity(venue.name, db_name)
-            
-            # Boost score if city matches
-            if venue.city and row['city']:
-                if venue.city.lower() in row['city'].lower():
-                    score += 0.1
-            
-            if score > best_score:
-                best_score = score
-                best_match = (row['venue_id'], row['name'])
+        for try_name in names_to_try:
+            for row in db_venues:
+                db_name = row['name']
+                db_name_clean = normalize_venue_name(db_name)
+                
+                # Try both original and cleaned names
+                score1 = venue_similarity(try_name, db_name)
+                score2 = venue_similarity(try_name, db_name_clean)
+                score = max(score1, score2)
+                
+                # Boost score if city matches
+                if venue.city and row['city']:
+                    if venue.city.lower() in row['city'].lower():
+                        score += 0.1
+                
+                if score > best_score:
+                    best_score = score
+                    best_match = (row['venue_id'], row['name'])
         
         if best_match and best_score >= 0.7:
             logger.info(f"Matched venue '{venue.name}' to '{best_match[1]}' (score: {best_score:.2f})")
