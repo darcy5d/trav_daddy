@@ -162,39 +162,59 @@ def apply_schema_changes(conn):
 
 
 def apply_team_classifications(conn):
-    """Apply team tier classifications."""
+    """Apply team tier classifications using classify_teams_v2.py logic."""
     logger.info("Applying team tier classifications...")
     
-    classifications_path = Path(__file__).parent.parent / "src" / "data" / "team_tier_classifications.sql"
-    
-    if not classifications_path.exists():
-        logger.error(f"Classifications file not found: {classifications_path}")
-        return False
+    # Import the classification function from our new script
+    try:
+        from scripts.classify_teams_v2 import classify_team_tier
+    except ImportError:
+        # Try alternate import path
+        import importlib.util
+        spec = importlib.util.spec_from_file_location(
+            "classify_teams_v2", 
+            Path(__file__).parent / "classify_teams_v2.py"
+        )
+        classify_teams_v2 = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(classify_teams_v2)
+        classify_team_tier = classify_teams_v2.classify_team_tier
     
     try:
-        classifications_sql = classifications_path.read_text()
-        conn.executescript(classifications_sql)
+        cursor = conn.cursor()
+        
+        # Get all teams
+        cursor.execute("SELECT team_id, name FROM teams")
+        teams = cursor.fetchall()
+        
+        tier_counts = {1: 0, 2: 0, 3: 0, 4: 0, 5: 0}
+        
+        for team in teams:
+            new_tier = classify_team_tier(team['name'])
+            tier_counts[new_tier] += 1
+            
+            cursor.execute(
+                "UPDATE teams SET tier = ?, tier_last_reviewed = datetime('now') WHERE team_id = ?",
+                (new_tier, team['team_id'])
+            )
+        
         conn.commit()
         
-        # Verify classifications
-        cursor = conn.cursor()
-        cursor.execute("SELECT tier, COUNT(*) FROM teams GROUP BY tier ORDER BY tier")
-        tier_counts = cursor.fetchall()
-        
         logger.info("✓ Team classifications applied:")
-        for tier, count in tier_counts:
+        for tier, count in tier_counts.items():
             tier_name = {
-                1: "Elite Full Members",
-                2: "Full Members",
-                3: "Top Associates/Premier Franchises",
-                4: "Associates/Regional",
-                5: "Emerging/Domestic"
+                1: "Full ICC Members",
+                2: "Associate Nations",
+                3: "Premier Leagues (IPL, BBL, etc.)",
+                4: "Other Leagues & Major Domestic",
+                5: "Regional/Development Cricket"
             }.get(tier, f"Tier {tier}")
             logger.info(f"  Tier {tier} ({tier_name}): {count} teams")
         
         return True
     except Exception as e:
         logger.error(f"Error applying classifications: {e}")
+        import traceback
+        traceback.print_exc()
         return False
 
 
@@ -294,6 +314,14 @@ def print_summary(conn):
 
 def main():
     """Main recalculation function."""
+    import argparse
+    parser = argparse.ArgumentParser(description='Recalculate tiered ELO ratings')
+    parser.add_argument('--reset', action='store_true', 
+                        help='Skip confirmation prompt and run immediately')
+    parser.add_argument('--no-backup', action='store_true',
+                        help='Skip database backup (for testing)')
+    args = parser.parse_args()
+    
     print("="*70)
     print("TIERED ELO SYSTEM - FULL HISTORICAL RECALCULATION")
     print("="*70)
@@ -306,10 +334,13 @@ def main():
     print("  6. Generate promotion review flags")
     print("\nEstimated time: 5-10 minutes")
     
-    proceed = input("\nProceed? (yes/no): ").strip().lower()
-    if proceed != 'yes':
-        print("Aborted.")
-        return 1
+    if not args.reset:
+        proceed = input("\nProceed? (yes/no): ").strip().lower()
+        if proceed != 'yes':
+            print("Aborted.")
+            return 1
+    else:
+        print("\n[--reset flag set, proceeding automatically]")
     
     print()
     
@@ -317,7 +348,11 @@ def main():
     print("\n" + "-"*70)
     print("STEP 1: Creating backup...")
     print("-"*70)
-    backup_path = backup_current_database()
+    if args.no_backup:
+        print("  [--no-backup flag set, skipping backup]")
+        backup_path = None
+    else:
+        backup_path = backup_current_database()
     
     # Step 2: Apply schema changes
     print("\n" + "-"*70)
@@ -363,12 +398,14 @@ def main():
     print("\n" + "="*70)
     print("✓ RECALCULATION COMPLETE!")
     print("="*70)
-    print(f"\nBackup saved: {backup_path}")
+    if backup_path:
+        print(f"\nBackup saved: {backup_path}")
     print("\nNext steps:")
     print("  1. Review rankings: python -m src.elo.calculator_v3 --rankings")
     print("  2. Check promotion flags: curl http://localhost:5001/api/admin/promotion-flags")
     print("  3. Start Flask server to view UI: python app/main.py")
-    print("  4. If issues occur, restore from backup")
+    if backup_path:
+        print("  4. If issues occur, restore from backup")
     
     return 0
 

@@ -4,16 +4,20 @@ Ball Prediction Training Data Generator.
 Creates training dataset for the Ball Prediction Neural Network.
 
 For each delivery in the database, creates a feature vector containing:
-- Match state: innings, over, balls, runs, wickets, target (if 2nd innings)
-- Batter statistics: historical outcome distribution (8 features)
-- Bowler statistics: historical outcome distribution (8 features)
-- Phase: powerplay/middle/death (3 one-hot features)
-- Required rate (if chasing)
-- Venue features: scoring_factor, boundary_rate, wicket_rate, has_reliable_data (4 features)
+- Match state: innings, over, balls, runs, wickets, target (if 2nd innings) - 6 features
+- Phase: powerplay/middle/death - 3 one-hot features
+- Batter statistics: historical outcome distribution - 8 features
+- Bowler statistics: historical outcome distribution - 8 features
+- Venue features: scoring_factor, boundary_rate, wicket_rate, has_reliable_data - 4 features
+- Team ELO features: batting_team_elo, bowling_team_elo, team_elo_diff - 3 features
+- Player ELO features: batter_elo, bowler_elo - 2 features
 
 Target: outcome class (0, 1, 2, 3, 4, 6, W)
 
-Total features: 29 (6 + 3 + 8 + 8 + 4)
+Total features: 34 (6 + 3 + 8 + 8 + 4 + 3 + 2)
+
+Note: ELO features use HISTORICAL ELOs at match date, not current ELOs.
+This ensures the model learns from temporally-consistent data.
 """
 
 import logging
@@ -32,6 +36,133 @@ from src.features.player_distributions import PlayerDistributionBuilder
 from src.features.venue_stats import VenueStatsBuilder
 
 logger = logging.getLogger(__name__)
+
+
+# =============================================================================
+# ELO Lookup Functions (for temporally-consistent training data)
+# =============================================================================
+
+def build_team_elo_lookup(cursor, format_type: str, gender: str) -> Dict:
+    """
+    Pre-load team ELO history into memory for fast lookup.
+    
+    Returns dict: {(team_id, year_month): elo}
+    Uses monthly snapshots for efficiency.
+    """
+    logger.info("Loading team ELO history for fast lookup...")
+    
+    cursor.execute("""
+        SELECT team_id, date, elo
+        FROM team_elo_history
+        WHERE format = ? AND gender = ?
+        ORDER BY team_id, date
+    """, (format_type, gender))
+    
+    rows = cursor.fetchall()
+    
+    # Build lookup: for each team, store ELO at each date
+    team_elo_by_date = {}
+    for row in rows:
+        team_id = row['team_id']
+        date_str = str(row['date'])[:10]  # YYYY-MM-DD
+        elo = row['elo']
+        
+        if team_id not in team_elo_by_date:
+            team_elo_by_date[team_id] = []
+        team_elo_by_date[team_id].append((date_str, elo))
+    
+    logger.info(f"Loaded ELO history for {len(team_elo_by_date)} teams")
+    return team_elo_by_date
+
+
+def build_player_elo_lookup(cursor, format_type: str, gender: str) -> Dict:
+    """
+    Pre-load player ELO history into memory for fast lookup.
+    
+    Returns dict: {(player_id, year_month): {'batting': elo, 'bowling': elo}}
+    """
+    logger.info("Loading player ELO history for fast lookup...")
+    
+    cursor.execute("""
+        SELECT player_id, date, batting_elo, bowling_elo
+        FROM player_elo_history
+        WHERE format = ? AND gender = ?
+        ORDER BY player_id, date
+    """, (format_type, gender))
+    
+    rows = cursor.fetchall()
+    
+    player_elo_by_date = {}
+    for row in rows:
+        player_id = row['player_id']
+        date_str = str(row['date'])[:10]
+        
+        if player_id not in player_elo_by_date:
+            player_elo_by_date[player_id] = []
+        player_elo_by_date[player_id].append((
+            date_str, 
+            row['batting_elo'], 
+            row['bowling_elo']
+        ))
+    
+    logger.info(f"Loaded ELO history for {len(player_elo_by_date)} players")
+    return player_elo_by_date
+
+
+def get_team_elo_at_date(team_elo_lookup: Dict, team_id: int, match_date: str) -> float:
+    """
+    Get team ELO as of match date using pre-loaded lookup.
+    
+    Uses binary search for efficiency.
+    """
+    if team_id not in team_elo_lookup:
+        return 1500.0
+    
+    history = team_elo_lookup[team_id]
+    
+    # Find most recent ELO before match_date
+    best_elo = 1500.0
+    for date_str, elo in history:
+        if date_str <= match_date:
+            best_elo = elo
+        else:
+            break  # History is sorted, so we can stop
+    
+    return best_elo
+
+
+def get_player_elo_at_date(
+    player_elo_lookup: Dict, 
+    player_id: int, 
+    match_date: str, 
+    elo_type: str = 'batting'
+) -> float:
+    """
+    Get player ELO as of match date using pre-loaded lookup.
+    
+    elo_type: 'batting' or 'bowling'
+    """
+    if player_id not in player_elo_lookup:
+        return 1500.0
+    
+    history = player_elo_lookup[player_id]
+    
+    best_batting = 1500.0
+    best_bowling = 1500.0
+    
+    for date_str, batting_elo, bowling_elo in history:
+        if date_str <= match_date:
+            best_batting = batting_elo
+            best_bowling = bowling_elo
+        else:
+            break
+    
+    return best_batting if elo_type == 'batting' else best_bowling
+
+
+def normalize_elo(elo: float) -> float:
+    """Normalize ELO to roughly [-2, 2] range."""
+    return (elo - 1500) / 200
 
 
 def get_innings_phase(over: int) -> Tuple[int, int, int]:
@@ -86,6 +217,15 @@ def class_to_outcome_name(class_idx: int) -> str:
 class BallTrainingDataGenerator:
     """
     Generates training data for ball prediction neural network.
+    
+    Features (34 total):
+    - Match state: 6 features
+    - Phase: 3 features (one-hot)
+    - Batter distribution: 8 features
+    - Bowler distribution: 8 features
+    - Venue: 4 features
+    - Team ELO: 3 features (batting_team, bowling_team, diff)
+    - Player ELO: 2 features (batter, bowler)
     """
     
     def __init__(self, format_type: str = 'T20', gender: str = 'male'):
@@ -93,6 +233,8 @@ class BallTrainingDataGenerator:
         self.gender = gender
         self.player_distributions = None
         self.venue_stats = None
+        self.team_elo_lookup = None
+        self.player_elo_lookup = None
         
     def load_player_distributions(self, min_balls: int = 10):
         """Load or build player distributions."""
@@ -120,12 +262,19 @@ class BallTrainingDataGenerator:
             self.venue_stats.build_from_database()
             self.venue_stats.save(str(venue_path))
     
+    def load_elo_lookups(self, cursor):
+        """Load ELO history lookups for fast access during training data generation."""
+        if self.team_elo_lookup is None:
+            self.team_elo_lookup = build_team_elo_lookup(cursor, self.format_type, self.gender)
+        if self.player_elo_lookup is None:
+            self.player_elo_lookup = build_player_elo_lookup(cursor, self.format_type, self.gender)
+    
     def generate_training_data(self, limit: int = None) -> Tuple[np.ndarray, np.ndarray, pd.DataFrame]:
         """
         Generate training data from deliveries table.
         
         Returns:
-            X: Feature matrix (n_samples, n_features) - 29 features
+            X: Feature matrix (n_samples, n_features) - 34 features
             y: Target vector (n_samples,) - class labels
             df: DataFrame with metadata (match_id, innings, etc.)
         """
@@ -138,9 +287,12 @@ class BallTrainingDataGenerator:
         conn = get_connection()
         cursor = conn.cursor()
         
+        # Load ELO lookups for fast historical lookup
+        self.load_elo_lookups(cursor)
+        
         logger.info("Querying deliveries with match context...")
         
-        # Query deliveries with match and innings context (including venue_id)
+        # Query deliveries with match and innings context (including team IDs for ELO)
         query = """
             SELECT 
                 d.delivery_id,
@@ -152,6 +304,8 @@ class BallTrainingDataGenerator:
                 d.runs_batter,
                 d.is_wicket,
                 i.innings_number,
+                i.batting_team_id,
+                i.bowling_team_id,
                 i.total_runs as innings_runs_so_far,
                 i.total_wickets as innings_wickets_so_far,
                 m.match_id,
@@ -232,7 +386,27 @@ class BallTrainingDataGenerator:
             # Get venue features (4 features)
             venue_features = self.venue_stats.get_venue_features(row['venue_id'])
             
-            # Build feature vector (29 total features)
+            # Get ELO features (5 features) - using HISTORICAL ELOs at match date
+            match_date = str(row['date'])[:10]  # YYYY-MM-DD
+            
+            # Team ELOs
+            batting_team_elo = get_team_elo_at_date(
+                self.team_elo_lookup, row['batting_team_id'], match_date
+            )
+            bowling_team_elo = get_team_elo_at_date(
+                self.team_elo_lookup, row['bowling_team_id'], match_date
+            )
+            team_elo_diff = batting_team_elo - bowling_team_elo
+            
+            # Player ELOs
+            batter_elo = get_player_elo_at_date(
+                self.player_elo_lookup, row['batter_id'], match_date, 'batting'
+            )
+            bowler_elo = get_player_elo_at_date(
+                self.player_elo_lookup, row['bowler_id'], match_date, 'bowling'
+            )
+            
+            # Build feature vector (34 total features)
             feature = np.concatenate([
                 # Match state (6 features)
                 np.array([
@@ -250,7 +424,18 @@ class BallTrainingDataGenerator:
                 # Bowler distribution (8 features)
                 bowler_dist,
                 # Venue features (4 features)
-                venue_features
+                venue_features,
+                # Team ELO features (3 features) - normalized
+                np.array([
+                    normalize_elo(batting_team_elo),
+                    normalize_elo(bowling_team_elo),
+                    team_elo_diff / 200  # raw difference, normalized
+                ]),
+                # Player ELO features (2 features) - normalized
+                np.array([
+                    normalize_elo(batter_elo),
+                    normalize_elo(bowler_elo)
+                ])
             ])
             
             features.append(feature)
@@ -334,13 +519,15 @@ def main(format_type: str = 'T20', gender: str = 'male'):
     print(f"\nFeature matrix shape: {X.shape}")
     print(f"Target vector shape: {y.shape}")
     
-    # Feature names for reference (29 features)
+    # Feature names for reference (34 features)
     feature_names = [
         'innings_number', 'over', 'balls_bowled', 'runs', 'wickets', 'required_rate',
         'is_powerplay', 'is_middle', 'is_death',
         'bat_p0', 'bat_p1', 'bat_p2', 'bat_p3', 'bat_p4', 'bat_p6', 'bat_pW', 'bat_pEx',
         'bowl_p0', 'bowl_p1', 'bowl_p2', 'bowl_p3', 'bowl_p4', 'bowl_p6', 'bowl_pW', 'bowl_pEx',
-        'venue_scoring_factor', 'venue_boundary_rate', 'venue_wicket_rate', 'venue_reliable'
+        'venue_scoring_factor', 'venue_boundary_rate', 'venue_wicket_rate', 'venue_reliable',
+        'batting_team_elo', 'bowling_team_elo', 'team_elo_diff',
+        'batter_elo', 'bowler_elo'
     ]
     
     print(f"\nFeature names ({len(feature_names)} features):")

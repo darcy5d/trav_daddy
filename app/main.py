@@ -1211,7 +1211,9 @@ def simulate_match():
         "n_simulations": int,
         "venue_id": int (optional),
         "use_toss": bool (optional, default false),
-        "gender": "male" or "female" (optional, default "male")
+        "gender": "male" or "female" (optional, default "male"),
+        "team1_id": int (optional, for ELO lookup),
+        "team2_id": int (optional, for ELO lookup)
     }
     """
     try:
@@ -1237,6 +1239,20 @@ def simulate_match():
         venue_id = data.get('venue_id')
         use_toss = data.get('use_toss', False)
         gender = data.get('gender', 'male')
+        
+        # Get team IDs for ELO lookup (optional - will default to 1500 if not provided)
+        team1_id = data.get('team1_id')
+        team2_id = data.get('team2_id')
+        if team1_id:
+            try:
+                team1_id = int(team1_id)
+            except (ValueError, TypeError):
+                team1_id = None
+        if team2_id:
+            try:
+                team2_id = int(team2_id)
+            except (ValueError, TypeError):
+                team2_id = None
         
         # DEBUG: Log incoming player IDs to diagnose 50/50 results
         logger.info(f"[SIMULATION DEBUG] Team1 batters: {team1_batters_raw[:5]}... ({len(team1_batters_raw)} total)")
@@ -1333,7 +1349,9 @@ def simulate_match():
             team2_bowlers[:5],
             venue_id=venue_id,
             use_toss=use_toss,
-            toss_field_prob=toss_field_prob
+            toss_field_prob=toss_field_prob,
+            team1_id=team1_id,
+            team2_id=team2_id
         )
         
         elapsed = time.time() - start
@@ -1380,7 +1398,9 @@ def simulate_match():
                     team2_batters[:11],
                     team2_bowlers[:5],
                     venue_id=venue_id,
-                    team1_bats_first=True  # For scorecard, show Team 1 batting first
+                    team1_bats_first=True,  # For scorecard, show Team 1 batting first
+                    team1_id=team1_id,
+                    team2_id=team2_id
                 )
                 
                 # Add player names to scorecard entries
@@ -1441,6 +1461,20 @@ def simulate_match_stream():
     use_toss = data.get('use_toss', False)
     gender = data.get('gender', 'male')
     frontend_player_names = data.get('player_names', {})  # Names from frontend
+    
+    # Get team IDs for ELO lookup (optional - will default to 1500 if not provided)
+    team1_id = data.get('team1_id')
+    team2_id = data.get('team2_id')
+    if team1_id:
+        try:
+            team1_id = int(team1_id)
+        except (ValueError, TypeError):
+            team1_id = None
+    if team2_id:
+        try:
+            team2_id = int(team2_id)
+        except (ValueError, TypeError):
+            team2_id = None
     
     # CRICKET XI LOGIC: Batting order = top-order batters + bowlers at tail
     # This ensures 11 UNIQUE players (no duplicates possible)
@@ -1520,7 +1554,8 @@ def simulate_match_stream():
             
             # Chunked simulation with progress updates
             # Larger chunks = better GPU/CPU utilization (TF batches more efficiently)
-            chunk_size = 1000  # Increased from 500 for better throughput
+            # M2 Pro can handle larger batches efficiently
+            chunk_size = 2500  # Increased for better throughput on Apple Silicon
             all_team1_scores = []
             all_team2_scores = []
             all_team1_wins = []
@@ -1541,7 +1576,9 @@ def simulate_match_stream():
                     team2_bowlers[:5],
                     venue_id=venue_id,
                     use_toss=use_toss,
-                    toss_field_prob=toss_field_prob
+                    toss_field_prob=toss_field_prob,
+                    team1_id=team1_id,
+                    team2_id=team2_id
                 )
                 
                 # Accumulate results
@@ -1626,7 +1663,9 @@ def simulate_match_stream():
                         team2_batting_order,  # 11 unique players in batting order
                         team2_bowlers[:5],
                         venue_id=venue_id,
-                        team1_bats_first=True
+                        team1_bats_first=True,
+                        team1_id=team1_id,
+                        team2_id=team2_id
                     )
                     for b in scorecard['team1_batting']:
                         pid = str(b['player_id'])
@@ -2841,10 +2880,35 @@ def get_crex_match():
         # ============================================================
         # TEAM IDENTITY VERIFICATION
         # Check if CREX has mislabeled teams by looking at which team
-        # the matched players actually belong to in the database
+        # the matched players actually belong to in the database.
+        # 
+        # This handles cases where CREX HTML has teams in wrong order
+        # (e.g., Bhutan W vs Malaysia W with players under wrong tabs).
+        #
+        # IMPORTANT: Only apply swap detection when we have LOW CONFIDENCE
+        # in the team name matching. If team name matched well AND most
+        # players matched, trust that and skip swap detection.
         # ============================================================
-        def get_actual_team_from_players(players, gender):
-            """Determine actual team based on which teams matched players belong to."""
+        
+        def get_player_match_rate(players):
+            """Calculate what % of players were matched to DB."""
+            if not players:
+                return 0.0
+            matched = sum(1 for p in players if p.db_player_id)
+            return matched / len(players)
+        
+        def get_actual_team_from_players(players, gender, exclude_team_id=None):
+            """
+            Determine actual team based on which teams matched players belong to.
+            
+            Args:
+                players: List of players with db_player_id
+                gender: 'male' or 'female'
+                exclude_team_id: Team ID to exclude (the team we already matched to)
+                
+            Returns:
+                Dict with team_id, name, player_count if a different team found
+            """
             player_ids = [p.db_player_id for p in players if p.db_player_id]
             if not player_ids:
                 return None
@@ -2854,19 +2918,38 @@ def get_crex_match():
             
             # Find which team each player has played for most recently
             placeholders = ','.join('?' * len(player_ids))
-            cursor.execute(f"""
-                SELECT t.team_id, t.name, COUNT(*) as player_count
-                FROM players p
-                JOIN player_match_stats pms ON p.player_id = pms.player_id
-                JOIN teams t ON pms.team_id = t.team_id
-                JOIN matches m ON pms.match_id = m.match_id
-                WHERE p.player_id IN ({placeholders})
-                  AND m.gender = ?
-                  AND m.match_type = 'T20'
-                GROUP BY t.team_id
-                ORDER BY player_count DESC
-                LIMIT 1
-            """, player_ids + [gender])
+            
+            # Exclude the team we already matched to - we're looking for MISMATCHES
+            if exclude_team_id:
+                cursor.execute(f"""
+                    SELECT t.team_id, t.name, COUNT(DISTINCT p.player_id) as player_count
+                    FROM players p
+                    JOIN player_match_stats pms ON p.player_id = pms.player_id
+                    JOIN teams t ON pms.team_id = t.team_id
+                    JOIN matches m ON pms.match_id = m.match_id
+                    WHERE p.player_id IN ({placeholders})
+                      AND m.gender = ?
+                      AND m.match_type = 'T20'
+                      AND t.team_id != ?
+                    GROUP BY t.team_id
+                    HAVING player_count >= ?
+                    ORDER BY player_count DESC
+                    LIMIT 1
+                """, player_ids + [gender, exclude_team_id, len(player_ids) * 0.6])  # Need 60%+ players
+            else:
+                cursor.execute(f"""
+                    SELECT t.team_id, t.name, COUNT(DISTINCT p.player_id) as player_count
+                    FROM players p
+                    JOIN player_match_stats pms ON p.player_id = pms.player_id
+                    JOIN teams t ON pms.team_id = t.team_id
+                    JOIN matches m ON pms.match_id = m.match_id
+                    WHERE p.player_id IN ({placeholders})
+                      AND m.gender = ?
+                      AND m.match_type = 'T20'
+                    GROUP BY t.team_id
+                    ORDER BY player_count DESC
+                    LIMIT 1
+                """, player_ids + [gender])
             
             result = cursor.fetchone()
             conn.close()
@@ -2875,27 +2958,51 @@ def get_crex_match():
                 return {'team_id': result['team_id'], 'name': result['name'], 'player_count': result['player_count']}
             return None
         
-        # Verify Team 1 identity
-        if match.team1 and match.team1.players:
-            actual_team1 = get_actual_team_from_players(match.team1.players, match.gender)
+        # Calculate player match rates for confidence check
+        team1_match_rate = get_player_match_rate(match.team1.players) if match.team1 and match.team1.players else 0
+        team2_match_rate = get_player_match_rate(match.team2.players) if match.team2 and match.team2.players else 0
+        
+        # HIGH CONFIDENCE threshold: team matched AND >50% players matched
+        # If we have high confidence, skip swap detection (it causes false positives)
+        HIGH_CONFIDENCE_THRESHOLD = 0.5
+        
+        # Verify Team 1 identity - only if LOW confidence in current match
+        team1_high_confidence = team1_db and team1_match_rate >= HIGH_CONFIDENCE_THRESHOLD
+        if team1_high_confidence:
+            logger.info(f"[TEAM IDENTITY] Team1 '{team1_db['name']}' has high confidence ({team1_match_rate:.0%} players matched), skipping swap check")
+        elif match.team1 and match.team1.players:
+            # Low confidence - check if players actually belong to a different team
+            actual_team1 = get_actual_team_from_players(
+                match.team1.players, 
+                match.gender,
+                exclude_team_id=team1_db['team_id'] if team1_db else None
+            )
             if actual_team1:
-                if team1_db and actual_team1['name'] != team1_db['name']:
-                    logger.warning(f"[TEAM SWAP DETECTED] CREX says '{match.team1.name}' but players are from '{actual_team1['name']}'!")
+                if team1_db:
+                    logger.warning(f"[TEAM SWAP DETECTED] CREX says '{match.team1.name}' but {actual_team1['player_count']} players are from '{actual_team1['name']}'!")
                     logger.info(f"[TEAM SWAP] Correcting Team1: {team1_db['name']} -> {actual_team1['name']}")
                     team1_db = {'team_id': actual_team1['team_id'], 'name': actual_team1['name']}
-                elif not team1_db:
+                else:
                     logger.info(f"[TEAM IDENTITY] Inferred Team1 as '{actual_team1['name']}' from matched players")
                     team1_db = {'team_id': actual_team1['team_id'], 'name': actual_team1['name']}
         
-        # Verify Team 2 identity
-        if match.team2 and match.team2.players:
-            actual_team2 = get_actual_team_from_players(match.team2.players, match.gender)
+        # Verify Team 2 identity - only if LOW confidence in current match  
+        team2_high_confidence = team2_db and team2_match_rate >= HIGH_CONFIDENCE_THRESHOLD
+        if team2_high_confidence:
+            logger.info(f"[TEAM IDENTITY] Team2 '{team2_db['name']}' has high confidence ({team2_match_rate:.0%} players matched), skipping swap check")
+        elif match.team2 and match.team2.players:
+            # Low confidence - check if players actually belong to a different team
+            actual_team2 = get_actual_team_from_players(
+                match.team2.players,
+                match.gender,
+                exclude_team_id=team2_db['team_id'] if team2_db else None
+            )
             if actual_team2:
-                if team2_db and actual_team2['name'] != team2_db['name']:
-                    logger.warning(f"[TEAM SWAP DETECTED] CREX says '{match.team2.name}' but players are from '{actual_team2['name']}'!")
+                if team2_db:
+                    logger.warning(f"[TEAM SWAP DETECTED] CREX says '{match.team2.name}' but {actual_team2['player_count']} players are from '{actual_team2['name']}'!")
                     logger.info(f"[TEAM SWAP] Correcting Team2: {team2_db['name']} -> {actual_team2['name']}")
                     team2_db = {'team_id': actual_team2['team_id'], 'name': actual_team2['name']}
-                elif not team2_db:
+                else:
                     logger.info(f"[TEAM IDENTITY] Inferred Team2 as '{actual_team2['name']}' from matched players")
                     team2_db = {'team_id': actual_team2['team_id'], 'name': actual_team2['name']}
         

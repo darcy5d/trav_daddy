@@ -68,6 +68,16 @@ class EloCalculatorV3:
         5: 1150,
     }
     
+    # Player K-factor adjustment based on opponent team tier
+    # When playing against weaker teams, K-factor is reduced
+    PLAYER_TIER_K_ADJUSTMENT = {
+        1: 1.0,   # Full K vs Tier 1 (Australia, India, England)
+        2: 0.8,   # 80% K vs Tier 2 (Associates)
+        3: 0.6,   # 60% K vs Tier 3 (Franchise leagues)
+        4: 0.4,   # 40% K vs Tier 4 (Minor leagues)
+        5: 0.2,   # 20% K vs Tier 5 (Development)
+    }
+    
     # Initial ratings by tier
     TIER_INITIAL_RATINGS = {
         1: 1650,
@@ -593,7 +603,12 @@ class EloCalculatorV3:
         gender: str,
         match_date: datetime
     ):
-        """Update all player ratings for a match (unchanged from V2)."""
+        """
+        Update all player ratings for a match with tier-adjusted K-factors.
+        
+        NEW in V3: Player K-factors are adjusted based on opponent team tier.
+        Performances against weaker teams give less ELO than against strong teams.
+        """
         cursor = conn.cursor()
         
         # Get match info
@@ -606,23 +621,39 @@ class EloCalculatorV3:
         
         team1_id, team2_id = match_row['team1_id'], match_row['team2_id']
         
+        # Get team tiers for K-factor adjustment
+        cursor.execute("SELECT tier FROM teams WHERE team_id = ?", (team1_id,))
+        tier1_row = cursor.fetchone()
+        team1_tier = tier1_row['tier'] if tier1_row and tier1_row['tier'] else 3
+        
+        cursor.execute("SELECT tier FROM teams WHERE team_id = ?", (team2_id,))
+        tier2_row = cursor.fetchone()
+        team2_tier = tier2_row['tier'] if tier2_row and tier2_row['tier'] else 3
+        
         # Get team ratings
         team1_elo = self.get_team_rating(conn, team1_id, match_format, gender, match_date)
         team2_elo = self.get_team_rating(conn, team2_id, match_format, gender, match_date)
         
-        # Get all player stats
+        # Get all player stats with opponent tier info
         cursor.execute("""
             SELECT 
                 pms.*,
-                CASE WHEN pms.team_id = ? THEN ? ELSE ? END as opponent_elo
+                CASE WHEN pms.team_id = ? THEN ? ELSE ? END as opponent_elo,
+                CASE WHEN pms.team_id = ? THEN ? ELSE ? END as opponent_tier
             FROM player_match_stats pms
             WHERE pms.match_id = ?
-        """, (team1_id, team2_elo, team1_elo, match_id))
+        """, (team1_id, team2_elo, team1_elo, team1_id, team2_tier, team1_tier, match_id))
         
         player_stats = cursor.fetchall()
         
         for stats in player_stats:
             player_id = stats['player_id']
+            opponent_tier = stats['opponent_tier']
+            
+            # Get tier-adjusted K-factors
+            tier_k_adjustment = self.PLAYER_TIER_K_ADJUSTMENT.get(opponent_tier, 0.5)
+            adjusted_k_batting = self.k_factor_batting * tier_k_adjustment
+            adjusted_k_bowling = self.k_factor_bowling * tier_k_adjustment
             
             # Get current ratings
             batting_elo = self.get_player_rating(
@@ -635,7 +666,7 @@ class EloCalculatorV3:
             new_batting_elo = batting_elo
             new_bowling_elo = bowling_elo
             
-            # Update batting ELO
+            # Update batting ELO with tier-adjusted K-factor
             if stats['batting_innings'] > 0 and stats['balls_faced'] > 0:
                 avg_sr = 130 if match_format == 'T20' else 85
                 expected_runs = stats['balls_faced'] * (avg_sr / 100)
@@ -647,10 +678,10 @@ class EloCalculatorV3:
                 expected_score = self.expected_score(batting_elo, stats['opponent_elo'])
                 
                 new_batting_elo = self.calculate_new_rating(
-                    batting_elo, expected_score, actual_score, self.k_factor_batting
+                    batting_elo, expected_score, actual_score, adjusted_k_batting
                 )
             
-            # Update bowling ELO
+            # Update bowling ELO with tier-adjusted K-factor
             if stats['overs_bowled'] and stats['overs_bowled'] > 0:
                 avg_economy = 8.0 if match_format == 'T20' else 5.5
                 opponent_adjustment = (stats['opponent_elo'] - self.initial_rating) / 400
@@ -666,7 +697,7 @@ class EloCalculatorV3:
                 expected_score = self.expected_score(bowling_elo, stats['opponent_elo'])
                 
                 new_bowling_elo = self.calculate_new_rating(
-                    bowling_elo, expected_score, actual_score, self.k_factor_bowling
+                    bowling_elo, expected_score, actual_score, adjusted_k_bowling
                 )
             
             # Calculate overall

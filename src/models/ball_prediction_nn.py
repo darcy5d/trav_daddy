@@ -37,10 +37,18 @@ import sys
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 
 # Import TensorFlow/Keras
+# TensorFlow 2.16+ uses keras 3.x which is a standalone package
 import tensorflow as tf
-from tensorflow import keras
-from tensorflow.keras import layers, regularizers
-from tensorflow.keras.callbacks import EarlyStopping, ReduceLROnPlateau, ModelCheckpoint
+try:
+    # Try TensorFlow 2.16+ style (keras as standalone)
+    import keras
+    from keras import layers, regularizers
+    from keras.callbacks import EarlyStopping, ReduceLROnPlateau, ModelCheckpoint
+except ImportError:
+    # Fall back to older TensorFlow style
+    from tensorflow import keras
+    from tensorflow.keras import layers, regularizers
+    from tensorflow.keras.callbacks import EarlyStopping, ReduceLROnPlateau, ModelCheckpoint
 
 # Sklearn for evaluation
 from sklearn.metrics import classification_report, confusion_matrix, log_loss
