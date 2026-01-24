@@ -402,18 +402,48 @@ class CREXScraper:
                 status = 'completed'
             
             # Extract time if shown (e.g., "3:30 PM")
+            # CREX schedule times are in GMT (confirmed via supersmash.co.nz)
             time_match = re.search(r'(\d{1,2}:\d{2}\s*(?:AM|PM))', text, re.I)
             start_time = time_match.group(1) if time_match else None
             
-            # Parse date only - DON'T convert time to GMT here!
-            # The schedule page shows times in venue local timezone (not IST)
-            # We'll get the correct IST time from the match details page when clicked
+            # Parse date and build GMT timestamp
+            # Date shown is venue local date, time is GMT
+            # For venues ahead of GMT (Asia/Pacific), GMT date may be previous day
             start_date = None
-            date_time_gmt = None  # Don't set - will be populated from match details
+            date_time_gmt = None
             if date_str:
-                # Parse date string like "Sat, 24 Jan" or "Sat, 24 Jan 2026"
+                # Parse the venue local date
                 parsed_date, _, _ = self._parse_crex_datetime(date_str)
                 start_date = parsed_date
+                
+                if start_time and parsed_date:
+                    # Time is already GMT - just need to figure out the GMT date
+                    # For venues ahead of GMT (NZ, AU, Asia), if GMT time is PM,
+                    # the GMT date is typically the previous day
+                    try:
+                        time_obj = datetime.strptime(start_time.strip(), "%I:%M %p")
+                        gmt_hour = time_obj.hour
+                        gmt_minute = time_obj.minute
+                        
+                        # Parse venue date
+                        venue_date = datetime.strptime(parsed_date, "%Y-%m-%d")
+                        
+                        # If GMT time is in the evening (after 6 PM), the GMT date
+                        # is likely the previous day for Asia-Pacific venues
+                        # This handles NZ (UTC+13), AU (UTC+10/11), India (UTC+5:30), etc.
+                        if gmt_hour >= 18:  # 6 PM or later in GMT
+                            gmt_date = venue_date - timedelta(days=1)
+                        else:
+                            gmt_date = venue_date
+                        
+                        # Build the GMT timestamp
+                        gmt_datetime = gmt_date.replace(hour=gmt_hour, minute=gmt_minute)
+                        date_time_gmt = gmt_datetime.strftime("%Y-%m-%dT%H:%M:%SZ")
+                        
+                        # Also set start_date to GMT date for consistency
+                        start_date = gmt_date.strftime("%Y-%m-%d")
+                    except ValueError as e:
+                        logger.debug(f"Failed to parse time '{start_time}': {e}")
             
             # Detect gender
             gender = self._detect_gender(text + team1_name + team2_name + slug)

@@ -1863,28 +1863,7 @@
                                     
                                     // Fallback if no parsed datetime
                                     if (!displayDateTime) {
-                                        // For CREX, show date + venue local time
-                                        if (m.start_date && m.start_time) {
-                                            // Format date nicely
-                                            try {
-                                                const dateObj = new Date(m.start_date + 'T00:00:00');
-                                                const dayName = dateObj.toLocaleDateString('en-US', { weekday: 'short' });
-                                                const dayNum = dateObj.getDate();
-                                                const monthName = dateObj.toLocaleDateString('en-US', { month: 'short' });
-                                                displayDateTime = `${dayName}, ${dayNum} ${monthName}, ${m.start_time} (venue)`;
-                                            } catch(e) {
-                                                displayDateTime = `${m.start_date} ${m.start_time} (venue)`;
-                                            }
-                                        } else if (m.start_date) {
-                                            try {
-                                                const dateObj = new Date(m.start_date + 'T00:00:00');
-                                                displayDateTime = dateObj.toLocaleDateString('en-US', { weekday: 'short', day: 'numeric', month: 'short' });
-                                            } catch(e) {
-                                                displayDateTime = m.start_date;
-                                            }
-                                        } else {
-                                            displayDateTime = m.start_time ? m.start_time : (m.status || 'TBD');
-                                        }
+                                        displayDateTime = m.start_time ? m.start_time : (m.status || 'TBD');
                                     }
                                     
                                     // Handle CREX, ESPN and API data formats
