@@ -1328,6 +1328,39 @@ class CREXScraper:
             'canterbury kings': 'canterbury',
         }
         
+        # Common cricket team abbreviations (CREX abbreviation -> full name)
+        team_abbreviations = {
+            # International teams
+            'aus': 'australia', 'ind': 'india', 'eng': 'england', 'pak': 'pakistan',
+            'nz': 'new zealand', 'sa': 'south africa', 'wi': 'west indies',
+            'sl': 'sri lanka', 'ban': 'bangladesh', 'afg': 'afghanistan',
+            'zim': 'zimbabwe', 'ire': 'ireland', 'sco': 'scotland', 'ned': 'netherlands',
+            'uae': 'united arab emirates', 'nam': 'namibia', 'oma': 'oman',
+            'usa': 'united states of america', 'can': 'canada', 'ken': 'kenya',
+            'nep': 'nepal', 'png': 'papua new guinea', 'hk': 'hong kong',
+            'tha': 'thailand', 'mas': 'malaysia', 'sin': 'singapore', 'bhu': 'bhutan',
+            'mya': 'myanmar', 'jpn': 'japan', 'kor': 'korea', 'idn': 'indonesia',
+            'uga': 'uganda', 'tan': 'tanzania', 'rwa': 'rwanda', 'nig': 'nigeria',
+            'bot': 'botswana', 'gha': 'ghana', 'cam': 'cameroon', 'moz': 'mozambique',
+            'mwi': 'malawi', 'les': 'lesotho', 'esw': 'eswatini', 'swz': 'swaziland',
+            'ger': 'germany', 'aut': 'austria', 'ita': 'italy', 'fra': 'france',
+            'bel': 'belgium', 'esp': 'spain', 'por': 'portugal', 'cze': 'czech republic',
+            'ber': 'bermuda', 'cay': 'cayman islands', 'bar': 'barbados',
+            'jam': 'jamaica', 'tto': 'trinidad and tobago', 'guy': 'guyana',
+            'lwi': 'leeward islands', 'wwi': 'windward islands',
+            # NZ domestic
+            'akl': 'auckland', 'wel': 'wellington', 'can': 'canterbury', 'ota': 'otago',
+            'cd': 'central districts', 'nd': 'northern districts',
+            'chw': 'canterbury', 'cmw': 'canterbury', 'nbw': 'northern brave',
+            'osw': 'otago', 'wfw': 'wellington',
+            # Australia domestic
+            'nsw': 'new south wales', 'vic': 'victoria', 'qld': 'queensland',
+            'tas': 'tasmania', 'wa': 'western australia',
+            'ss': 'sydney sixers', 'st': 'sydney thunder', 'ps': 'perth scorchers',
+            'ms': 'melbourne stars', 'mr': 'melbourne renegades', 'bh': 'brisbane heat',
+            'hs': 'hobart hurricanes', 'as': 'adelaide strikers',
+        }
+        
         # Add aliases for rebranded teams
         for alias_from, alias_to in nz_rebrand_aliases.items():
             for name in list(team_names):
@@ -1335,6 +1368,15 @@ class CREXScraper:
                 if alias_from in name_norm:
                     team_names.append(alias_to)
                     team_names.append(alias_to + ' women')
+        
+        # Expand abbreviations to full team names
+        for name in list(team_names):
+            name_norm = name.lower().replace(' women', '').replace('-w', '').strip()
+            if name_norm in team_abbreviations:
+                full_name = team_abbreviations[name_norm]
+                team_names.append(full_name)
+                team_names.append(full_name + ' women')
+                logger.debug(f"Expanded abbreviation '{name_norm}' to '{full_name}'")
         
         # Direction words that must match exactly
         directions = {'northern', 'southern', 'eastern', 'western', 'central'}

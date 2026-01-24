@@ -1217,15 +1217,48 @@ def simulate_match():
     try:
         data = request.get_json()
         
-        team1_batters_raw = data.get('team1_batters', [])
-        team1_bowlers_raw = data.get('team1_bowlers', [])
-        team2_batters_raw = data.get('team2_batters', [])
-        team2_bowlers_raw = data.get('team2_bowlers', [])
+        # Convert IDs to integers - crucial for matching distribution dictionary keys
+        # Frontend sends strings, but batter_dists/bowler_dists use integer keys
+        def to_int_ids(id_list):
+            result = []
+            for x in id_list:
+                try:
+                    result.append(int(x))
+                except (ValueError, TypeError):
+                    logger.warning(f"[SIMULATION] Skipping non-integer ID: {x}")
+            return result
+        
+        team1_batters_raw = to_int_ids(data.get('team1_batters', []))
+        team1_bowlers_raw = to_int_ids(data.get('team1_bowlers', []))
+        team2_batters_raw = to_int_ids(data.get('team2_batters', []))
+        team2_bowlers_raw = to_int_ids(data.get('team2_bowlers', []))
         simulator_type = data.get('simulator', 'nn')  # Default to NN for scorecard
         n_simulations = min(data.get('n_simulations', 1000), 10000)
         venue_id = data.get('venue_id')
         use_toss = data.get('use_toss', False)
         gender = data.get('gender', 'male')
+        
+        # DEBUG: Log incoming player IDs to diagnose 50/50 results
+        logger.info(f"[SIMULATION DEBUG] Team1 batters: {team1_batters_raw[:5]}... ({len(team1_batters_raw)} total)")
+        logger.info(f"[SIMULATION DEBUG] Team1 bowlers: {team1_bowlers_raw[:5]}... ({len(team1_bowlers_raw)} total)")
+        logger.info(f"[SIMULATION DEBUG] Team2 batters: {team2_batters_raw[:5]}... ({len(team2_batters_raw)} total)")
+        logger.info(f"[SIMULATION DEBUG] Team2 bowlers: {team2_bowlers_raw[:5]}... ({len(team2_bowlers_raw)} total)")
+        
+        # Check if IDs are likely CREX IDs vs database IDs
+        # CREX IDs are typically strings like "crex_123" or large integers
+        # Database IDs are sequential integers 1-10000
+        all_ids = team1_batters_raw + team1_bowlers_raw + team2_batters_raw + team2_bowlers_raw
+        string_ids = [x for x in all_ids if isinstance(x, str) and not x.isdigit()]
+        if string_ids:
+            logger.warning(f"[SIMULATION DEBUG] Found non-numeric IDs: {string_ids[:5]}... This may indicate CREX IDs not matched to database!")
+        
+        # Check ID range - database IDs are typically 1-10000
+        numeric_ids = [int(x) for x in all_ids if str(x).isdigit()]
+        if numeric_ids:
+            min_id, max_id = min(numeric_ids), max(numeric_ids)
+            logger.info(f"[SIMULATION DEBUG] ID range: {min_id} to {max_id}")
+            if max_id > 100000:
+                logger.warning(f"[SIMULATION DEBUG] Large IDs detected - these may be ESPN external IDs, not database IDs!")
         
         # CRICKET XI LOGIC: Batting order = top-order batters + bowlers at tail
         def build_batting_order(batters, bowlers):
@@ -1387,10 +1420,21 @@ def simulate_match_stream():
     
     data = request.get_json()
     
-    team1_batters_raw = data.get('team1_batters', [])
-    team1_bowlers_raw = data.get('team1_bowlers', [])
-    team2_batters_raw = data.get('team2_batters', [])
-    team2_bowlers_raw = data.get('team2_bowlers', [])
+    # Convert IDs to integers - crucial for matching distribution dictionary keys
+    # Frontend sends strings, but batter_dists/bowler_dists use integer keys
+    def to_int_ids(id_list):
+        result = []
+        for x in id_list:
+            try:
+                result.append(int(x))
+            except (ValueError, TypeError):
+                logger.warning(f"[SIMULATION_STREAM] Skipping non-integer ID: {x}")
+        return result
+    
+    team1_batters_raw = to_int_ids(data.get('team1_batters', []))
+    team1_bowlers_raw = to_int_ids(data.get('team1_bowlers', []))
+    team2_batters_raw = to_int_ids(data.get('team2_batters', []))
+    team2_bowlers_raw = to_int_ids(data.get('team2_bowlers', []))
     simulator_type = data.get('simulator', 'nn')  # Default to NN for scorecard
     n_simulations = min(data.get('n_simulations', 1000), 10000)
     venue_id = data.get('venue_id')
@@ -2746,21 +2790,114 @@ def get_crex_match():
             return players
         
         if match.team1:
+            logger.info(f"[CREX DEBUG] Team1 '{match.team1.name}' has {len(match.team1.players)} players from CREX scrape")
+            if match.team1.players:
+                logger.info(f"[CREX DEBUG] Team1 player names: {[p.name for p in match.team1.players[:5]]}...")
+            
             team_match = scraper.match_team_to_db(match.team1, match.gender)
             if team_match:
                 team1_db = {'team_id': team_match[0], 'name': team_match[1]}
+                logger.info(f"[CREX DEBUG] Team1 matched to DB: {team_match[1]} (ID: {team_match[0]})")
+            else:
+                logger.warning(f"[CREX DEBUG] Team1 '{match.team1.name}' NOT matched to any DB team")
+            
             # Always try to match players, even if team doesn't match
             # For franchise teams like SA20/IPL, players are often international players in our database
             team_name_for_matching = team_match[1] if team_match else None
             scraper.match_players_to_db(match.team1, team_name_for_matching, match.gender)
+            
+            # Log matching results
+            matched_count = sum(1 for p in match.team1.players if p.db_player_id)
+            logger.info(f"[CREX DEBUG] Team1 player matching: {matched_count}/{len(match.team1.players)} matched to DB")
+            if matched_count == 0 and match.team1.players:
+                logger.warning(f"[CREX DEBUG] NO players matched for Team1! Check name formats:")
+                for p in match.team1.players[:3]:
+                    logger.warning(f"[CREX DEBUG]   - '{p.name}' (db_player_id={p.db_player_id})")
         
         if match.team2:
+            logger.info(f"[CREX DEBUG] Team2 '{match.team2.name}' has {len(match.team2.players)} players from CREX scrape")
+            if match.team2.players:
+                logger.info(f"[CREX DEBUG] Team2 player names: {[p.name for p in match.team2.players[:5]]}...")
+            
             team_match = scraper.match_team_to_db(match.team2, match.gender)
             if team_match:
                 team2_db = {'team_id': team_match[0], 'name': team_match[1]}
+                logger.info(f"[CREX DEBUG] Team2 matched to DB: {team_match[1]} (ID: {team_match[0]})")
+            else:
+                logger.warning(f"[CREX DEBUG] Team2 '{match.team2.name}' NOT matched to any DB team")
+            
             # Always try to match players, even if team doesn't match
             team_name_for_matching = team_match[1] if team_match else None
             scraper.match_players_to_db(match.team2, team_name_for_matching, match.gender)
+            
+            # Log matching results
+            matched_count = sum(1 for p in match.team2.players if p.db_player_id)
+            logger.info(f"[CREX DEBUG] Team2 player matching: {matched_count}/{len(match.team2.players)} matched to DB")
+            if matched_count == 0 and match.team2.players:
+                logger.warning(f"[CREX DEBUG] NO players matched for Team2! Check name formats:")
+                for p in match.team2.players[:3]:
+                    logger.warning(f"[CREX DEBUG]   - '{p.name}' (db_player_id={p.db_player_id})")
+        
+        # ============================================================
+        # TEAM IDENTITY VERIFICATION
+        # Check if CREX has mislabeled teams by looking at which team
+        # the matched players actually belong to in the database
+        # ============================================================
+        def get_actual_team_from_players(players, gender):
+            """Determine actual team based on which teams matched players belong to."""
+            player_ids = [p.db_player_id for p in players if p.db_player_id]
+            if not player_ids:
+                return None
+            
+            conn = get_connection()
+            cursor = conn.cursor()
+            
+            # Find which team each player has played for most recently
+            placeholders = ','.join('?' * len(player_ids))
+            cursor.execute(f"""
+                SELECT t.team_id, t.name, COUNT(*) as player_count
+                FROM players p
+                JOIN player_match_stats pms ON p.player_id = pms.player_id
+                JOIN teams t ON pms.team_id = t.team_id
+                JOIN matches m ON pms.match_id = m.match_id
+                WHERE p.player_id IN ({placeholders})
+                  AND m.gender = ?
+                  AND m.match_type = 'T20'
+                GROUP BY t.team_id
+                ORDER BY player_count DESC
+                LIMIT 1
+            """, player_ids + [gender])
+            
+            result = cursor.fetchone()
+            conn.close()
+            
+            if result:
+                return {'team_id': result['team_id'], 'name': result['name'], 'player_count': result['player_count']}
+            return None
+        
+        # Verify Team 1 identity
+        if match.team1 and match.team1.players:
+            actual_team1 = get_actual_team_from_players(match.team1.players, match.gender)
+            if actual_team1:
+                if team1_db and actual_team1['name'] != team1_db['name']:
+                    logger.warning(f"[TEAM SWAP DETECTED] CREX says '{match.team1.name}' but players are from '{actual_team1['name']}'!")
+                    logger.info(f"[TEAM SWAP] Correcting Team1: {team1_db['name']} -> {actual_team1['name']}")
+                    team1_db = {'team_id': actual_team1['team_id'], 'name': actual_team1['name']}
+                elif not team1_db:
+                    logger.info(f"[TEAM IDENTITY] Inferred Team1 as '{actual_team1['name']}' from matched players")
+                    team1_db = {'team_id': actual_team1['team_id'], 'name': actual_team1['name']}
+        
+        # Verify Team 2 identity
+        if match.team2 and match.team2.players:
+            actual_team2 = get_actual_team_from_players(match.team2.players, match.gender)
+            if actual_team2:
+                if team2_db and actual_team2['name'] != team2_db['name']:
+                    logger.warning(f"[TEAM SWAP DETECTED] CREX says '{match.team2.name}' but players are from '{actual_team2['name']}'!")
+                    logger.info(f"[TEAM SWAP] Correcting Team2: {team2_db['name']} -> {actual_team2['name']}")
+                    team2_db = {'team_id': actual_team2['team_id'], 'name': actual_team2['name']}
+                elif not team2_db:
+                    logger.info(f"[TEAM IDENTITY] Inferred Team2 as '{actual_team2['name']}' from matched players")
+                    team2_db = {'team_id': actual_team2['team_id'], 'name': actual_team2['name']}
         
         # CREX uses JavaScript tabs for squads - only one team's data is in the HTML
         # If a team has no players, load from database as fallback

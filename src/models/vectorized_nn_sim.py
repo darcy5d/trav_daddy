@@ -146,11 +146,21 @@ class VectorizedNNSimulator:
         
         logger.info(f"VectorizedNNSimulator initialized with {len(self.batter_dists)} batters, {len(self.bowler_dists)} bowlers")
     
-    def get_batter_dist(self, player_id: int) -> np.ndarray:
-        return self.batter_dists.get(player_id, self.default_bat_dist)
+    def get_batter_dist(self, player_id) -> np.ndarray:
+        """Get batter distribution, converting ID to int if needed."""
+        try:
+            pid = int(player_id)
+        except (ValueError, TypeError):
+            return self.default_bat_dist
+        return self.batter_dists.get(pid, self.default_bat_dist)
     
-    def get_bowler_dist(self, player_id: int) -> np.ndarray:
-        return self.bowler_dists.get(player_id, self.default_bowl_dist)
+    def get_bowler_dist(self, player_id) -> np.ndarray:
+        """Get bowler distribution, converting ID to int if needed."""
+        try:
+            pid = int(player_id)
+        except (ValueError, TypeError):
+            return self.default_bowl_dist
+        return self.bowler_dists.get(pid, self.default_bowl_dist)
     
     def get_venue_features(self, venue_id: Optional[int]) -> np.ndarray:
         """Get 4-element venue feature vector."""
@@ -188,6 +198,35 @@ class VectorizedNNSimulator:
             Dict with simulation results
         """
         max_balls = max_overs * 6
+        
+        # DEBUG: Track how many players are found in distributions vs using defaults
+        # Use a tuple of player IDs as a key to detect if this is a new simulation request
+        sim_key = (tuple(team1_batter_ids[:3]), tuple(team2_batter_ids[:3]))
+        if not hasattr(self, '_last_sim_key') or self._last_sim_key != sim_key:
+            self._last_sim_key = sim_key
+            
+            # Convert IDs to int for proper lookup
+            def safe_int(x):
+                try:
+                    return int(x)
+                except (ValueError, TypeError):
+                    return None
+            
+            team1_bat_found = sum(1 for pid in team1_batter_ids if safe_int(pid) in self.batter_dists)
+            team1_bowl_found = sum(1 for pid in team1_bowler_ids if safe_int(pid) in self.bowler_dists)
+            team2_bat_found = sum(1 for pid in team2_batter_ids if safe_int(pid) in self.batter_dists)
+            team2_bowl_found = sum(1 for pid in team2_bowler_ids if safe_int(pid) in self.bowler_dists)
+            
+            total_players = len(team1_batter_ids) + len(team1_bowler_ids) + len(team2_batter_ids) + len(team2_bowler_ids)
+            total_found = team1_bat_found + team1_bowl_found + team2_bat_found + team2_bowl_found
+            
+            logger.info(f"[DIST] Team1: {team1_bat_found}/{len(team1_batter_ids)} batters, {team1_bowl_found}/{len(team1_bowler_ids)} bowlers have distributions")
+            logger.info(f"[DIST] Team2: {team2_bat_found}/{len(team2_batter_ids)} batters, {team2_bowl_found}/{len(team2_bowler_ids)} bowlers have distributions")
+            logger.info(f"[DIST] Overall: {total_found}/{total_players} players with ball-by-ball data ({100*total_found/total_players:.1f}%)")
+            
+            if total_found < total_players * 0.5:
+                logger.warning(f"[DIST] LOW MATCH RATE! Less than 50% of players have distribution data.")
+                logger.warning(f"[DIST] Missing players will use default distributions (less accurate).")
         
         # Pre-compute player distribution matrices
         team1_bat_dists = np.array([self.get_batter_dist(pid) for pid in team1_batter_ids])  # (11, 8)

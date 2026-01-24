@@ -143,11 +143,21 @@ class FastLookupSimulator:
         self.h2h_hits = 0
         self.h2h_misses = 0
     
-    def get_batter_dist(self, player_id: int) -> np.ndarray:
-        return self.batter_dists.get(player_id, self.default_bat_dist)
+    def get_batter_dist(self, player_id) -> np.ndarray:
+        """Get batter distribution, converting ID to int if needed."""
+        try:
+            pid = int(player_id)
+        except (ValueError, TypeError):
+            return self.default_bat_dist
+        return self.batter_dists.get(pid, self.default_bat_dist)
     
-    def get_bowler_dist(self, player_id: int) -> np.ndarray:
-        return self.bowler_dists.get(player_id, self.default_bowl_dist)
+    def get_bowler_dist(self, player_id) -> np.ndarray:
+        """Get bowler distribution, converting ID to int if needed."""
+        try:
+            pid = int(player_id)
+        except (ValueError, TypeError):
+            return self.default_bowl_dist
+        return self.bowler_dists.get(pid, self.default_bowl_dist)
     
     def get_h2h_dist(self, batter_id: int, bowler_id: int) -> Optional[np.ndarray]:
         """Get H2H distribution if available (≥25 balls faced)."""

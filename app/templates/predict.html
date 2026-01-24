@@ -289,9 +289,15 @@
     
     .unmatched-icon {
         color: #f59e0b;
-        font-size: 0.8rem;
+        font-size: 0.85rem;
         margin-left: 0.25rem;
         cursor: help;
+        animation: pulse-amber 2s infinite;
+    }
+    
+    @keyframes pulse-amber {
+        0%, 100% { opacity: 1; }
+        50% { opacity: 0.5; }
     }
     
     .player-item .order-num {
@@ -1234,7 +1240,7 @@
         // Check if player is matched to database (has numeric db_player_id)
         const isMatched = player.db_player_id && !isNaN(parseInt(player.db_player_id));
         const matchClass = isMatched ? 'matched' : 'unmatched';
-        const matchIcon = isMatched ? '' : '<span class="unmatched-icon" title="Not in database - stats unavailable">⚠</span>';
+        const matchIcon = isMatched ? '' : '<span class="unmatched-icon" title="⚠️ Player not found in database - simulation will use default stats (less accurate)">⚠️</span>';
         
         // Get key stat based on role
         const stat = getPlayerKeyStat(player, role);
@@ -2063,9 +2069,10 @@
             if (data.success && data.match) {
                 const match = data.match;
                 
-                // Get team names
-                const team1Name = match.team1?.name || match.team1_db?.name || 'Team 1';
-                const team2Name = match.team2?.name || match.team2_db?.name || 'Team 2';
+                // Get team names - PREFER verified DB names over CREX labels
+                // (CREX sometimes mislabels teams by swapping squads)
+                const team1Name = match.team1_db?.name || match.team1?.name || 'Team 1';
+                const team2Name = match.team2_db?.name || match.team2?.name || 'Team 2';
                 
                 // Update match info display
                 document.getElementById('t20-match-name').textContent = `${team1Name} vs ${team2Name}`;
@@ -2098,7 +2105,15 @@
                 // ========================================
                 // AUTO-POPULATE TEAM 1 using new panel system
                 // ========================================
-                const team1Squad = (match.team1?.players || []).filter(p => p.db_player_id);
+                // Include ALL players (matched and unmatched) - unmatched will show amber warning
+                const team1AllPlayers = match.team1?.players || [];
+                const team1Squad = team1AllPlayers; // Don't filter - show all with warnings
+                const team1MatchedCount = team1AllPlayers.filter(p => p.db_player_id).length;
+                
+                // Detect team swap (CREX label differs from verified DB team)
+                const team1Swapped = match.team1?.name && match.team1_db?.name && 
+                    !match.team1.name.toLowerCase().includes(match.team1_db.name.toLowerCase().substring(0, 3));
+                
                 if (team1Squad.length > 0) {
                     // Update team title
                     document.getElementById('team1-title').textContent = team1Name;
@@ -2112,10 +2127,20 @@
                     document.getElementById('team1-manual-section').classList.add('collapsed');
                     document.getElementById('team1-manual-arrow').textContent = '▼';
                     
-                    // Show source badge
+                    // Show source badge with team swap warning if detected
                     const badge = document.getElementById('team1-source-badge');
-                    document.getElementById('team1-source-icon').textContent = '🏏';
-                    document.getElementById('team1-source-text').textContent = `CREX: ${team1Squad.length} players`;
+                    if (team1Swapped) {
+                        document.getElementById('team1-source-icon').textContent = '⚠️';
+                        document.getElementById('team1-source-text').textContent = `CREX SWAP: was ${match.team1.name}`;
+                        badge.style.background = 'rgba(255, 165, 0, 0.2)';
+                        badge.style.borderColor = 'orange';
+                        console.warn(`[TEAM SWAP] Team 1: CREX said "${match.team1.name}" but players are from "${match.team1_db.name}"`);
+                    } else {
+                        document.getElementById('team1-source-icon').textContent = '🏏';
+                        document.getElementById('team1-source-text').textContent = `CREX: ${team1MatchedCount}/${team1Squad.length} matched`;
+                        badge.style.background = '';
+                        badge.style.borderColor = '';
+                    }
                     badge.style.display = 'inline-flex';
                     
                     // Determine playing XI vs bench (if available from live match)
@@ -2137,7 +2162,15 @@
                 // ========================================
                 // AUTO-POPULATE TEAM 2 using new panel system
                 // ========================================
-                const team2Squad = (match.team2?.players || []).filter(p => p.db_player_id);
+                // Include ALL players (matched and unmatched) - unmatched will show amber warning
+                const team2AllPlayers = match.team2?.players || [];
+                const team2Squad = team2AllPlayers; // Don't filter - show all with warnings
+                const team2MatchedCount = team2AllPlayers.filter(p => p.db_player_id).length;
+                
+                // Detect team swap (CREX label differs from verified DB team)
+                const team2Swapped = match.team2?.name && match.team2_db?.name && 
+                    !match.team2.name.toLowerCase().includes(match.team2_db.name.toLowerCase().substring(0, 3));
+                
                 if (team2Squad.length > 0) {
                     // Update team title
                     document.getElementById('team2-title').textContent = team2Name;
@@ -2151,10 +2184,20 @@
                     document.getElementById('team2-manual-section').classList.add('collapsed');
                     document.getElementById('team2-manual-arrow').textContent = '▼';
                     
-                    // Show source badge
+                    // Show source badge with team swap warning if detected
                     const badge = document.getElementById('team2-source-badge');
-                    document.getElementById('team2-source-icon').textContent = '🏏';
-                    document.getElementById('team2-source-text').textContent = `CREX: ${team2Squad.length} players`;
+                    if (team2Swapped) {
+                        document.getElementById('team2-source-icon').textContent = '⚠️';
+                        document.getElementById('team2-source-text').textContent = `CREX SWAP: was ${match.team2.name}`;
+                        badge.style.background = 'rgba(255, 165, 0, 0.2)';
+                        badge.style.borderColor = 'orange';
+                        console.warn(`[TEAM SWAP] Team 2: CREX said "${match.team2.name}" but players are from "${match.team2_db.name}"`);
+                    } else {
+                        document.getElementById('team2-source-icon').textContent = '🏏';
+                        document.getElementById('team2-source-text').textContent = `CREX: ${team2MatchedCount}/${team2Squad.length} matched`;
+                        badge.style.background = '';
+                        badge.style.borderColor = '';
+                    }
                     badge.style.display = 'inline-flex';
                     
                     // Determine playing XI vs bench (if available from live match)
@@ -3534,6 +3577,33 @@
         // Extract player IDs from panel data
         const uniqueTeam1Batters = team1Selected.map(p => String(p.db_player_id || p.player_id || p.id));
         const uniqueTeam2Batters = team2Selected.map(p => String(p.db_player_id || p.player_id || p.id));
+        
+        // DEBUG: Log player data to diagnose 50/50 results
+        console.log('[SIMULATION DEBUG] Team 1 selected players:', team1Selected.map(p => ({
+            name: p.name,
+            db_player_id: p.db_player_id,
+            player_id: p.player_id,
+            id: p.id,
+            crex_id: p.crex_id,
+            final_id: p.db_player_id || p.player_id || p.id
+        })));
+        console.log('[SIMULATION DEBUG] Team 2 selected players:', team2Selected.map(p => ({
+            name: p.name,
+            db_player_id: p.db_player_id,
+            player_id: p.player_id,
+            id: p.id,
+            crex_id: p.crex_id,
+            final_id: p.db_player_id || p.player_id || p.id
+        })));
+        
+        // Check for unmatched players (no valid db_player_id)
+        const team1Matched = team1Selected.filter(p => p.db_player_id && !isNaN(parseInt(p.db_player_id))).length;
+        const team2Matched = team2Selected.filter(p => p.db_player_id && !isNaN(parseInt(p.db_player_id))).length;
+        console.log(`[SIMULATION DEBUG] Match rates: Team1=${team1Matched}/${team1Selected.length}, Team2=${team2Matched}/${team2Selected.length}`);
+        
+        if (team1Matched < team1Selected.length * 0.5 || team2Matched < team2Selected.length * 0.5) {
+            console.warn('[SIMULATION DEBUG] LOW MATCH RATE! Most players will use default distributions, causing 50/50 results.');
+        }
         
         // Determine bowlers (role = BOWL or AR)
         const uniqueTeam1Bowlers = team1Selected
