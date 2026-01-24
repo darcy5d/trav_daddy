@@ -405,16 +405,13 @@ class CREXScraper:
             time_match = re.search(r'(\d{1,2}:\d{2}\s*(?:AM|PM))', text, re.I)
             start_time = time_match.group(1) if time_match else None
             
-            # Build date_time_gmt from date_str + start_time (CREX times are in IST)
+            # Parse date only - DON'T convert time to GMT here!
+            # The schedule page shows times in venue local timezone (not IST)
+            # We'll get the correct IST time from the match details page when clicked
             start_date = None
-            date_time_gmt = None
-            if date_str and start_time:
+            date_time_gmt = None  # Don't set - will be populated from match details
+            if date_str:
                 # Parse date string like "Sat, 24 Jan" or "Sat, 24 Jan 2026"
-                parsed_date, parsed_time, parsed_gmt = self._parse_crex_datetime(date_str, start_time)
-                start_date = parsed_date
-                date_time_gmt = parsed_gmt
-            elif date_str:
-                # Just date, no time
                 parsed_date, _, _ = self._parse_crex_datetime(date_str)
                 start_date = parsed_date
             
