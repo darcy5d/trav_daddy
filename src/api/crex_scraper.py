@@ -1231,16 +1231,35 @@ class CREXScraper:
         
         team_names = [team.name, team.abbreviation]
         
+        # Direction words that must match exactly
+        directions = {'northern', 'southern', 'eastern', 'western', 'central'}
+        
+        def get_direction(name):
+            """Extract direction word from team name."""
+            words = name.lower().split()
+            for word in words:
+                if word in directions:
+                    return word
+            return None
+        
         best_match = None
         best_score = 0.0
         
         for row in db_teams:
             db_name = row['name']
+            db_direction = get_direction(db_name)
             
             for crex_name in team_names:
                 # Normalize for comparison
                 crex_norm = crex_name.lower().replace(' women', '').replace('-w', '').strip()
                 db_norm = db_name.lower().strip()
+                
+                crex_direction = get_direction(crex_name)
+                
+                # If both have direction words, they MUST match (Northern != Southern)
+                if crex_direction and db_direction:
+                    if crex_direction != db_direction:
+                        continue  # Skip - wrong direction
                 
                 # Exact match
                 if crex_norm == db_norm:
@@ -1254,7 +1273,7 @@ class CREXScraper:
                     best_score = score
                     best_match = (row['team_id'], row['name'])
         
-        if best_match and best_score >= 0.7:
+        if best_match and best_score >= 0.8:  # Increased threshold from 0.7 to 0.8
             logger.info(f"Matched team '{team.name}' to '{best_match[1]}' (score: {best_score:.2f})")
             return best_match
         
