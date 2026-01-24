@@ -176,6 +176,10 @@
         color: #f59e0b;
     }
     
+    .validation-item.info {
+        color: #6b7280;
+    }
+    
     .team-actions {
         margin-top: 1rem;
         display: flex;
@@ -1377,9 +1381,10 @@
             return acc;
         }, {});
         
-        const hasKeeper = (roles['WK'] || 0) >= 1;
+        const wkCount = roles['WK'] || 0;
         const hasBowlers = (roles['BOWL'] || 0) >= 4 || ((roles['BOWL'] || 0) + (roles['AR'] || 0)) >= 5;
-        const isValid = selectedCount === 11 && hasKeeper;
+        // Only require 11 players - WK info is not always available from CREX
+        const isValid = selectedCount === 11;
         
         if (selectedCount > 0) {
             validationEl.style.display = 'block';
@@ -1389,13 +1394,13 @@
                     <span class="icon">${selectedCount === 11 ? '✓' : '✗'}</span>
                     <span>${selectedCount}/11 players selected</span>
                 </div>
-                <div class="validation-item ${hasKeeper ? 'valid' : 'invalid'}">
-                    <span class="icon">${hasKeeper ? '✓' : '✗'}</span>
-                    <span>Wicketkeeper: ${roles['WK'] || 0}</span>
+                <div class="validation-item info">
+                    <span class="icon">ℹ</span>
+                    <span>Roles: ${roles['BAT'] || 0} BAT, ${wkCount} WK, ${roles['AR'] || 0} AR, ${roles['BOWL'] || 0} BOWL</span>
                 </div>
                 <div class="validation-item ${hasBowlers ? 'valid' : 'warning'}">
                     <span class="icon">${hasBowlers ? '✓' : '⚠'}</span>
-                    <span>Bowlers: ${roles['BOWL'] || 0} + ${roles['AR'] || 0} AR = ${(roles['BOWL'] || 0) + (roles['AR'] || 0)} bowling options</span>
+                    <span>Bowling: ${(roles['BOWL'] || 0) + (roles['AR'] || 0)} options (BOWL + AR)</span>
                 </div>
             `;
         } else {
