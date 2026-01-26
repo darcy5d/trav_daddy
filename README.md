@@ -5,20 +5,24 @@ A neural network-powered Monte Carlo simulation system for predicting T20 cricke
 ## Features
 
 ### Core Prediction Engine
-- **Neural Network Ball-by-Ball Simulation**: Predicts individual ball outcomes (dot, single, boundary, wicket) using a trained deep learning model
+- **Neural Network Ball-by-Ball Simulation**: Predicts individual ball outcomes (dot, single, boundary, wicket) using a 34-feature deep learning model
+- **ELO-Enhanced Features**: 5 ELO features integrated into predictions (batting/bowling team ELO, ELO differential, batter/bowler individual ELO)
+- **Temporal ELO Consistency**: Training uses historical ELOs at match date; simulations use current ELOs
 - **Monte Carlo Simulation**: Run 1,000-10,000 match simulations to generate win probabilities with real-time progress streaming
-- **Tiered ELO Rating System (V3)**: Advanced 5-tier classification system with cross-pool normalization, prestige adjustments, and asymmetric K-factors for realistic team and player rankings
+- **Tiered ELO Rating System (V3)**: 5-tier classification with tier-adjusted K-factors (stronger opponents = larger ELO gains)
 - **Men's & Women's Cricket**: Separate models trained on men's and women's T20 data
-- **Toss Simulation**: Per-match toss outcomes simulated based on historical data
-- **ESPN-Style Scorecards**: View detailed sample scorecards from simulations
+- **Toss Simulation**: Per-match toss outcomes simulated based on historical venue/team data
+- **Sample Scorecards**: View detailed ball-by-ball scorecards from representative simulations
 
 ### Match Discovery & Data Integration
-- **ESPN Cricinfo Integration**: Auto-load upcoming T20 matches from ESPNcricinfo with rich match metadata
+- **CREX Integration**: Primary source for upcoming T20 matches with comprehensive squad data
+- **Playwright-Powered Scraping**: Dynamic JavaScript rendering for reliable squad extraction from tabbed interfaces
+- **Player Affiliation Verification**: Authoritative team identity using database player history (fixes squad mislabeling)
 - **Unified Match View**: See all upcoming matches (Men's [M] and Women's [W]) in one place with countdown timers
-- **Smart Time Windows**: Displays matches from 3 hours ago to 24 hours ahead
-- **Intelligent Venue Matching**: Fuzzy matching for ESPN venue names to database entries with gender-aware filtering
-- **Automatic Squad Loading**: Pre-fetch match squads and venue data with status indicators
-- **Fallback Lineups**: When ESPN doesn't provide squads, automatically loads recent lineups from database
+- **Smart Team Matching**: Tab abbreviation matching (IRE, ITA) with fallback to player affiliations
+- **Intelligent Venue Matching**: Fuzzy matching with canonical aliases (e.g., "Optus Stadium" -> "Perth Stadium")
+- **Automatic Squad Loading**: Pre-fetch match squads with player-to-database matching and role detection
+- **ESPN Cricinfo Fallback**: Secondary source when CREX data unavailable
 
 ### User Interface
 - **Global Timezone Selector**: View all match times in your preferred timezone (defaults to Melbourne)
@@ -59,7 +63,10 @@ cd cricket-match-predictor
 # 3. Activate the environment
 source venv311/bin/activate
 
-# 4. Run the web app
+# 4. Install Playwright browsers (for CREX squad scraping)
+playwright install chromium
+
+# 5. Run the web app
 python app/main.py
 ```
 
@@ -75,7 +82,10 @@ python -m venv venv
 source venv/bin/activate
 pip install -r requirements.txt
 
-# 2. Download data and build database (via GUI or CLI)
+# 2. Install Playwright browsers (for CREX squad scraping)
+playwright install chromium
+
+# 3. Download data and build database (via GUI or CLI)
 # Option A: Use the web GUI (recommended)
 python app/main.py
 # Visit http://localhost:5001/training and click "Download Latest Data"
@@ -84,14 +94,13 @@ python app/main.py
 python -m src.data.downloader
 python -m src.data.ingest
 
-# 3. Calculate ELO ratings (tiered system)
+# 4. Calculate ELO ratings (tiered system)
 python scripts/recalculate_tiered_elo.py  # One-time full recalculation
-# Or use legacy system: python -m src.elo.calculator_v2
 
-# 4. Train neural network (optional - or use GUI)
-python scripts/full_retrain.py  # Uses tiered ELO as features
+# 5. Train neural network (optional - or use GUI)
+python scripts/full_retrain.py  # Uses tiered ELO as features (34 features)
 
-# 5. Run the web app
+# 6. Run the web app
 python app/main.py
 ```
 
@@ -104,17 +113,20 @@ Visit `http://localhost:5001` in your browser.
    - 3,900+ women's matches (WBBL, WPL, WT20I, etc.)
    - 600+ venues across 75+ countries
 
-2. **Training**: Neural network learns ball outcome probabilities based on:
-   - Batter/bowler ELO ratings and historical distributions
-   - Match situation (score, wickets, required rate)
-   - Innings phase (powerplay, middle, death)
-   - Venue characteristics (scoring rate, boundary %, wicket rate)
+2. **Training**: Neural network learns ball outcome probabilities based on 34 features:
+   - **Match State (6)**: Innings, over, ball, runs, wickets, target
+   - **Phase (3)**: Powerplay, middle overs, death overs (one-hot)
+   - **Batter Stats (8)**: Historical outcome distribution (dot%, 1s%, 2s%, 3s%, 4s%, 6s%, wicket%, balls faced)
+   - **Bowler Stats (8)**: Historical outcome distribution (same breakdown)
+   - **Venue (4)**: Scoring factor, boundary rate, wicket rate, data reliability flag
+   - **Team ELO (3)**: Batting team ELO, bowling team ELO, ELO differential
+   - **Player ELO (2)**: Batter batting ELO, bowler bowling ELO
 
    **Current Model Stats:**
    | Model | Training Samples | Features | Validation Accuracy | Data Range |
    |-------|------------------|----------|---------------------|------------|
-   | Men's T20 | 1,477,440 | 29 | 44.2% | 2019-2025 |
-   | Women's T20 | 571,659 | 29 | 51.1% | 2019-2025 |
+   | Men's T20 | 1,477,440 | 34 | 44.2% | 2019-2025 |
+   | Women's T20 | 571,659 | 34 | 51.1% | 2019-2025 |
 
 3. **Simulation**: Monte Carlo engine simulates full matches ball-by-ball
 
@@ -128,9 +140,10 @@ Visit `http://localhost:5001` in your browser.
 | Python Version | 3.11 recommended (required for Metal GPU) |
 | Backend | Python, Flask |
 | Database | SQLite |
-| Data Sources | Cricsheet.org, CREX |
+| Historical Data | Cricsheet.org (16,700+ men's, 3,900+ women's matches) |
+| Live Fixtures | CREX (primary), ESPNcricinfo (fallback) |
 | Frontend | HTML, CSS, JavaScript |
-| Web Scraping | Playwright, BeautifulSoup |
+| Web Scraping | Playwright (dynamic content), BeautifulSoup (static HTML) |
 
 ## Project Structure
 
@@ -145,8 +158,9 @@ Visit `http://localhost:5001` in your browser.
 │       └── training.html # Data & training management
 ├── src/
 │   ├── api/             # External API clients
-│   │   ├── cricket_data_client.py  # Cricket Data API (legacy)
-│   │   └── espn_scraper.py         # ESPNcricinfo scraper
+│   │   ├── crex_scraper.py         # CREX scraper (primary) with Playwright support
+│   │   ├── espn_scraper.py         # ESPNcricinfo scraper (fallback)
+│   │   └── cricket_data_client.py  # Cricket Data API (legacy)
 │   ├── data/            # Data ingestion & management
 │   │   ├── downloader.py      # Cricsheet data downloader
 │   │   ├── ingest.py          # JSON to SQLite ingestion
@@ -154,13 +168,15 @@ Visit `http://localhost:5001` in your browser.
 │   │   ├── venue_normalizer.py # Venue deduplication & cleanup
 │   │   └── schema_*.sql       # Database schemas
 │   ├── models/          # Neural network & simulators
-│   │   ├── ball_prediction_nn.py  # Main NN training
-│   │   ├── nn_simulator.py        # Monte Carlo simulator
-│   │   └── vectorized_nn_sim.py   # Optimized simulator
+│   │   ├── ball_prediction_nn.py  # Main NN training (34 features)
+│   │   ├── vectorized_nn_sim.py   # Optimized Monte Carlo simulator with ELO
+│   │   ├── fast_lookup_sim.py     # Turbo mode simulator (distribution-based)
+│   │   └── nn_simulator.py        # Legacy simulator
 │   ├── features/        # Feature engineering
+│   │   ├── ball_training_data.py   # Training data generation (34 features with ELO)
 │   │   ├── player_distributions.py # Player stats & distributions
 │   │   ├── venue_stats.py          # Venue statistics
-│   │   ├── ball_training_data.py   # Training data generation
+│   │   ├── name_matcher.py         # Fuzzy player name matching
 │   │   └── lineup_service.py       # Recent lineup fetching
 │   ├── elo/             # ELO rating system
 │   │   ├── calculator_v2.py       # Legacy ELO calculator
@@ -194,7 +210,14 @@ Visit `http://localhost:5001` in your browser.
 | `/api/team/<team_id>/recent-lineup` | GET | Fetch most recent playing XI for a team |
 | `/api/venues` | GET | Venues with hierarchical country grouping |
 
-### Match Discovery (ESPNcricinfo)
+### Match Discovery (CREX - Primary)
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/api/crex/upcoming` | GET | Upcoming T20 matches with squad data |
+| `/api/crex/match` | GET | Match details with squads, venue stats, and DB mappings (`?url=...`) |
+| `/api/crex/live` | GET | Live match with toss result and playing XI (`?url=...`) |
+
+### Match Discovery (ESPN - Fallback)
 | Endpoint | Method | Description |
 |----------|--------|-------------|
 | `/api/espn/upcoming` | GET | Upcoming T20 matches (3h ago to 24h ahead) |
@@ -267,32 +290,36 @@ print(tf.config.list_physical_devices('GPU'))
 ## Key Features by Branch
 
 ### Main Features (Merged)
-- **ESPN Cricinfo Integration**: Complete scraper with schedule parsing, venue matching, and squad loading
+- **CREX + ESPN Integration**: Dual scraper system with CREX as primary and ESPN as fallback
+- **Playwright Squad Extraction**: Dynamic JavaScript rendering for reliable squad data from tabbed interfaces
 - **Data & Training GUI**: Comprehensive management interface for downloads, retraining, and model versioning
 - **Timezone Support**: Global timezone selector with dynamic time conversion across all pages
 - **Model Versioning**: Track training history with metadata (samples, accuracy, data range, file size)
 - **Reset & Rebuild**: Day 0 functionality to start fresh with complete re-ingestion and training
 - **Real-time Progress**: Live progress bars and logs for background jobs
-- **Venue Cleanup**: Normalized and deduplicated 600+ venues with hierarchical grouping
+- **Venue Cleanup**: Normalized and deduplicated 600+ venues with hierarchical grouping and aliases
 - **Unified Match List**: All upcoming T20 matches (M/W) in one view with countdown timers
 - **Fallback Lineups**: Auto-load recent lineups when API doesn't provide squads
-- **Smart Venue Matching**: Fuzzy matching with gender-aware filtering and match count tie-breakers
+- **Smart Venue Matching**: Fuzzy matching with canonical aliases and gender-aware filtering
 
 ### Recent Improvements
-- **Tiered ELO System (V3)**: Complete 5-tier classification with cross-pool normalization, prestige adjustments, and automatic promotion review
+- **CREX Integration**: Primary match discovery with Playwright-powered squad extraction from dynamic tabs
+- **Player Affiliation Verification**: Authoritative team identity using database player history (fixes squad mislabeling)
+- **Team Abbreviation Matching**: Smart matching of tab labels (IRE, ITA, PRS) to team names with fallback resolution
+- **ELO Feature Integration**: 34-feature model with 5 ELO features (team ELO, player ELO, differentials)
+- **Temporal ELO Consistency**: Training uses historical ELOs at match date; simulations use current ELOs
+- **Tier-Adjusted K-Factors**: Stronger opponents yield larger ELO gains (Ireland vs Australia > Ireland vs Bhutan)
+- **Tiered ELO System (V3)**: Complete 5-tier classification with cross-pool normalization and automatic promotion review
 - **Realistic Rankings**: India (1929) >> Somerset (1407) now reflects actual team strength hierarchy
-- **Tier Badges & UI**: International/Regional/Domestic tabs with color-coded tier badges and 30-day ELO changes
+- **Venue Alias System**: Canonical venue matching (e.g., "Optus Stadium" -> "Perth Stadium")
+- **Conflict Resolution**: Handles edge cases where CREX mislabels both squads as the same team
 - **Validation Framework**: Automated sanity checks and validation reports for ELO system integrity
-- **UTC Timestamp Handling**: Proper parsing of database timestamps for timezone conversion
-- **Navbar Consistency**: Global timezone selector visible on all pages
-- **Match Type Column**: Future-proofing for ODI/Test model support
-- **JSON Serialization**: Robust handling of complex objects (PosixPath, PlayerDistributionBuilder)
-- **Team Auto-selection**: Intelligent team/player selection based on ESPN data or database fallbacks
 
 ## Data Sources
 
-- [Cricsheet.org](https://cricsheet.org/) - Ball-by-ball match data (16,700+ men's, 3,900+ women's matches)
-- [ESPNcricinfo](https://www.espncricinfo.com/) - Live fixtures, match schedules, and squads
+- [Cricsheet.org](https://cricsheet.org/) - Historical ball-by-ball match data (16,700+ men's, 3,900+ women's matches)
+- [CREX](https://crex.com/) - Primary source for upcoming fixtures, squads, and venue statistics
+- [ESPNcricinfo](https://www.espncricinfo.com/) - Fallback for match schedules and squads
 
 ## Development
 

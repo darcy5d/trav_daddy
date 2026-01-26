@@ -1,0 +1,87 @@
+# Requirements for Apple Silicon (M1/M2/M3) with Metal GPU Acceleration
+# 
+# IMPORTANT: Requires Python 3.11 (not 3.12 or 3.13)
+# Install with: pip install -r requirements-apple-silicon.txt
+#
+# For non-Apple Silicon machines, use: pip install -r requirements.txt
+
+# =============================================================================
+# TensorFlow with Metal GPU Support (Apple Silicon)
+# =============================================================================
+# IMPORTANT: Use specific versions that are known to work together!
+# TensorFlow 2.16.2 + tensorflow-metal 1.1.0 is the stable combination.
+# TensorFlow 2.18+ has known compatibility issues with tensorflow-metal.
+#
+# Note: tensorflow (not tensorflow-macos) works with Metal on TF 2.13+
+tensorflow==2.16.2
+tensorflow-metal==1.1.0
+
+# =============================================================================
+# Data Processing
+# =============================================================================
+pandas>=2.0.0
+numpy>=1.24.0,<2.0.0  # numpy 2.0 has compatibility issues with some packages
+requests>=2.31.0
+
+# =============================================================================
+# Database
+# =============================================================================
+sqlalchemy>=2.0.0
+
+# =============================================================================
+# Machine Learning
+# =============================================================================
+scikit-learn>=1.3.0
+xgboost>=2.0.0
+
+# PyTorch with MPS support (Apple Metal Performance Shaders)
+# Note: PyTorch automatically detects and uses MPS on Apple Silicon
+torch>=2.1.0
+torchvision>=0.16.0
+
+# =============================================================================
+# Web Framework
+# =============================================================================
+flask>=3.0.0
+flask-wtf>=1.2.0
+flask-cors>=4.0.0
+
+# =============================================================================
+# Web Scraping (for CREX)
+# =============================================================================
+beautifulsoup4>=4.12.0
+lxml>=5.0.0
+playwright>=1.40.0
+
+# =============================================================================
+# Visualization
+# =============================================================================
+matplotlib>=3.8.0
+seaborn>=0.13.0
+plotly>=5.18.0
+
+# =============================================================================
+# Jupyter Notebooks
+# =============================================================================
+jupyter>=1.0.0
+ipykernel>=6.27.0
+
+# =============================================================================
+# Utilities
+# =============================================================================
+tqdm>=4.66.0
+python-dotenv>=1.0.0
+rapidfuzz>=3.5.0  # For fuzzy string matching
+
+# =============================================================================
+# Testing
+# =============================================================================
+pytest>=7.4.0
+pytest-cov>=4.1.0
+
+# =============================================================================
+# Code Quality
+# =============================================================================
+black>=23.12.0
+flake8>=6.1.0
+isort>=5.13.0
