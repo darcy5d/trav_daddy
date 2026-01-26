@@ -2110,9 +2110,10 @@
                 const team1Squad = team1AllPlayers; // Don't filter - show all with warnings
                 const team1MatchedCount = team1AllPlayers.filter(p => p.db_player_id).length;
                 
-                // Detect team swap (CREX label differs from verified DB team)
-                const team1Swapped = match.team1?.name && match.team1_db?.name && 
-                    !match.team1.name.toLowerCase().includes(match.team1_db.name.toLowerCase().substring(0, 3));
+                // Use backend's team_swap_detected flag (trust the backend's player affiliation logic)
+                const teamSwapDetected = match.team_swap_detected || false;
+                const teamSwapDetails = match.team_swap_details || {};
+                const team1Swapped = teamSwapDetails.team1 || teamSwapDetails.full_swap;
                 
                 if (team1Squad.length > 0) {
                     // Update team title
@@ -2127,14 +2128,15 @@
                     document.getElementById('team1-manual-section').classList.add('collapsed');
                     document.getElementById('team1-manual-arrow').textContent = '▼';
                     
-                    // Show source badge with team swap warning if detected
+                    // Show source badge with team swap warning if backend detected a swap
                     const badge = document.getElementById('team1-source-badge');
                     if (team1Swapped) {
+                        const swapFrom = teamSwapDetails.team1?.from || 'unknown';
                         document.getElementById('team1-source-icon').textContent = '⚠️';
-                        document.getElementById('team1-source-text').textContent = `CREX SWAP: was ${match.team1.name}`;
+                        document.getElementById('team1-source-text').textContent = `CORRECTED: was ${swapFrom}`;
                         badge.style.background = 'rgba(255, 165, 0, 0.2)';
                         badge.style.borderColor = 'orange';
-                        console.warn(`[TEAM SWAP] Team 1: CREX said "${match.team1.name}" but players are from "${match.team1_db.name}"`);
+                        console.warn(`[TEAM SWAP] Team 1: Backend corrected from "${swapFrom}" to "${team1Name}"`);
                     } else {
                         document.getElementById('team1-source-icon').textContent = '🏏';
                         document.getElementById('team1-source-text').textContent = `CREX: ${team1MatchedCount}/${team1Squad.length} matched`;
@@ -2167,9 +2169,8 @@
                 const team2Squad = team2AllPlayers; // Don't filter - show all with warnings
                 const team2MatchedCount = team2AllPlayers.filter(p => p.db_player_id).length;
                 
-                // Detect team swap (CREX label differs from verified DB team)
-                const team2Swapped = match.team2?.name && match.team2_db?.name && 
-                    !match.team2.name.toLowerCase().includes(match.team2_db.name.toLowerCase().substring(0, 3));
+                // Use backend's team_swap_detected flag (trust the backend's player affiliation logic)
+                const team2Swapped = teamSwapDetails.team2 || teamSwapDetails.full_swap;
                 
                 if (team2Squad.length > 0) {
                     // Update team title
@@ -2184,14 +2185,15 @@
                     document.getElementById('team2-manual-section').classList.add('collapsed');
                     document.getElementById('team2-manual-arrow').textContent = '▼';
                     
-                    // Show source badge with team swap warning if detected
+                    // Show source badge with team swap warning if backend detected a swap
                     const badge = document.getElementById('team2-source-badge');
                     if (team2Swapped) {
+                        const swapFrom = teamSwapDetails.team2?.from || 'unknown';
                         document.getElementById('team2-source-icon').textContent = '⚠️';
-                        document.getElementById('team2-source-text').textContent = `CREX SWAP: was ${match.team2.name}`;
+                        document.getElementById('team2-source-text').textContent = `CORRECTED: was ${swapFrom}`;
                         badge.style.background = 'rgba(255, 165, 0, 0.2)';
                         badge.style.borderColor = 'orange';
-                        console.warn(`[TEAM SWAP] Team 2: CREX said "${match.team2.name}" but players are from "${match.team2_db.name}"`);
+                        console.warn(`[TEAM SWAP] Team 2: Backend corrected from "${swapFrom}" to "${team2Name}"`);
                     } else {
                         document.getElementById('team2-source-icon').textContent = '🏏';
                         document.getElementById('team2-source-text').textContent = `CREX: ${team2MatchedCount}/${team2Squad.length} matched`;

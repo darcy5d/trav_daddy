@@ -2878,17 +2878,22 @@ def get_crex_match():
                     logger.warning(f"[CREX DEBUG]   - '{p.name}' (db_player_id={p.db_player_id})")
         
         # ============================================================
-        # TEAM IDENTITY VERIFICATION
-        # Check if CREX has mislabeled teams by looking at which team
-        # the matched players actually belong to in the database.
+        # AFFIRMATIVE TEAM IDENTITY ASSIGNMENT
         # 
-        # This handles cases where CREX HTML has teams in wrong order
-        # (e.g., Bhutan W vs Malaysia W with players under wrong tabs).
+        # Instead of detecting swaps, we use player affiliations as the
+        # authoritative source of truth for team identity.
         #
-        # IMPORTANT: Only apply swap detection when we have LOW CONFIDENCE
-        # in the team name matching. If team name matched well AND most
-        # players matched, trust that and skip swap detection.
+        # After matching all players to database, we check which team
+        # each player has most recently played for. The team with the
+        # majority of players from a squad becomes that squad's identity.
+        #
+        # This handles cases where CREX HTML has teams in wrong order
+        # (e.g., Perth Scorchers players under Sydney Sixers tab).
         # ============================================================
+        
+        # Track if we detected and corrected a swap (for UI notification)
+        team_swap_detected = False
+        team_swap_details = {}
         
         def get_player_match_rate(players):
             """Calculate what % of players were matched to DB."""
@@ -2897,114 +2902,148 @@ def get_crex_match():
             matched = sum(1 for p in players if p.db_player_id)
             return matched / len(players)
         
-        def get_actual_team_from_players(players, gender, exclude_team_id=None):
-            """
-            Determine actual team based on which teams matched players belong to.
-            
-            Args:
-                players: List of players with db_player_id
-                gender: 'male' or 'female'
-                exclude_team_id: Team ID to exclude (the team we already matched to)
-                
-            Returns:
-                Dict with team_id, name, player_count if a different team found
-            """
-            player_ids = [p.db_player_id for p in players if p.db_player_id]
-            if not player_ids:
-                return None
-            
-            conn = get_connection()
-            cursor = conn.cursor()
-            
-            # Find which team each player has played for most recently
-            placeholders = ','.join('?' * len(player_ids))
-            
-            # Exclude the team we already matched to - we're looking for MISMATCHES
-            if exclude_team_id:
-                cursor.execute(f"""
-                    SELECT t.team_id, t.name, COUNT(DISTINCT p.player_id) as player_count
-                    FROM players p
-                    JOIN player_match_stats pms ON p.player_id = pms.player_id
-                    JOIN teams t ON pms.team_id = t.team_id
-                    JOIN matches m ON pms.match_id = m.match_id
-                    WHERE p.player_id IN ({placeholders})
-                      AND m.gender = ?
-                      AND m.match_type = 'T20'
-                      AND t.team_id != ?
-                    GROUP BY t.team_id
-                    HAVING player_count >= ?
-                    ORDER BY player_count DESC
-                    LIMIT 1
-                """, player_ids + [gender, exclude_team_id, len(player_ids) * 0.6])  # Need 60%+ players
-            else:
-                cursor.execute(f"""
-                    SELECT t.team_id, t.name, COUNT(DISTINCT p.player_id) as player_count
-                    FROM players p
-                    JOIN player_match_stats pms ON p.player_id = pms.player_id
-                    JOIN teams t ON pms.team_id = t.team_id
-                    JOIN matches m ON pms.match_id = m.match_id
-                    WHERE p.player_id IN ({placeholders})
-                      AND m.gender = ?
-                      AND m.match_type = 'T20'
-                    GROUP BY t.team_id
-                    ORDER BY player_count DESC
-                    LIMIT 1
-                """, player_ids + [gender])
-            
-            result = cursor.fetchone()
-            conn.close()
-            
-            if result:
-                return {'team_id': result['team_id'], 'name': result['name'], 'player_count': result['player_count']}
-            return None
-        
-        # Calculate player match rates for confidence check
+        # Calculate player match rates
         team1_match_rate = get_player_match_rate(match.team1.players) if match.team1 and match.team1.players else 0
         team2_match_rate = get_player_match_rate(match.team2.players) if match.team2 and match.team2.players else 0
         
-        # HIGH CONFIDENCE threshold: team matched AND >50% players matched
-        # If we have high confidence, skip swap detection (it causes false positives)
-        HIGH_CONFIDENCE_THRESHOLD = 0.5
+        logger.info(f"[TEAM ASSIGNMENT] Team1 match rate: {team1_match_rate:.0%}, Team2 match rate: {team2_match_rate:.0%}")
         
-        # Verify Team 1 identity - only if LOW confidence in current match
-        team1_high_confidence = team1_db and team1_match_rate >= HIGH_CONFIDENCE_THRESHOLD
-        if team1_high_confidence:
-            logger.info(f"[TEAM IDENTITY] Team1 '{team1_db['name']}' has high confidence ({team1_match_rate:.0%} players matched), skipping swap check")
-        elif match.team1 and match.team1.players:
-            # Low confidence - check if players actually belong to a different team
-            actual_team1 = get_actual_team_from_players(
-                match.team1.players, 
-                match.gender,
-                exclude_team_id=team1_db['team_id'] if team1_db else None
-            )
-            if actual_team1:
-                if team1_db:
-                    logger.warning(f"[TEAM SWAP DETECTED] CREX says '{match.team1.name}' but {actual_team1['player_count']} players are from '{actual_team1['name']}'!")
-                    logger.info(f"[TEAM SWAP] Correcting Team1: {team1_db['name']} -> {actual_team1['name']}")
-                    team1_db = {'team_id': actual_team1['team_id'], 'name': actual_team1['name']}
-                else:
-                    logger.info(f"[TEAM IDENTITY] Inferred Team1 as '{actual_team1['name']}' from matched players")
-                    team1_db = {'team_id': actual_team1['team_id'], 'name': actual_team1['name']}
+        # Use player affiliations to determine actual team identity
+        squad1_team = None
+        squad2_team = None
         
-        # Verify Team 2 identity - only if LOW confidence in current match  
-        team2_high_confidence = team2_db and team2_match_rate >= HIGH_CONFIDENCE_THRESHOLD
-        if team2_high_confidence:
-            logger.info(f"[TEAM IDENTITY] Team2 '{team2_db['name']}' has high confidence ({team2_match_rate:.0%} players matched), skipping swap check")
-        elif match.team2 and match.team2.players:
-            # Low confidence - check if players actually belong to a different team
-            actual_team2 = get_actual_team_from_players(
-                match.team2.players,
-                match.gender,
-                exclude_team_id=team2_db['team_id'] if team2_db else None
+        if match.team1 and match.team1.players:
+            squad1_team = scraper.determine_team_from_players(
+                match.team1.players, 'T20', match.gender
             )
-            if actual_team2:
-                if team2_db:
-                    logger.warning(f"[TEAM SWAP DETECTED] CREX says '{match.team2.name}' but {actual_team2['player_count']} players are from '{actual_team2['name']}'!")
-                    logger.info(f"[TEAM SWAP] Correcting Team2: {team2_db['name']} -> {actual_team2['name']}")
-                    team2_db = {'team_id': actual_team2['team_id'], 'name': actual_team2['name']}
+            if squad1_team:
+                logger.info(f"[TEAM ASSIGNMENT] Squad1 affiliation: {squad1_team['player_count']}/{squad1_team['total_matched']} players from '{squad1_team['team_name']}' (confidence: {squad1_team['confidence']:.0%})")
+                if squad1_team.get('all_affiliations') and len(squad1_team['all_affiliations']) > 1:
+                    logger.warning(f"[TEAM ASSIGNMENT] Squad1 has mixed affiliations: {squad1_team['all_affiliations']}")
+        
+        if match.team2 and match.team2.players:
+            squad2_team = scraper.determine_team_from_players(
+                match.team2.players, 'T20', match.gender
+            )
+            if squad2_team:
+                logger.info(f"[TEAM ASSIGNMENT] Squad2 affiliation: {squad2_team['player_count']}/{squad2_team['total_matched']} players from '{squad2_team['team_name']}' (confidence: {squad2_team['confidence']:.0%})")
+                if squad2_team.get('all_affiliations') and len(squad2_team['all_affiliations']) > 1:
+                    logger.warning(f"[TEAM ASSIGNMENT] Squad2 has mixed affiliations: {squad2_team['all_affiliations']}")
+        
+        # Now determine team assignments based on affiliations
+        # Priority: Use affiliation if available and confident, else fall back to CREX team name matching
+        
+        AFFILIATION_CONFIDENCE_THRESHOLD = 0.6  # At least 60% of matched players from same team
+        
+        # Determine final team1_db and team2_db based on affiliations
+        original_team1_db = team1_db.copy() if team1_db else None
+        original_team2_db = team2_db.copy() if team2_db else None
+        
+        # Squad 1: Use affiliation if confident enough
+        if squad1_team and squad1_team['confidence'] >= AFFILIATION_CONFIDENCE_THRESHOLD:
+            new_team_id = squad1_team['team_id']
+            new_team_name = squad1_team['team_name']
+            
+            if team1_db and team1_db['team_id'] != new_team_id:
+                # Affiliation disagrees with CREX team name - use affiliation
+                logger.warning(f"[TEAM SWAP] Squad1: CREX says '{match.team1.name}' but players are from '{new_team_name}'")
+                logger.info(f"[TEAM SWAP] Correcting Team1: {team1_db['name']} -> {new_team_name}")
+                team1_db = {'team_id': new_team_id, 'name': new_team_name}
+                team_swap_detected = True
+                team_swap_details['team1'] = {'from': original_team1_db['name'], 'to': new_team_name}
+            elif not team1_db:
+                # No CREX match, but we have affiliation
+                logger.info(f"[TEAM ASSIGNMENT] Inferred Team1 as '{new_team_name}' from player affiliations")
+                team1_db = {'team_id': new_team_id, 'name': new_team_name}
+        
+        # Squad 2: Use affiliation if confident enough
+        if squad2_team and squad2_team['confidence'] >= AFFILIATION_CONFIDENCE_THRESHOLD:
+            new_team_id = squad2_team['team_id']
+            new_team_name = squad2_team['team_name']
+            
+            if team2_db and team2_db['team_id'] != new_team_id:
+                # Affiliation disagrees with CREX team name - use affiliation
+                logger.warning(f"[TEAM SWAP] Squad2: CREX says '{match.team2.name}' but players are from '{new_team_name}'")
+                logger.info(f"[TEAM SWAP] Correcting Team2: {team2_db['name']} -> {new_team_name}")
+                team2_db = {'team_id': new_team_id, 'name': new_team_name}
+                team_swap_detected = True
+                team_swap_details['team2'] = {'from': original_team2_db['name'], 'to': new_team_name}
+            elif not team2_db:
+                # No CREX match, but we have affiliation
+                logger.info(f"[TEAM ASSIGNMENT] Inferred Team2 as '{new_team_name}' from player affiliations")
+                team2_db = {'team_id': new_team_id, 'name': new_team_name}
+        
+        # Edge case: Both squads assigned to the same team
+        # This can happen when:
+        # 1. CREX completely swapped the teams
+        # 2. One squad's affiliation was below threshold but is still the correct team
+        if team1_db and team2_db and team1_db['team_id'] == team2_db['team_id']:
+            logger.error(f"[TEAM ASSIGNMENT] Both squads assigned to same team '{team1_db['name']}'! Resolving conflict...")
+            
+            # Use affiliation data to resolve the conflict
+            # The squad with higher confidence keeps the team, the other gets its secondary affiliation
+            squad1_conf = squad1_team['confidence'] if squad1_team else 0
+            squad2_conf = squad2_team['confidence'] if squad2_team else 0
+            
+            resolved = False
+            
+            if squad1_conf >= squad2_conf and squad2_team and squad2_team.get('all_affiliations'):
+                # Squad1 wins the conflict, Squad2 gets its best alternative team
+                # Find the team in squad2's affiliations that is NOT the conflicting team
+                for alt_team_id, count in sorted(squad2_team['all_affiliations'].items(), key=lambda x: -x[1]):
+                    if alt_team_id != team1_db['team_id']:
+                        # Get team name for this alternative
+                        conn = get_connection()
+                        cursor = conn.cursor()
+                        cursor.execute("SELECT name FROM teams WHERE team_id = ?", (alt_team_id,))
+                        result = cursor.fetchone()
+                        conn.close()
+                        
+                        if result:
+                            alt_team_name = result['name']
+                            logger.info(f"[TEAM ASSIGNMENT] Resolving: Team2 reassigned to '{alt_team_name}' (next best affiliation with {count} players)")
+                            team2_db = {'team_id': alt_team_id, 'name': alt_team_name}
+                            team_swap_detected = True
+                            team_swap_details['team2'] = {'from': team1_db['name'], 'to': alt_team_name}
+                            resolved = True
+                            break
+            
+            elif squad2_conf > squad1_conf and squad1_team and squad1_team.get('all_affiliations'):
+                # Squad2 wins the conflict, Squad1 gets its best alternative team
+                for alt_team_id, count in sorted(squad1_team['all_affiliations'].items(), key=lambda x: -x[1]):
+                    if alt_team_id != team2_db['team_id']:
+                        conn = get_connection()
+                        cursor = conn.cursor()
+                        cursor.execute("SELECT name FROM teams WHERE team_id = ?", (alt_team_id,))
+                        result = cursor.fetchone()
+                        conn.close()
+                        
+                        if result:
+                            alt_team_name = result['name']
+                            logger.info(f"[TEAM ASSIGNMENT] Resolving: Team1 reassigned to '{alt_team_name}' (next best affiliation with {count} players)")
+                            team1_db = {'team_id': alt_team_id, 'name': alt_team_name}
+                            team_swap_detected = True
+                            team_swap_details['team1'] = {'from': team2_db['name'], 'to': alt_team_name}
+                            resolved = True
+                            break
+            
+            if not resolved:
+                # Fallback: try to use original team names if they were different
+                if original_team1_db and original_team2_db and original_team1_db['team_id'] != original_team2_db['team_id']:
+                    logger.info(f"[TEAM ASSIGNMENT] Fallback: Swapping to original assignments")
+                    team1_db, team2_db = original_team2_db, original_team1_db
+                    match.team1, match.team2 = match.team2, match.team1
+                    team_swap_detected = True
+                    team_swap_details['full_swap'] = True
                 else:
-                    logger.info(f"[TEAM IDENTITY] Inferred Team2 as '{actual_team2['name']}' from matched players")
-                    team2_db = {'team_id': actual_team2['team_id'], 'name': actual_team2['name']}
+                    logger.error(f"[TEAM ASSIGNMENT] Could not resolve team conflict! Both squads remain as '{team1_db['name']}'")
+                    team_swap_details['unresolved_conflict'] = True
+        
+        # Log final assignments
+        if team_swap_detected:
+            logger.warning(f"[TEAM ASSIGNMENT] SWAP DETECTED - Final: Team1='{team1_db['name'] if team1_db else 'Unknown'}', Team2='{team2_db['name'] if team2_db else 'Unknown'}'")
+        else:
+            logger.info(f"[TEAM ASSIGNMENT] Final: Team1='{team1_db['name'] if team1_db else 'Unknown'}', Team2='{team2_db['name'] if team2_db else 'Unknown'}'")
         
         # CREX uses JavaScript tabs for squads - only one team's data is in the HTML
         # If a team has no players, load from database as fallback
@@ -3214,7 +3253,9 @@ def get_crex_match():
                 'team1_db': team1_db,
                 'team2_db': team2_db,
                 'toss_winner': match.toss_winner,
-                'toss_decision': match.toss_decision
+                'toss_decision': match.toss_decision,
+                'team_swap_detected': team_swap_detected,
+                'team_swap_details': team_swap_details if team_swap_detected else None
             }
         }
         

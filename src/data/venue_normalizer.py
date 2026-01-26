@@ -34,6 +34,30 @@ def normalize_venue_name(name: str) -> str:
         if len(parts) >= 1:
             normalized = parts[0]
     
+    # Remove common sponsor prefixes (e.g., "PM Optus Stadium" -> "Optus Stadium")
+    # These are typically 2-3 letter codes at the start
+    sponsor_prefixes = [
+        'pm ',      # Prime Minister's XI match prefix
+        'kfc ',     # KFC BBL sponsorship
+        'rebel ',   # Rebel WBBL sponsorship
+        'weber ',   # Weber BBL sponsorship
+        'alinta ',  # Alinta Energy
+        'marsh ',   # Marsh One-Day Cup
+        'jlt ',     # JLT Cup
+        'kia ',     # Kia Oval
+        'emirates ',  # Emirates Old Trafford
+        'lg ',      # LG sponsorship
+        'dlf ',     # DLF IPL
+        'pepsi ',   # Pepsi IPL
+        'vivo ',    # Vivo IPL
+        'tata ',    # Tata IPL
+    ]
+    
+    for prefix in sponsor_prefixes:
+        if normalized.startswith(prefix):
+            normalized = normalized[len(prefix):]
+            break  # Only remove one prefix
+    
     # Remove common venue type suffixes
     suffixes_to_remove = [
         ' international cricket stadium',
@@ -187,16 +211,40 @@ def extract_city_from_venue(venue_name: str) -> Optional[str]:
 
 # Known venue aliases - maps variations to canonical names
 VENUE_ALIASES = {
+    # Australia
     "w.a.c.a. ground": "WACA Ground",
     "waca ground": "WACA Ground",
     "waca": "WACA Ground",
+    "optus stadium": "Perth Stadium",
+    "optus": "Perth Stadium",
+    "pm optus stadium": "Perth Stadium",
+    "perth stadium": "Perth Stadium",
     "mcg": "Melbourne Cricket Ground",
     "scg": "Sydney Cricket Ground",
     "gabba": "Brisbane Cricket Ground",
     "woolloongabba": "Brisbane Cricket Ground",
+    "brisbane cricket ground": "Brisbane Cricket Ground",
+    "marvel stadium": "Marvel Stadium",
+    "docklands stadium": "Marvel Stadium",
+    "etihad stadium": "Marvel Stadium",
+    "adelaide oval": "Adelaide Oval",
+    "bellerive oval": "Bellerive Oval",
+    "blundstone arena": "Bellerive Oval",
+    "manuka oval": "Manuka Oval",
+    "junction oval": "Junction Oval",
+    "karen rolton oval": "Karen Rolton Oval",
+    "north sydney oval": "North Sydney Oval",
+    # India
     "eden gardens": "Eden Gardens",
     "wankhede stadium": "Wankhede Stadium",
     "wankhede": "Wankhede Stadium",
+    "chinnaswamy stadium": "M. Chinnaswamy Stadium",
+    "m chinnaswamy stadium": "M. Chinnaswamy Stadium",
+    "feroz shah kotla": "Arun Jaitley Stadium",
+    "arun jaitley stadium": "Arun Jaitley Stadium",
+    "narendra modi stadium": "Narendra Modi Stadium",
+    "motera stadium": "Narendra Modi Stadium",
+    # England
     "lords": "Lord's",
     "lord's": "Lord's",
     "the oval": "The Oval",
@@ -204,9 +252,12 @@ VENUE_ALIASES = {
     "kennington oval": "The Oval",
     "trent bridge": "Trent Bridge",
     "old trafford": "Old Trafford",
+    "emirates old trafford": "Old Trafford",
     "edgbaston": "Edgbaston",
     "headingley": "Headingley",
     "sophia gardens": "Sophia Gardens",
+    "county ground bristol": "County Ground, Bristol",
+    "county ground taunton": "County Ground, Taunton",
 }
 
 

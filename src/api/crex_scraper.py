@@ -26,7 +26,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 
 from src.data.database import get_connection
-from src.data.venue_normalizer import venue_similarity
+from src.data.venue_normalizer import venue_similarity, get_canonical_venue_name, normalize_venue_name as normalize_venue_global
 from src.features.name_matcher import PlayerNameMatcher
 
 logger = logging.getLogger(__name__)
@@ -884,22 +884,30 @@ class CREXScraper:
         """
         Use Playwright to render the page and click both squad tabs to get all players.
         
+        Uses the CREX page structure where:
+        - Tab buttons have class 'playingxi-button' with team abbreviations (e.g., 'IRE', 'ITA')
+        - The 'selected' class indicates the active tab
+        - Player cards are in 'playingxi-card' sections
+        
+        This function extracts {tab_abbr: players} mapping and uses the abbreviation
+        to match tabs to teams more accurately.
+        
         Args:
             match_url: URL to the match info page
-            team1_name: Name of team 1
-            team2_name: Name of team 2
-            team1_id: CREX ID of team 1 (e.g., "MY" for Paarl Royals)
-            team2_id: CREX ID of team 2 (e.g., "N0" for Sunrisers EC)
+            team1_name: Name of team 1 from URL
+            team2_name: Name of team 2 from URL
+            team1_id: CREX ID of team 1
+            team2_id: CREX ID of team 2
             
         Returns:
-            Tuple of (team1, team2) CREXTeam objects with full squads
+            Tuple of (team1, team2) CREXTeam objects with full squads.
         """
         try:
             from playwright.sync_api import sync_playwright
             
-            logger.info(f"Using Playwright to fetch squads for {team1_name} vs {team2_name}")
+            logger.info(f"[PLAYWRIGHT] Fetching squads for {team1_name} vs {team2_name}")
             
-            teams_data = {}  # {tab_name: [players]}
+            squads = {}  # {tab_abbr: players} mapping
             
             with sync_playwright() as p:
                 browser = p.chromium.launch(headless=True)
@@ -907,7 +915,7 @@ class CREXScraper:
                 
                 # Navigate to match page (use domcontentloaded for faster loading)
                 page.goto(match_url, wait_until='domcontentloaded', timeout=60000)
-                # Wait a bit for JavaScript to render
+                # Wait for JavaScript to render
                 page.wait_for_timeout(2000)
                 
                 # Scroll to load any lazy content
@@ -918,82 +926,84 @@ class CREXScraper:
                 try:
                     page.wait_for_selector('a[href*="/player/"]', timeout=10000)
                 except:
-                    logger.warning("No player links found on page")
+                    logger.warning("[PLAYWRIGHT] No player links found on page")
                     browser.close()
                     return None, None
                 
-                # Find the squad tab buttons (they're <button> elements with team abbreviations)
-                tab_buttons = page.query_selector_all('button')
+                # Find the squad tab buttons using the specific CREX class
+                # CREX uses: <button class="playingxi-button selected"> IRE </button>
+                tab_buttons = page.query_selector_all('button.playingxi-button')
+                
+                if not tab_buttons:
+                    # Fallback: try generic button search
+                    tab_buttons = page.query_selector_all('button')
+                    tab_buttons = [btn for btn in tab_buttons if btn.is_visible() and 
+                                   len(btn.inner_text().strip()) <= 10]
                 
                 squad_tabs = []
                 for tab in tab_buttons:
                     text = tab.inner_text().strip()
-                    # Look for team abbreviations (SEC, PR, BHU-W, etc.) - short uppercase text
-                    if 1 <= len(text) <= 10 and (text.isupper() or '-' in text):
-                        # Make sure it's clickable (visible)
-                        if tab.is_visible():
-                            squad_tabs.append((tab, text))
+                    if text and len(text) <= 10:
+                        squad_tabs.append((tab, text))
                 
-                logger.debug(f"Found {len(squad_tabs)} squad tabs: {[t[1] for t in squad_tabs]}")
+                logger.info(f"[PLAYWRIGHT] Found {len(squad_tabs)} squad tabs: {[t[1] for t in squad_tabs]}")
                 
-                # Click each tab and extract players
-                for tab, tab_name in squad_tabs:
+                # Click each tab and extract players, keyed by tab abbreviation
+                for tab, tab_abbr in squad_tabs:
                     try:
                         tab.click()
                         page.wait_for_timeout(800)  # Wait for tab content to load
                         
                         # Extract players from current view
                         players = self._extract_players_from_page(page)
-                        teams_data[tab_name] = players
-                        logger.debug(f"Tab '{tab_name}': {len(players)} players")
+                        if players:
+                            squads[tab_abbr] = players
+                            logger.info(f"[PLAYWRIGHT] Tab '{tab_abbr}': {len(players)} players extracted")
                         
                     except Exception as e:
-                        logger.debug(f"Failed to process tab {tab_name}: {e}")
+                        logger.debug(f"[PLAYWRIGHT] Failed to process tab {tab_abbr}: {e}")
                 
                 browser.close()
             
-            # Match tabs to team names
-            # team1_id (e.g., "MY") might match tab "PR" via abbreviation
-            team1_players = []
-            team2_players = []
+            if not squads:
+                logger.warning("[PLAYWRIGHT] No squads could be extracted from any tabs")
+                return None, None
             
-            # Create abbreviation mappings
-            team1_abbr = ''.join([w[0] for w in team1_name.split() if w]).upper()
-            team2_abbr = ''.join([w[0] for w in team2_name.split() if w]).upper()
+            # Now match tabs to teams using abbreviation matching
+            # Build abbreviation-to-team mapping
+            team1_abbrs = self._generate_team_abbreviations(team1_name, team1_id)
+            team2_abbrs = self._generate_team_abbreviations(team2_name, team2_id)
             
-            for tab_name, players in teams_data.items():
-                # Try to match tab to team
-                tab_upper = tab_name.upper().replace('-', '')
+            logger.info(f"[PLAYWRIGHT] Team1 '{team1_name}' abbrs: {team1_abbrs}")
+            logger.info(f"[PLAYWRIGHT] Team2 '{team2_name}' abbrs: {team2_abbrs}")
+            
+            team1_players = None
+            team2_players = None
+            team1_tab = None
+            team2_tab = None
+            
+            for tab_abbr, players in squads.items():
+                tab_upper = tab_abbr.upper().replace('-', '').replace(' ', '')
                 
-                # Match by tab name, team ID, or abbreviation
-                if (tab_upper == team1_id.upper() or 
-                    tab_upper == team1_abbr or 
-                    team1_name.upper().startswith(tab_upper)):
+                # Check if this tab matches team1
+                if any(abbr == tab_upper for abbr in team1_abbrs):
                     team1_players = players
-                    logger.debug(f"Tab '{tab_name}' matched to team1: {team1_name}")
-                elif (tab_upper == team2_id.upper() or 
-                      tab_upper == team2_abbr or 
-                      team2_name.upper().startswith(tab_upper)):
+                    team1_tab = tab_abbr
+                    logger.info(f"[PLAYWRIGHT] Tab '{tab_abbr}' matched to team1 '{team1_name}'")
+                # Check if this tab matches team2
+                elif any(abbr == tab_upper for abbr in team2_abbrs):
                     team2_players = players
-                    logger.debug(f"Tab '{tab_name}' matched to team2: {team2_name}")
-                else:
-                    # Try partial matching
-                    if any(part.upper() in tab_upper or tab_upper in part.upper() 
-                           for part in team1_name.split()):
-                        team1_players = players
-                    elif any(part.upper() in tab_upper or tab_upper in part.upper() 
-                             for part in team2_name.split()):
-                        team2_players = players
+                    team2_tab = tab_abbr
+                    logger.info(f"[PLAYWRIGHT] Tab '{tab_abbr}' matched to team2 '{team2_name}'")
             
-            # If we only got one set of players, it might be for the first/default tab
-            if not team1_players and not team2_players and teams_data:
-                # Assign to the teams in order
-                tab_names = list(teams_data.keys())
-                if len(tab_names) >= 2:
-                    team2_players = teams_data[tab_names[0]]  # First tab is usually visible by default
-                    team1_players = teams_data[tab_names[1]]
-                elif len(tab_names) == 1:
-                    team2_players = teams_data[tab_names[0]]
+            # If matching failed, fall back to tab order (first = team1, second = team2)
+            tab_list = list(squads.items())
+            if team1_players is None and len(tab_list) >= 1:
+                team1_tab, team1_players = tab_list[0]
+                logger.warning(f"[PLAYWRIGHT] No match for team1, using first tab '{team1_tab}'")
+            if team2_players is None and len(tab_list) >= 2:
+                team2_tab, team2_players = tab_list[1]
+                logger.warning(f"[PLAYWRIGHT] No match for team2, using second tab '{team2_tab}'")
             
             # Create team objects
             team1 = None
@@ -1003,30 +1013,107 @@ class CREXScraper:
                 team1 = CREXTeam(
                     crex_id=team1_id,
                     name=team1_name,
-                    abbreviation=team1_id,
+                    abbreviation=team1_tab or team1_id,
                     players=team1_players
                 )
-                logger.info(f"Playwright: {team1_name} has {len(team1_players)} players")
+                logger.info(f"[PLAYWRIGHT] Team1 '{team1_name}' (tab: {team1_tab}): {len(team1_players)} players")
             
             if team2_players:
                 team2 = CREXTeam(
                     crex_id=team2_id,
                     name=team2_name,
-                    abbreviation=team2_id,
+                    abbreviation=team2_tab or team2_id,
                     players=team2_players
                 )
-                logger.info(f"Playwright: {team2_name} has {len(team2_players)} players")
+                logger.info(f"[PLAYWRIGHT] Team2 '{team2_name}' (tab: {team2_tab}): {len(team2_players)} players")
+            
+            logger.info(f"[PLAYWRIGHT] NOTE: API layer will verify via player affiliations if needed.")
             
             return team1, team2
             
         except ImportError:
-            logger.warning("Playwright not installed, cannot fetch squads via JavaScript rendering")
+            logger.warning("[PLAYWRIGHT] Playwright not installed, cannot fetch squads via JavaScript rendering")
             return None, None
         except Exception as e:
-            logger.error(f"Playwright squad fetch failed: {e}")
+            logger.error(f"[PLAYWRIGHT] Squad fetch failed: {e}")
             import traceback
             traceback.print_exc()
             return None, None
+    
+    def _generate_team_abbreviations(self, team_name: str, team_id: str) -> List[str]:
+        """
+        Generate possible abbreviations for a team name.
+        
+        Args:
+            team_name: Full team name (e.g., "Ireland", "Perth Scorchers")
+            team_id: CREX team ID
+            
+        Returns:
+            List of possible abbreviations in uppercase
+        """
+        abbrs = set()
+        
+        # Add the team ID
+        abbrs.add(team_id.upper().replace('-', ''))
+        
+        # Standard country/team abbreviations
+        KNOWN_ABBRS = {
+            'ireland': ['IRE', 'IRL'],
+            'italy': ['ITA', 'ITALY'],
+            'australia': ['AUS'],
+            'india': ['IND'],
+            'england': ['ENG'],
+            'pakistan': ['PAK'],
+            'new zealand': ['NZ', 'NZL'],
+            'south africa': ['SA', 'RSA', 'SAF'],
+            'west indies': ['WI', 'WIN'],
+            'sri lanka': ['SL', 'SRI'],
+            'bangladesh': ['BAN', 'BD'],
+            'afghanistan': ['AFG'],
+            'zimbabwe': ['ZIM'],
+            'scotland': ['SCO'],
+            'netherlands': ['NED', 'NL'],
+            'nepal': ['NEP'],
+            'oman': ['OMA', 'OMN'],
+            'uae': ['UAE'],
+            'usa': ['USA'],
+            'canada': ['CAN'],
+            'hong kong': ['HK', 'HKG'],
+            'malaysia': ['MAS', 'MAL', 'MYS'],
+            'bhutan': ['BHU'],
+            'perth scorchers': ['PRS', 'PS', 'PERTH'],
+            'sydney sixers': ['SYS', 'SS', 'SIXERS'],
+            'sydney thunder': ['SYT', 'ST', 'THUNDER'],
+            'melbourne stars': ['MLS', 'STARS'],
+            'melbourne renegades': ['MLR', 'RENEGADES'],
+            'brisbane heat': ['BRH', 'HEAT'],
+            'hobart hurricanes': ['HOB', 'HURRICANES'],
+            'adelaide strikers': ['ADS', 'STRIKERS'],
+            'northern brave': ['NB', 'BRAVE'],
+            'canterbury': ['CAN', 'CANTERBURY'],
+            'auckland': ['AKL', 'AUCKLAND'],
+            'wellington': ['WEL', 'WELLINGTON'],
+            'otago': ['OTA', 'OTAGO'],
+            'central stags': ['CS', 'STAGS'],
+        }
+        
+        # Check known abbreviations
+        name_lower = team_name.lower().replace(' women', '').replace('-w', '').strip()
+        if name_lower in KNOWN_ABBRS:
+            abbrs.update(KNOWN_ABBRS[name_lower])
+        
+        # Generate from first letters of words
+        words = team_name.replace('-', ' ').split()
+        if words:
+            # First 3 letters of first word
+            abbrs.add(words[0][:3].upper())
+            # First letter of each word
+            abbrs.add(''.join(w[0] for w in words if w).upper())
+            # First 2-3 letters
+            if len(words[0]) >= 2:
+                abbrs.add(words[0][:2].upper())
+        
+        return list(abbrs)
     
     def _extract_players_from_page(self, page) -> List[CREXPlayer]:
         """Extract player data from current Playwright page state."""
@@ -1208,6 +1295,147 @@ class CREXScraper:
     # Database Matching Methods
     # =========================================================================
     
+    def get_player_team_affiliation(self, player_db_id: int, format_type: str = 'T20', 
+                                     gender: str = 'male') -> Optional[Dict]:
+        """
+        Query which team a player most recently played for in the database.
+        
+        This is used to verify team assignments from CREX scraping. After matching
+        players to the database, we can determine the actual team identity by
+        checking which team the majority of players are affiliated with.
+        
+        Args:
+            player_db_id: Database player ID
+            format_type: 'T20' or 'ODI'
+            gender: 'male' or 'female'
+            
+        Returns:
+            Dict with team_id, team_name, match_count or None if not found
+        """
+        if not player_db_id:
+            return None
+        
+        conn = get_connection()
+        cursor = conn.cursor()
+        
+        try:
+            # Query match_players + matches to find most recent team_id for this player
+            # We look at the most recent matches to determine current affiliation
+            cursor.execute("""
+                SELECT pms.team_id, t.name as team_name, COUNT(*) as match_count,
+                       MAX(m.date) as last_match_date
+                FROM player_match_stats pms
+                JOIN matches m ON m.match_id = pms.match_id
+                JOIN teams t ON t.team_id = pms.team_id
+                WHERE pms.player_id = ? 
+                  AND m.match_type = ? 
+                  AND m.gender = ?
+                GROUP BY pms.team_id
+                ORDER BY MAX(m.date) DESC, match_count DESC
+                LIMIT 1
+            """, (player_db_id, format_type, gender))
+            
+            result = cursor.fetchone()
+            
+            if result:
+                return {
+                    'team_id': result['team_id'],
+                    'team_name': result['team_name'],
+                    'match_count': result['match_count'],
+                    'last_match_date': result['last_match_date']
+                }
+            return None
+            
+        except Exception as e:
+            logger.error(f"Error getting player team affiliation for player_id={player_db_id}: {e}")
+            return None
+        finally:
+            conn.close()
+    
+    def get_squad_team_affiliations(self, players: List[CREXPlayer], format_type: str = 'T20',
+                                     gender: str = 'male') -> Dict[int, int]:
+        """
+        For a list of players, determine how many belong to each team.
+        
+        This is the core logic for affirmative team assignment. After scraping
+        players and matching them to DB IDs, we count which database team each
+        player belongs to. The team with the majority of players is the actual team.
+        
+        Args:
+            players: List of CREXPlayer objects with db_player_id populated
+            format_type: 'T20' or 'ODI'
+            gender: 'male' or 'female'
+            
+        Returns:
+            Dict mapping team_id -> count of players affiliated with that team
+        """
+        affiliations = {}  # team_id -> count
+        
+        for player in players:
+            if not player.db_player_id:
+                continue
+                
+            affiliation = self.get_player_team_affiliation(
+                player.db_player_id, format_type, gender
+            )
+            
+            if affiliation:
+                team_id = affiliation['team_id']
+                affiliations[team_id] = affiliations.get(team_id, 0) + 1
+        
+        return affiliations
+    
+    def determine_team_from_players(self, players: List[CREXPlayer], format_type: str = 'T20',
+                                     gender: str = 'male') -> Optional[Dict]:
+        """
+        Determine which team a squad belongs to based on player affiliations.
+        
+        This is the authoritative team assignment function. It looks at all matched
+        players and returns the team that the majority of them belong to.
+        
+        Args:
+            players: List of CREXPlayer objects with db_player_id populated
+            format_type: 'T20' or 'ODI'
+            gender: 'male' or 'female'
+            
+        Returns:
+            Dict with team_id, team_name, player_count, total_matched, confidence
+            or None if no affiliation could be determined
+        """
+        if not players:
+            return None
+        
+        affiliations = self.get_squad_team_affiliations(players, format_type, gender)
+        
+        if not affiliations:
+            return None
+        
+        # Find the team with the most players
+        best_team_id = max(affiliations, key=affiliations.get)
+        best_count = affiliations[best_team_id]
+        total_matched = sum(affiliations.values())
+        
+        # Get team name
+        conn = get_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT name FROM teams WHERE team_id = ?", (best_team_id,))
+        result = cursor.fetchone()
+        conn.close()
+        
+        team_name = result['name'] if result else f"Team {best_team_id}"
+        
+        # Calculate confidence (proportion of matched players from this team)
+        confidence = best_count / total_matched if total_matched > 0 else 0
+        
+        return {
+            'team_id': best_team_id,
+            'team_name': team_name,
+            'player_count': best_count,
+            'total_matched': total_matched,
+            'confidence': confidence,
+            'all_affiliations': affiliations  # For debugging mixed squads
+        }
+    
     def match_venue_to_db(self, venue: CREXVenue, gender: str = 'male') -> Optional[Tuple[int, str]]:
         """
         Match CREX venue to database venue.
@@ -1240,7 +1468,7 @@ class CREXScraper:
         conn.close()
         
         # Clean venue name - strip common sponsor prefixes and suffixes
-        def normalize_venue_name(name: str) -> str:
+        def local_normalize_venue_name(name: str) -> str:
             if not name:
                 return ""
             # Strip common sponsor/naming prefixes (2-3 letter codes often sponsors)
@@ -1252,12 +1480,20 @@ class CREXScraper:
             cleaned = re.sub(r'\s+Team Form$', '', cleaned, flags=re.I)
             return cleaned
         
-        venue_name_clean = normalize_venue_name(venue.name)
+        venue_name_clean = local_normalize_venue_name(venue.name)
+        
+        # Try canonical alias lookup first (e.g., "Optus Stadium" -> "Perth Stadium")
+        canonical_name = get_canonical_venue_name(venue.name)
+        canonical_clean = get_canonical_venue_name(venue_name_clean)
         
         # Create list of names to try matching
         names_to_try = [venue.name]
         if venue_name_clean != venue.name:
             names_to_try.append(venue_name_clean)
+        if canonical_name != venue.name:
+            names_to_try.append(canonical_name)
+        if canonical_clean != venue_name_clean and canonical_clean not in names_to_try:
+            names_to_try.append(canonical_clean)
         
         best_match = None
         best_score = 0.0
@@ -1265,12 +1501,15 @@ class CREXScraper:
         for try_name in names_to_try:
             for row in db_venues:
                 db_name = row['name']
-                db_name_clean = normalize_venue_name(db_name)
+                db_name_clean = local_normalize_venue_name(db_name)
                 
                 # Try both original and cleaned names
                 score1 = venue_similarity(try_name, db_name)
                 score2 = venue_similarity(try_name, db_name_clean)
-                score = max(score1, score2)
+                # Also try matching against the database name's canonical form
+                db_canonical = get_canonical_venue_name(db_name)
+                score3 = venue_similarity(try_name, db_canonical) if db_canonical != db_name else 0
+                score = max(score1, score2, score3)
                 
                 # Boost score if city matches
                 if venue.city and row['city']:
