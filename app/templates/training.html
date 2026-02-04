@@ -234,6 +234,7 @@
                 <div id="male-model-info">
                     <p><strong>Model:</strong> <span id="male-model-name">-</span></p>
                     <p><strong>Training Date:</strong> <span id="male-model-date">-</span></p>
+                    <p><strong>Data Coverage:</strong> <span id="male-model-data-range">-</span></p>
                     <p><strong>Samples:</strong> <span id="male-model-samples">-</span></p>
                     <p><strong>Size:</strong> <span id="male-model-size">-</span></p>
                 </div>
@@ -246,6 +247,7 @@
                 <div id="female-model-info">
                     <p><strong>Model:</strong> <span id="female-model-name">-</span></p>
                     <p><strong>Training Date:</strong> <span id="female-model-date">-</span></p>
+                    <p><strong>Data Coverage:</strong> <span id="female-model-data-range">-</span></p>
                     <p><strong>Samples:</strong> <span id="female-model-samples">-</span></p>
                     <p><strong>Size:</strong> <span id="female-model-size">-</span></p>
                 </div>
@@ -422,6 +424,25 @@ function formatDate(dateStr) {
     });
 }
 
+// Update status indicator based on days since latest data
+function updateStatusIndicator(prefix, daysBehind) {
+    const indicator = document.querySelector(`#${prefix}-status .status-indicator`);
+    const daysLabel = document.getElementById(`${prefix}-days-behind`);
+    
+    if (!indicator || !daysLabel) return;
+    
+    if (daysBehind < 7) {
+        indicator.className = 'status-indicator status-green';
+        daysLabel.textContent = `Up to date (${daysBehind} days ago)`;
+    } else if (daysBehind < 30) {
+        indicator.className = 'status-indicator status-yellow';
+        daysLabel.textContent = `${daysBehind} days behind`;
+    } else {
+        indicator.className = 'status-indicator status-red';
+        daysLabel.textContent = `${daysBehind} days behind`;
+    }
+}
+
 // Load database status
 async function loadDatabaseStatus() {
     try {
@@ -434,38 +455,14 @@ async function loadDatabaseStatus() {
             document.getElementById('male-matches').textContent = formatNumber(maleStats.total_matches || 0);
             document.getElementById('male-dates').textContent = 
                 `${maleStats.earliest_date || 'N/A'} to ${maleStats.latest_date || 'N/A'}`;
-            
-            const maleDays = maleStats.days_since_latest || 0;
-            const maleIndicator = document.querySelector('#male-status .status-indicator');
-            if (maleDays < 7) {
-                maleIndicator.className = 'status-indicator status-green';
-                document.getElementById('male-days-behind').textContent = `Up to date (${maleDays} days ago)`;
-            } else if (maleDays < 30) {
-                maleIndicator.className = 'status-indicator status-yellow';
-                document.getElementById('male-days-behind').textContent = `${maleDays} days behind`;
-            } else {
-                maleIndicator.className = 'status-indicator status-red';
-                document.getElementById('male-days-behind').textContent = `${maleDays} days behind`;
-            }
+            updateStatusIndicator('male', maleStats.days_since_latest || 0);
             
             // Female stats
             const femaleStats = data.match_stats.female || {};
             document.getElementById('female-matches').textContent = formatNumber(femaleStats.total_matches || 0);
             document.getElementById('female-dates').textContent = 
                 `${femaleStats.earliest_date || 'N/A'} to ${femaleStats.latest_date || 'N/A'}`;
-            
-            const femaleDays = femaleStats.days_since_latest || 0;
-            const femaleIndicator = document.querySelector('#female-status .status-indicator');
-            if (femaleDays < 7) {
-                femaleIndicator.className = 'status-indicator status-green';
-                document.getElementById('female-days-behind').textContent = `Up to date (${femaleDays} days ago)`;
-            } else if (femaleDays < 30) {
-                femaleIndicator.className = 'status-indicator status-yellow';
-                document.getElementById('female-days-behind').textContent = `${femaleDays} days behind`;
-            } else {
-                femaleIndicator.className = 'status-indicator status-red';
-                document.getElementById('female-days-behind').textContent = `${femaleDays} days behind`;
-            }
+            updateStatusIndicator('female', femaleStats.days_since_latest || 0);
             
             // Overall stats
             document.getElementById('total-players').textContent = formatNumber(data.total_players);
@@ -494,24 +491,36 @@ async function loadActiveModels() {
             const maleModel = models.find(m => m.gender === 'male');
             const femaleModel = models.find(m => m.gender === 'female');
             
+            // Helper to format data range
+            const formatDataRange = (model) => {
+                if (model.data_earliest_date && model.data_latest_date) {
+                    return `${model.data_earliest_date} to ${model.data_latest_date}`;
+                }
+                return 'N/A';
+            };
+            
             // Update male model
             if (maleModel) {
                 document.getElementById('male-model-name').textContent = maleModel.model_name;
                 document.getElementById('male-model-date').textContent = formatDate(maleModel.created_at);
+                document.getElementById('male-model-data-range').textContent = formatDataRange(maleModel);
                 document.getElementById('male-model-samples').textContent = formatNumber(maleModel.training_samples || 0);
                 document.getElementById('male-model-size').textContent = formatSize(maleModel.model_size_mb || 0);
             } else {
                 document.getElementById('male-model-name').textContent = 'No active model';
+                document.getElementById('male-model-data-range').textContent = '-';
             }
             
             // Update female model
             if (femaleModel) {
                 document.getElementById('female-model-name').textContent = femaleModel.model_name;
                 document.getElementById('female-model-date').textContent = formatDate(femaleModel.created_at);
+                document.getElementById('female-model-data-range').textContent = formatDataRange(femaleModel);
                 document.getElementById('female-model-samples').textContent = formatNumber(femaleModel.training_samples || 0);
                 document.getElementById('female-model-size').textContent = formatSize(femaleModel.model_size_mb || 0);
             } else {
                 document.getElementById('female-model-name').textContent = 'No active model';
+                document.getElementById('female-model-data-range').textContent = '-';
             }
             
             // Show content
@@ -641,7 +650,7 @@ async function startDownload() {
         const response = await fetch('/api/training/download', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ formats })
+            body: JSON.stringify({ formats, force_download: true })
         });
         const data = await response.json();
         
