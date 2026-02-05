@@ -138,7 +138,11 @@ class CREXScraper:
     }
     
     # Keywords to detect women's cricket
-    WOMEN_KEYWORDS = ['women', 'wbbl', 'wpl', "women's", 'wpsl', 'wt20', 'female', '-w', ' w ']
+    # Note: Be careful with abbreviations - "WI" is West Indies, not Women's Indicator
+    # Use patterns that are clearly women's cricket, not ambiguous abbreviations
+    WOMEN_KEYWORDS = ['women', 'wbbl', 'wpl', "women's", 'wpsl', 'wt20', 'female', 'womens']
+    # Suffix patterns for team names (e.g., "Australia-W", "IND-W")
+    WOMEN_SUFFIXES = ['-w', ' w$', 'w$']  # -w or ending with W after space
     
     def __init__(self, request_delay: float = 1.0):
         """
@@ -157,6 +161,36 @@ class CREXScraper:
         if elapsed < self.request_delay:
             time.sleep(self.request_delay - elapsed)
         self._last_request_time = time.time()
+    
+    def parse_url_team_codes(self, match_url: str) -> dict:
+        """
+        Parse team codes from URL for verification.
+        
+        URL format: .../scoreboard/{match_id}/{series_id}/{match_type}/{team1_id}/{team2_id}/{slug}/info
+        Slug format: team1-vs-team2-match-type-series-name
+        
+        Returns:
+            dict with 'team1_id', 'team2_id', 'team1_slug', 'team2_slug', 'slug'
+        """
+        url_path = match_url.replace('https://crex.com/', '').replace('http://crex.com/', '')
+        parts = url_path.strip('/').split('/')
+        
+        result = {
+            'team1_id': parts[4] if len(parts) > 4 else '',
+            'team2_id': parts[5] if len(parts) > 5 else '',
+            'slug': parts[6] if len(parts) > 6 else '',
+            'team1_slug': '',
+            'team2_slug': '',
+        }
+        
+        # Parse team codes from slug (e.g., "ahw-vs-wbw-final-womens-super-smash-2025-26")
+        slug = result['slug']
+        vs_match = re.match(r'^([a-z0-9-]+?)-vs-([a-z0-9-]+?)-', slug, re.I)
+        if vs_match:
+            result['team1_slug'] = vs_match.group(1).upper()
+            result['team2_slug'] = vs_match.group(2).upper()
+        
+        return result
     
     def _fetch(self, url: str, timeout: int = 15) -> Optional[str]:
         """
@@ -182,7 +216,25 @@ class CREXScraper:
     def _detect_gender(self, text: str) -> str:
         """Detect gender from team/series names."""
         text_lower = text.lower()
-        return 'female' if any(kw in text_lower for kw in self.WOMEN_KEYWORDS) else 'male'
+        
+        # Check for clear women's keywords
+        if any(kw in text_lower for kw in self.WOMEN_KEYWORDS):
+            return 'female'
+        
+        # Check for women's team suffixes like "AUS-W", "IND W", "Australia W"
+        # But NOT "WI" (West Indies) or standalone "W" in middle of text
+        import re
+        # Pattern: word boundary followed by -w or space+w at end of a team name segment
+        # Examples that SHOULD match: "aus-w", "ind-w", "australia w vs bhutan w"
+        # Examples that should NOT match: "wi", "west indies", "w south africa"
+        if re.search(r'\b[a-z]+-w\b', text_lower):  # e.g., "aus-w", "bhu-w"
+            return 'female'
+        if re.search(r'\b[a-z]+\s+w\s+vs\b', text_lower):  # e.g., "australia w vs"
+            return 'female'
+        if re.search(r'\bvs\s+[a-z]+\s+w\b', text_lower):  # e.g., "vs bhutan w"
+            return 'female'
+        
+        return 'male'
     
     def _extract_city_from_venue(self, venue_name: str) -> str:
         """Extract city from venue name like 'The Wanderers Stadium, Johannesburg'."""
@@ -847,20 +899,43 @@ class CREXScraper:
             
             # Check if this team's data is visible (active tab matches)
             is_visible_team = False
-            if active_team_abbr:
-                # Compare abbreviations (team_id might be e.g., "N0" for SEC)
-                if team_id == active_team_abbr or team_id.upper() == active_team_abbr:
-                    is_visible_team = True
-                # Also check if team_name abbreviation matches
-                team_abbr = ''.join([w[0] for w in team_name.split()]).upper()
-                if team_abbr == active_team_abbr:
-                    is_visible_team = True
+            abbreviation_found = False
             
-            # If we can't determine from tabs, use team_name to match player names
-            if not is_visible_team and players:
-                # Try to identify team from known player names
-                # Check if any player in our parsed list matches what we expect for this team
-                # This is a heuristic - we check if we can match players to the team
+            if active_team_abbr:
+                abbreviation_found = True
+                active_abbr_clean = active_team_abbr.replace('-W', '').replace('-M', '').upper()
+                
+                # Compare abbreviations (team_id might be e.g., "N0" for SEC)
+                if team_id.upper() == active_abbr_clean:
+                    is_visible_team = True
+                
+                # Also check if team_name abbreviation matches (first letters)
+                team_abbr = ''.join([w[0] for w in team_name.split()]).upper()
+                if team_abbr == active_abbr_clean:
+                    is_visible_team = True
+                
+                # Also try common country/team abbreviations
+                team_name_lower = team_name.lower().replace(' women', '').replace(' men', '')
+                common_abbrs = {
+                    'south africa': 'SA', 'west indies': 'WI', 'new zealand': 'NZ',
+                    'sri lanka': 'SL', 'bangladesh': 'BAN', 'afghanistan': 'AFG',
+                    'australia': 'AUS', 'england': 'ENG', 'india': 'IND',
+                    'pakistan': 'PAK', 'zimbabwe': 'ZIM', 'ireland': 'IRE',
+                    'scotland': 'SCO', 'netherlands': 'NED', 'malaysia': 'MAS',
+                    'bhutan': 'BHU', 'nepal': 'NEP', 'oman': 'OMA', 'uae': 'UAE',
+                    'usa': 'USA', 'canada': 'CAN', 'namibia': 'NAM', 'kenya': 'KEN',
+                }
+                for name_pattern, abbr in common_abbrs.items():
+                    if name_pattern in team_name_lower:
+                        if abbr == active_abbr_clean:
+                            is_visible_team = True
+                            logger.debug(f"Matched '{team_name}' to active tab '{active_team_abbr}' via common abbr '{abbr}'")
+                        break
+            
+            # Only use fallback if we couldn't detect ANY active tab abbreviation
+            # If we found an abbreviation but it doesn't match this team, 
+            # this team's data is NOT visible (the other team's data is visible)
+            if not abbreviation_found and not is_visible_team and players:
                 is_visible_team = not is_first_team  # Default: second team is usually visible
             
             if is_visible_team and players:
@@ -996,14 +1071,23 @@ class CREXScraper:
                     team2_tab = tab_abbr
                     logger.info(f"[PLAYWRIGHT] Tab '{tab_abbr}' matched to team2 '{team2_name}'")
             
-            # If matching failed, fall back to tab order (first = team1, second = team2)
-            tab_list = list(squads.items())
-            if team1_players is None and len(tab_list) >= 1:
-                team1_tab, team1_players = tab_list[0]
-                logger.warning(f"[PLAYWRIGHT] No match for team1, using first tab '{team1_tab}'")
-            if team2_players is None and len(tab_list) >= 2:
-                team2_tab, team2_players = tab_list[1]
-                logger.warning(f"[PLAYWRIGHT] No match for team2, using second tab '{team2_tab}'")
+            # If matching failed, fall back to remaining unmatched tabs
+            # IMPORTANT: Don't reuse a tab that was already matched to another team!
+            matched_tabs = set()
+            if team1_tab:
+                matched_tabs.add(team1_tab)
+            if team2_tab:
+                matched_tabs.add(team2_tab)
+            
+            # Get unmatched tabs in order
+            unmatched_tabs = [(tab, players) for tab, players in squads.items() if tab not in matched_tabs]
+            
+            if team1_players is None and unmatched_tabs:
+                team1_tab, team1_players = unmatched_tabs.pop(0)
+                logger.warning(f"[PLAYWRIGHT] No match for team1, using unmatched tab '{team1_tab}'")
+            if team2_players is None and unmatched_tabs:
+                team2_tab, team2_players = unmatched_tabs.pop(0)
+                logger.warning(f"[PLAYWRIGHT] No match for team2, using unmatched tab '{team2_tab}'")
             
             # Create team objects
             team1 = None
@@ -1089,12 +1173,20 @@ class CREXScraper:
             'brisbane heat': ['BRH', 'HEAT'],
             'hobart hurricanes': ['HOB', 'HURRICANES'],
             'adelaide strikers': ['ADS', 'STRIKERS'],
-            'northern brave': ['NB', 'BRAVE'],
-            'canterbury': ['CAN', 'CANTERBURY'],
-            'auckland': ['AKL', 'AUCKLAND'],
-            'wellington': ['WEL', 'WELLINGTON'],
-            'otago': ['OTA', 'OTAGO'],
+            'northern brave': ['NB', 'NBW', 'BRAVE'],
+            'canterbury': ['CTB', 'CMW', 'CANTERBURY'],  # Note: NOT 'CAN' - that's Canada
+            'auckland': ['AKL', 'AHW', 'AUCKLAND'],  # AHW = Auckland Hearts Women
+            'wellington': ['WEL', 'WBW', 'WELLINGTON'],  # WBW = Wellington Blaze Women
+            'otago': ['OTA', 'OSW', 'OTAGO'],  # OSW = Otago Sparks Women
             'central stags': ['CS', 'STAGS'],
+            'central districts': ['CD', 'CHW', 'CENTRAL'],  # CHW = Central Hinds Women
+            # NZ Women's Super Smash franchise names
+            'auckland hearts': ['AHW', 'AH', 'HEARTS'],
+            'northern brave women': ['NBW', 'NB', 'BRAVE'],
+            'wellington blaze': ['WBW', 'WB', 'BLAZE'],
+            'canterbury magicians': ['CMW', 'CM', 'MAGICIANS'],
+            'central hinds': ['CHW', 'CH', 'HINDS'],
+            'otago sparks': ['OSW', 'OS', 'SPARKS'],
         }
         
         # Check known abbreviations
@@ -1102,16 +1194,41 @@ class CREXScraper:
         if name_lower in KNOWN_ABBRS:
             abbrs.update(KNOWN_ABBRS[name_lower])
         
+        # Also check partial matches for franchise teams (e.g., "Auckland Women" should match "auckland")
+        for known_name, known_abbrs in KNOWN_ABBRS.items():
+            if known_name in name_lower or name_lower in known_name:
+                abbrs.update(known_abbrs)
+        
+        # Reserved country abbreviations - never auto-generate these for non-country teams
+        # These are used by international teams and should not collide with domestic teams
+        RESERVED_COUNTRY_ABBRS = {
+            'AUS', 'IND', 'ENG', 'PAK', 'NZ', 'SA', 'WI', 'SL', 'BAN', 'AFG',
+            'ZIM', 'IRE', 'SCO', 'NED', 'UAE', 'NAM', 'OMA', 'USA', 'CAN', 'KEN',
+            'NEP', 'PNG', 'HK', 'MAS', 'SIN', 'BHU', 'MYA', 'JPN', 'KOR', 'THA',
+            'UGA', 'TAN', 'RWA', 'NIG', 'BOT', 'GHA', 'GER', 'ITA', 'FRA', 'BER',
+        }
+        
+        # Check if this team name is a country (if so, it can use reserved abbrs)
+        is_country_team = name_lower in KNOWN_ABBRS and any(
+            abbr in RESERVED_COUNTRY_ABBRS for abbr in KNOWN_ABBRS.get(name_lower, [])
+        )
+        
         # Generate from first letters of words
         words = team_name.replace('-', ' ').split()
         if words:
             # First 3 letters of first word
-            abbrs.add(words[0][:3].upper())
+            auto_abbr_3 = words[0][:3].upper()
+            if is_country_team or auto_abbr_3 not in RESERVED_COUNTRY_ABBRS:
+                abbrs.add(auto_abbr_3)
+            
             # First letter of each word
             abbrs.add(''.join(w[0] for w in words if w).upper())
+            
             # First 2-3 letters
             if len(words[0]) >= 2:
-                abbrs.add(words[0][:2].upper())
+                auto_abbr_2 = words[0][:2].upper()
+                if is_country_team or auto_abbr_2 not in RESERVED_COUNTRY_ABBRS:
+                    abbrs.add(auto_abbr_2)
         
         return list(abbrs)
     
@@ -1557,7 +1674,9 @@ class CREXScraper:
         team_names = [team.name, team.abbreviation]
         
         # NZ Super Smash team rebrandings (new name -> old database name)
+        # Includes both men's and women's franchise names
         nz_rebrand_aliases = {
+            # Men's
             'northern brave': 'northern districts',
             'southern brave': 'southern districts', 
             'central stags': 'central districts',
@@ -1565,6 +1684,18 @@ class CREXScraper:
             'auckland aces': 'auckland',
             'wellington firebirds': 'wellington',
             'canterbury kings': 'canterbury',
+            # Women's Super Smash franchise names
+            'auckland hearts': 'auckland',
+            'auckland hearts women': 'auckland',
+            'wellington blaze': 'wellington',
+            'wellington blaze women': 'wellington',
+            'canterbury magicians': 'canterbury',
+            'canterbury magicians women': 'canterbury',
+            'central hinds': 'central districts',
+            'central hinds women': 'central districts',
+            'northern brave women': 'northern districts',
+            'otago sparks': 'otago',
+            'otago sparks women': 'otago',
         }
         
         # Common cricket team abbreviations (CREX abbreviation -> full name)
@@ -1587,11 +1718,18 @@ class CREXScraper:
             'ber': 'bermuda', 'cay': 'cayman islands', 'bar': 'barbados',
             'jam': 'jamaica', 'tto': 'trinidad and tobago', 'guy': 'guyana',
             'lwi': 'leeward islands', 'wwi': 'windward islands',
-            # NZ domestic
-            'akl': 'auckland', 'wel': 'wellington', 'can': 'canterbury', 'ota': 'otago',
+            # NZ domestic (men's)
+            # Note: 'can' is reserved for Canada (country), use 'ctb' for Canterbury
+            'akl': 'auckland', 'wel': 'wellington', 'ctb': 'canterbury', 'ota': 'otago',
             'cd': 'central districts', 'nd': 'northern districts',
-            'chw': 'canterbury', 'cmw': 'canterbury', 'nbw': 'northern brave',
-            'osw': 'otago', 'wfw': 'wellington',
+            # NZ Women's Super Smash abbreviations
+            'ahw': 'auckland',  # Auckland Hearts Women
+            'wbw': 'wellington',  # Wellington Blaze Women
+            'cmw': 'canterbury',  # Canterbury Magicians Women
+            'chw': 'central districts',  # Central Hinds Women
+            'nbw': 'northern districts',  # Northern Brave Women
+            'osw': 'otago',  # Otago Sparks Women
+            'wfw': 'wellington',
             # Australia domestic
             'nsw': 'new south wales', 'vic': 'victoria', 'qld': 'queensland',
             'tas': 'tasmania', 'wa': 'western australia',
