@@ -1195,9 +1195,15 @@ class CREXScraper:
             abbrs.update(KNOWN_ABBRS[name_lower])
         
         # Also check partial matches for franchise teams (e.g., "Auckland Women" should match "auckland")
-        for known_name, known_abbrs in KNOWN_ABBRS.items():
-            if known_name in name_lower or name_lower in known_name:
-                abbrs.update(known_abbrs)
+        # BUT: Skip partial matching for short names (<=4 chars) to avoid false positives
+        # e.g., "CAN" is a substring of both "canada" and "canterbury" - we don't want to match both!
+        if len(name_lower) > 4:
+            for known_name, known_abbrs in KNOWN_ABBRS.items():
+                # Only match if the known_name is contained in our team name (not vice versa)
+                # This allows "Auckland Hearts" to match "auckland", but prevents
+                # "can" from matching "canterbury"
+                if known_name in name_lower:
+                    abbrs.update(known_abbrs)
         
         # Reserved country abbreviations - never auto-generate these for non-country teams
         # These are used by international teams and should not collide with domestic teams
