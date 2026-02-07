@@ -1235,7 +1235,7 @@ def simulate_match():
         team2_batters_raw = to_int_ids(data.get('team2_batters', []))
         team2_bowlers_raw = to_int_ids(data.get('team2_bowlers', []))
         simulator_type = data.get('simulator', 'nn')  # Default to NN for scorecard
-        n_simulations = min(data.get('n_simulations', 1000), 10000)
+        n_simulations = min(data.get('n_simulations', 1000), 1000000)
         venue_id = data.get('venue_id')
         use_toss = data.get('use_toss', False)
         gender = data.get('gender', 'male')
@@ -1456,7 +1456,7 @@ def simulate_match_stream():
     team2_batters_raw = to_int_ids(data.get('team2_batters', []))
     team2_bowlers_raw = to_int_ids(data.get('team2_bowlers', []))
     simulator_type = data.get('simulator', 'nn')  # Default to NN for scorecard
-    n_simulations = min(data.get('n_simulations', 1000), 10000)
+    n_simulations = min(data.get('n_simulations', 1000), 1000000)
     venue_id = data.get('venue_id')
     use_toss = data.get('use_toss', False)
     gender = data.get('gender', 'male')
@@ -2749,6 +2749,11 @@ def get_crex_match():
         if not match:
             return jsonify({'success': False, 'error': 'Failed to fetch match from CREX'}), 404
         
+        # Parse URL for verification - extract expected team codes from slug
+        url_info = scraper.parse_url_team_codes(match_url)
+        logger.info(f"[URL VERIFY] URL slug teams: {url_info['team1_slug']} vs {url_info['team2_slug']}")
+        logger.info(f"[URL VERIFY] Scraped team names: {match.team1_name} vs {match.team2_name}")
+        
         # Match venue to database
         venue_db = None
         if match.venue:
@@ -2931,47 +2936,43 @@ def get_crex_match():
                     logger.warning(f"[TEAM ASSIGNMENT] Squad2 has mixed affiliations: {squad2_team['all_affiliations']}")
         
         # Now determine team assignments based on affiliations
-        # Priority: Use affiliation if available and confident, else fall back to CREX team name matching
+        # IMPORTANT: Only use affiliations as FALLBACK when team name matching failed.
+        # For domestic leagues (NZ Super Smash, etc.) players play for multiple teams
+        # internationally, so their affiliations are scattered and NOT reliable for
+        # determining their domestic team.
+        #
+        # Priority: Team name match > Player affiliation (fallback only)
         
         AFFILIATION_CONFIDENCE_THRESHOLD = 0.6  # At least 60% of matched players from same team
+        AFFILIATION_MIN_PLAYERS = 5  # Need at least 5 players with affiliations to trust it
         
         # Determine final team1_db and team2_db based on affiliations
         original_team1_db = team1_db.copy() if team1_db else None
         original_team2_db = team2_db.copy() if team2_db else None
         
-        # Squad 1: Use affiliation if confident enough
-        if squad1_team and squad1_team['confidence'] >= AFFILIATION_CONFIDENCE_THRESHOLD:
-            new_team_id = squad1_team['team_id']
-            new_team_name = squad1_team['team_name']
-            
-            if team1_db and team1_db['team_id'] != new_team_id:
-                # Affiliation disagrees with CREX team name - use affiliation
-                logger.warning(f"[TEAM SWAP] Squad1: CREX says '{match.team1.name}' but players are from '{new_team_name}'")
-                logger.info(f"[TEAM SWAP] Correcting Team1: {team1_db['name']} -> {new_team_name}")
-                team1_db = {'team_id': new_team_id, 'name': new_team_name}
-                team_swap_detected = True
-                team_swap_details['team1'] = {'from': original_team1_db['name'], 'to': new_team_name}
-            elif not team1_db:
-                # No CREX match, but we have affiliation
-                logger.info(f"[TEAM ASSIGNMENT] Inferred Team1 as '{new_team_name}' from player affiliations")
-                team1_db = {'team_id': new_team_id, 'name': new_team_name}
+        # Squad 1: ONLY use affiliation if we couldn't match the team name
+        if not team1_db and squad1_team and squad1_team['confidence'] >= AFFILIATION_CONFIDENCE_THRESHOLD:
+            # No CREX match, but we have affiliation - use it as fallback
+            if squad1_team.get('total_matched', 0) >= AFFILIATION_MIN_PLAYERS:
+                logger.info(f"[TEAM ASSIGNMENT] Inferred Team1 as '{squad1_team['team_name']}' from player affiliations (fallback)")
+                team1_db = {'team_id': squad1_team['team_id'], 'name': squad1_team['team_name']}
+            else:
+                logger.warning(f"[TEAM ASSIGNMENT] Squad1 affiliation low sample size ({squad1_team.get('total_matched', 0)} players) - not using")
+        elif team1_db:
+            # Team name match succeeded - trust it, ignore affiliations
+            logger.info(f"[TEAM ASSIGNMENT] Team1 matched via name/abbreviation: '{team1_db['name']}' - trusting this match")
         
-        # Squad 2: Use affiliation if confident enough
-        if squad2_team and squad2_team['confidence'] >= AFFILIATION_CONFIDENCE_THRESHOLD:
-            new_team_id = squad2_team['team_id']
-            new_team_name = squad2_team['team_name']
-            
-            if team2_db and team2_db['team_id'] != new_team_id:
-                # Affiliation disagrees with CREX team name - use affiliation
-                logger.warning(f"[TEAM SWAP] Squad2: CREX says '{match.team2.name}' but players are from '{new_team_name}'")
-                logger.info(f"[TEAM SWAP] Correcting Team2: {team2_db['name']} -> {new_team_name}")
-                team2_db = {'team_id': new_team_id, 'name': new_team_name}
-                team_swap_detected = True
-                team_swap_details['team2'] = {'from': original_team2_db['name'], 'to': new_team_name}
-            elif not team2_db:
-                # No CREX match, but we have affiliation
-                logger.info(f"[TEAM ASSIGNMENT] Inferred Team2 as '{new_team_name}' from player affiliations")
-                team2_db = {'team_id': new_team_id, 'name': new_team_name}
+        # Squad 2: ONLY use affiliation if we couldn't match the team name
+        if not team2_db and squad2_team and squad2_team['confidence'] >= AFFILIATION_CONFIDENCE_THRESHOLD:
+            # No CREX match, but we have affiliation - use it as fallback
+            if squad2_team.get('total_matched', 0) >= AFFILIATION_MIN_PLAYERS:
+                logger.info(f"[TEAM ASSIGNMENT] Inferred Team2 as '{squad2_team['team_name']}' from player affiliations (fallback)")
+                team2_db = {'team_id': squad2_team['team_id'], 'name': squad2_team['team_name']}
+            else:
+                logger.warning(f"[TEAM ASSIGNMENT] Squad2 affiliation low sample size ({squad2_team.get('total_matched', 0)} players) - not using")
+        elif team2_db:
+            # Team name match succeeded - trust it, ignore affiliations
+            logger.info(f"[TEAM ASSIGNMENT] Team2 matched via name/abbreviation: '{team2_db['name']}' - trusting this match")
         
         # Edge case: Both squads assigned to the same team
         # This can happen when:
@@ -3255,7 +3256,13 @@ def get_crex_match():
                 'toss_winner': match.toss_winner,
                 'toss_decision': match.toss_decision,
                 'team_swap_detected': team_swap_detected,
-                'team_swap_details': team_swap_details if team_swap_detected else None
+                'team_swap_details': team_swap_details if team_swap_detected else None,
+                'url_verification': {
+                    'team1_slug': url_info['team1_slug'],
+                    'team2_slug': url_info['team2_slug'],
+                    'team1_id': url_info['team1_id'],
+                    'team2_id': url_info['team2_id'],
+                }
             }
         }
         

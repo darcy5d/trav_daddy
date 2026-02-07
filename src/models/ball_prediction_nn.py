@@ -26,6 +26,8 @@ https://towardsdatascience.com/predicting-t20-cricket-matches-with-a-ball-simula
 import logging
 import os
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
+# Disable XLA compilation to avoid Apple Silicon Metal backend issues
+os.environ['TF_XLA_FLAGS'] = '--tf_xla_auto_jit=0'
 
 from typing import Dict, Tuple, Optional, List
 import numpy as np
@@ -121,7 +123,8 @@ def create_ball_prediction_model(
     model.compile(
         optimizer=keras.optimizers.Adam(learning_rate=0.001),
         loss='sparse_categorical_crossentropy',
-        metrics=['accuracy']
+        metrics=['accuracy'],
+        jit_compile=False  # Disable XLA for Apple Silicon compatibility
     )
     
     return model
