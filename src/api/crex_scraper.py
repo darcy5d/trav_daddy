@@ -674,8 +674,8 @@ class CREXScraper:
         # Stop at "Team Form" or other section boundaries
         venue_patterns = [
             # Match venue name + optional city, stop at Team Form or other sections
-            r'([A-Za-z\s\-\']+(?:Stadium|Ground|Oval|Arena|Park|Centre|Center|International Cricket Ground)(?:,\s*[A-Za-z\s\-]+)?)\s*(?:Team Form|Head to Head|Match|$)',
-            r'(The\s+[A-Za-z\s\-\']+,\s*[A-Za-z]+)\s*(?:Team Form|Head to Head|Match|$)',
+            r'([A-Za-z\s\-\'\.]+(?:Stadium|Ground|Gardens|Oval|Arena|Park|Centre|Center|Field|Academy|Club|Complex|International Cricket Ground)(?:,\s*[A-Za-z\s\-]+)?)\s*(?:Team Form|Head to Head|Match|$)',
+            r'(The\s+[A-Za-z\s\-\'\.]+,\s*[A-Za-z]+)\s*(?:Team Form|Head to Head|Match|$)',
         ]
         
         for pattern in venue_patterns:
@@ -696,6 +696,15 @@ class CREXScraper:
         if venue_name:
             city = self._extract_city_from_venue(venue_name)
             venue = CREXVenue(name=venue_name, city=city)
+            logger.info(f"Extracted venue from CREX page: '{venue_name}'")
+        else:
+            # Log a snippet of text around where venue should be for debugging
+            date_pos = all_text.find(date_str) if date_str else -1
+            if date_pos >= 0:
+                snippet = all_text[date_pos:date_pos+200]
+                logger.warning(f"Could not extract venue from CREX page. Text near date: '{snippet[:150]}...'")
+            else:
+                logger.warning(f"Could not extract venue from CREX page (no date found either)")
         
         # Parse venue stats
         venue_stats = self._parse_venue_stats(soup)
