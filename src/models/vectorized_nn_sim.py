@@ -602,11 +602,17 @@ class VectorizedNNSimulator:
         # Pre-allocate feature buffer (reused each ball) - 34 features
         features = np.zeros((n_matches, 34), dtype=np.float32)
         
+        # Pre-allocate normalized feature buffer (avoids allocation in hot loop)
+        features_norm = np.zeros((n_matches, 34), dtype=np.float32)
+        
         # Pre-allocate float32 arrays for state (avoid repeated casting)
         runs_f = np.zeros(n_matches, dtype=np.float32)
         wickets_f = np.zeros(n_matches, dtype=np.float32)
         balls_f = np.zeros(n_matches, dtype=np.float32)
         required_rate = np.zeros(n_matches, dtype=np.float32)
+        
+        # Pre-compute reciprocal of std for faster normalization (multiply vs divide)
+        inv_std = (1.0 / self.std).astype(np.float32)
         
         # Pre-set constant features (innings, venue, team ELO)
         features[:, 0] = innings_number
@@ -670,14 +676,13 @@ class VectorizedNNSimulator:
             features[:, 32] = (current_batter_elo - 1500) / 200
             features[:, 33] = (current_bowler_elo - 1500) / 200
             
-            # Normalize IN-PLACE
-            features_norm = (features - self.mean) / self.std
+            # Normalize IN-PLACE (subtract mean, multiply by 1/std -- avoids allocation)
+            np.subtract(features, self.mean, out=features_norm)
+            np.multiply(features_norm, inv_std, out=features_norm)
             
             # OPTIMIZED: Use compiled TensorFlow function
-            # Convert to TensorFlow tensor and call compiled model
             try:
-                features_tf = tf.constant(features_norm, dtype=tf.float32)
-                proba = self._predict_compiled(features_tf, training=False).numpy()
+                proba = self._predict_compiled(tf.constant(features_norm), training=False).numpy()
             except Exception:
                 # Fallback to regular predict
                 proba = self.model.predict(features_norm, verbose=0, batch_size=n_matches)

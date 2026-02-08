@@ -153,6 +153,12 @@ def predict_page():
         return render_template('predict.html', teams=[])
 
 
+@app.route('/bulk-predict')
+def bulk_predict_page():
+    """Bulk match prediction page."""
+    return render_template('bulk_predict.html')
+
+
 @app.route('/rankings')
 def rankings_page():
     """ELO rankings page."""
@@ -1553,19 +1559,22 @@ def simulate_match_stream():
                 simulator = get_fast_simulator(gender)
             
             # Chunked simulation with progress updates
-            # Larger chunks = better GPU/CPU utilization (TF batches more efficiently)
-            # M2 Pro can handle larger batches efficiently
-            chunk_size = 2500  # Increased for better throughput on Apple Silicon
+            # LARGE chunks for GPU throughput (M2 Pro handles big batches well)
+            # Decouple sim chunk size from progress update frequency
+            sim_chunk_size = 10000  # Big batches for TF/Metal GPU efficiency on M2 Pro
+            progress_interval = max(1, n_simulations // 40)  # ~40 progress updates
+            
             all_team1_scores = []
             all_team2_scores = []
-            all_team1_wins = []
+            total_team1_wins = 0  # Running count (avoid list sum)
             completed = 0
+            last_progress_at = 0
             start_time = time.time()
             
             toss_stats_accum = {'team1_won_toss': 0, 'chose_field': 0, 'team1_batted_first': 0, 'total': 0}
             
-            for chunk_start in range(0, n_simulations, chunk_size):
-                chunk_n = min(chunk_size, n_simulations - chunk_start)
+            for chunk_start in range(0, n_simulations, sim_chunk_size):
+                chunk_n = min(sim_chunk_size, n_simulations - chunk_start)
                 
                 # Run chunk with proper batting orders (11 unique players each)
                 chunk_results = simulator.simulate_matches(
@@ -1581,10 +1590,13 @@ def simulate_match_stream():
                     team2_id=team2_id
                 )
                 
-                # Accumulate results
-                all_team1_scores.extend(chunk_results['team1_scores'].tolist())
-                all_team2_scores.extend(chunk_results['team2_scores'].tolist())
-                all_team1_wins.extend((chunk_results['team1_scores'] > chunk_results['team2_scores']).tolist())
+                # Accumulate results (keep as numpy, avoid .tolist())
+                t1_scores = chunk_results['team1_scores']
+                t2_scores = chunk_results['team2_scores']
+                all_team1_scores.append(t1_scores)
+                all_team2_scores.append(t2_scores)
+                chunk_wins = int((t1_scores > t2_scores).sum())
+                total_team1_wins += chunk_wins
                 
                 # Accumulate toss stats
                 if use_toss and 'toss_stats' in chunk_results:
@@ -1595,27 +1607,32 @@ def simulate_match_stream():
                     toss_stats_accum['total'] += chunk_n
                 
                 completed += chunk_n
-                elapsed = time.time() - start_time
-                rate = completed / elapsed if elapsed > 0 else 0
-                remaining = (n_simulations - completed) / rate if rate > 0 else 0
                 
-                # Send progress update
-                progress = {
-                    'type': 'progress',
-                    'completed': completed,
-                    'total': n_simulations,
-                    'elapsed_ms': int(elapsed * 1000),
-                    'rate': round(rate, 1),
-                    'eta_seconds': round(remaining, 1),
-                    'pct': round(completed * 100 / n_simulations, 1)
-                }
-                yield f"data: {json.dumps(progress)}\n\n"
+                # Only send progress update at intervals (avoid SSE overhead)
+                if completed - last_progress_at >= progress_interval or completed >= n_simulations:
+                    last_progress_at = completed
+                    elapsed = time.time() - start_time
+                    rate = completed / elapsed if elapsed > 0 else 0
+                    remaining = (n_simulations - completed) / rate if rate > 0 else 0
+                    running_t1_win_pct = round(total_team1_wins / completed * 100, 1) if completed > 0 else 50.0
+                    
+                    progress = {
+                        'type': 'progress',
+                        'completed': completed,
+                        'total': n_simulations,
+                        'elapsed_ms': int(elapsed * 1000),
+                        'rate': round(rate, 1),
+                        'eta_seconds': round(remaining, 1),
+                        'pct': round(completed * 100 / n_simulations, 1),
+                        'running_team1_win_pct': running_t1_win_pct
+                    }
+                    yield f"data: {json.dumps(progress)}\n\n"
             
             # Calculate final stats
             import numpy as np
-            team1_scores = np.array(all_team1_scores)
-            team2_scores = np.array(all_team2_scores)
-            team1_wins = np.array(all_team1_wins)
+            team1_scores = np.concatenate(all_team1_scores)
+            team2_scores = np.concatenate(all_team2_scores)
+            team1_wins = team1_scores > team2_scores
             
             elapsed = time.time() - start_time
             

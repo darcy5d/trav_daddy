@@ -1,0 +1,1108 @@
+{% extends "base.html" %}
+
+{% block title %}Bulk Predict - Cricket Match Predictor{% endblock %}
+
+{% block head %}
+<style>
+    .bulk-header {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        margin-bottom: 1.5rem;
+    }
+    .bulk-header h1 {
+        font-size: 1.75rem;
+        font-weight: 700;
+        background: var(--gradient-1);
+        -webkit-background-clip: text;
+        -webkit-text-fill-color: transparent;
+        background-clip: text;
+    }
+    .phase-indicator {
+        display: flex;
+        gap: 0.5rem;
+        margin-bottom: 1.5rem;
+    }
+    .phase-step {
+        padding: 0.5rem 1rem;
+        border-radius: 20px;
+        font-size: 0.85rem;
+        font-weight: 500;
+        background: var(--bg-tertiary);
+        color: var(--text-muted);
+        border: 1px solid var(--border-color);
+    }
+    .phase-step.active {
+        background: rgba(16, 185, 129, 0.15);
+        color: var(--accent-primary);
+        border-color: var(--accent-primary);
+    }
+    .phase-step.done {
+        background: rgba(16, 185, 129, 0.1);
+        color: var(--accent-primary);
+        border-color: transparent;
+    }
+    
+    /* Review table */
+    .review-table {
+        width: 100%;
+        border-collapse: collapse;
+    }
+    .review-table th {
+        text-align: left;
+        padding: 0.6rem 0.75rem;
+        color: var(--text-secondary);
+        font-weight: 500;
+        font-size: 0.8rem;
+        text-transform: uppercase;
+        letter-spacing: 0.5px;
+        border-bottom: 1px solid var(--border-color);
+    }
+    .review-table td {
+        padding: 0.6rem 0.75rem;
+        border-bottom: 1px solid rgba(55, 65, 81, 0.5);
+        font-size: 0.9rem;
+    }
+    .review-table tr:hover {
+        background: var(--bg-tertiary);
+    }
+    
+    .status-ready { color: var(--accent-primary); }
+    .status-review { color: var(--accent-warning); }
+    .status-error { color: #ef4444; }
+    .status-running { color: var(--accent-secondary); }
+    .status-done { color: var(--accent-primary); font-weight: 600; }
+    .status-skipped { color: var(--text-muted); }
+    
+    /* Results */
+    .result-bar {
+        display: flex;
+        height: 6px;
+        border-radius: 3px;
+        overflow: hidden;
+        background: var(--bg-tertiary);
+        margin-top: 0.25rem;
+    }
+    .result-bar-fill {
+        height: 100%;
+        transition: width 0.5s ease;
+    }
+    .win-pct {
+        font-family: 'JetBrains Mono', monospace;
+        font-weight: 700;
+        font-size: 1rem;
+    }
+    .win-pct-fav { color: var(--accent-primary); }
+    .win-pct-dog { color: var(--text-secondary); }
+    
+    /* Expand section */
+    .expand-row td {
+        padding: 0;
+        border-bottom: 1px solid var(--border-color);
+    }
+    .expand-content {
+        padding: 1rem;
+        background: rgba(31, 41, 55, 0.5);
+    }
+    .squad-mini {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 0.25rem;
+    }
+    .squad-mini-player {
+        font-size: 0.75rem;
+        padding: 0.15rem 0.5rem;
+        background: var(--bg-tertiary);
+        border-radius: 4px;
+        color: var(--text-secondary);
+    }
+    .squad-mini-player.matched { color: var(--text-primary); }
+    .squad-mini-player.unmatched { color: var(--accent-warning); border: 1px solid rgba(245, 158, 11, 0.3); }
+
+    /* Progress bar in table */
+    .sim-progress {
+        width: 100%;
+        height: 4px;
+        background: var(--bg-tertiary);
+        border-radius: 2px;
+        margin-top: 0.25rem;
+    }
+    .sim-progress-fill {
+        height: 100%;
+        border-radius: 2px;
+        background: var(--accent-secondary);
+        transition: width 0.3s ease;
+    }
+    
+    .controls-bar {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        padding: 1rem;
+        background: var(--bg-tertiary);
+        border-radius: 8px;
+        margin: 1rem 0;
+    }
+    .controls-bar .form-group {
+        margin: 0;
+        display: flex;
+        align-items: center;
+        gap: 0.5rem;
+    }
+    .controls-bar input {
+        width: 140px;
+    }
+    .controls-bar label {
+        margin: 0;
+        white-space: nowrap;
+    }
+
+    /* Convergence chart */
+    .convergence-canvas {
+        display: block;
+        margin-top: 0.25rem;
+    }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="bulk-header">
+    <h1>Bulk Predict</h1>
+    <a href="/predict" class="btn btn-secondary" style="font-size: 0.85rem;">← Back to Single Match</a>
+</div>
+
+<!-- Phase indicator -->
+<div class="phase-indicator">
+    <span class="phase-step active" id="phase-fetch">1. Fetching Match Data</span>
+    <span class="phase-step" id="phase-review">2. Review</span>
+    <span class="phase-step" id="phase-simulate">3. Simulating</span>
+    <span class="phase-step" id="phase-results">4. Results</span>
+</div>
+
+<!-- Fetch progress -->
+<div class="card" id="fetch-card">
+    <div class="card-title">Loading Match Data</div>
+    <div id="fetch-progress" style="color: var(--text-secondary); font-size: 0.9rem;">
+        Preparing...
+    </div>
+    <div style="margin-top: 0.75rem;">
+        <div class="sim-progress" style="height: 6px;">
+            <div class="sim-progress-fill" id="fetch-progress-fill" style="width: 0%;"></div>
+        </div>
+    </div>
+</div>
+
+<!-- Review & Results table -->
+<div class="card" id="review-card" style="display: none;">
+    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.75rem;">
+        <div class="card-title" style="margin: 0;">Match Review</div>
+        <div id="review-summary" style="font-size: 0.85rem; color: var(--text-secondary);"></div>
+    </div>
+    
+    <table class="review-table">
+        <thead>
+            <tr>
+                <th style="width: 24px;"></th>
+                <th>Match</th>
+                <th>Team 1</th>
+                <th>Team 2</th>
+                <th>Venue</th>
+                <th style="text-align: center;">Squads</th>
+                <th style="text-align: center;">Ground</th>
+                <th>Status</th>
+                <th style="text-align: center;">Result</th>
+            </tr>
+        </thead>
+        <tbody id="review-tbody">
+        </tbody>
+    </table>
+</div>
+
+<!-- Controls bar -->
+<div class="controls-bar" id="controls-bar" style="display: none;">
+    <div style="display: flex; gap: 1.5rem; align-items: center;">
+        <div class="form-group">
+            <label>Simulations per match</label>
+            <input type="number" id="bulk-n-simulations" value="10000" min="100" max="1000000" step="100" style="width: 120px;">
+        </div>
+        <div class="form-group">
+            <label style="display: flex; align-items: center; gap: 0.5rem;">
+                <input type="checkbox" id="bulk-use-toss" checked style="width: auto;">
+                Simulate Toss
+            </label>
+        </div>
+    </div>
+    <div style="display: flex; gap: 0.5rem;">
+        <button class="btn btn-primary" id="run-all-btn" onclick="runAllSimulations()">
+            Run All Ready Matches
+        </button>
+        <button class="btn btn-secondary" id="stop-btn" onclick="stopSimulations()" style="display: none; background: rgba(239, 68, 68, 0.15); border-color: #ef4444; color: #ef4444;">
+            Stop
+        </button>
+    </div>
+</div>
+
+<!-- Total ETA bar (shown during simulation) -->
+<div id="total-eta-bar" class="controls-bar" style="display: none; background: rgba(59, 130, 246, 0.08); border: 1px solid rgba(59, 130, 246, 0.2); padding: 0.75rem 1rem;">
+    <div style="display: flex; gap: 1.5rem; align-items: center; font-size: 0.85rem;">
+        <span style="color: var(--text-secondary);">
+            Progress: <strong id="eta-matches-done" style="color: var(--text-primary);">0</strong> / <span id="eta-matches-total">0</span> matches
+        </span>
+        <span style="color: var(--text-secondary);">
+            Rate: <strong id="eta-rate" style="color: var(--text-primary); font-family: 'JetBrains Mono', monospace;">--</strong> sims/sec
+        </span>
+    </div>
+    <div style="font-size: 0.85rem; color: var(--text-secondary);">
+        Est. remaining: <strong id="eta-total-time" style="color: var(--accent-secondary); font-family: 'JetBrains Mono', monospace;">--</strong>
+    </div>
+</div>
+
+<!-- Empty state -->
+<div id="empty-state" style="display: none; text-align: center; padding: 3rem;">
+    <p style="font-size: 1.1rem; color: var(--text-secondary);">No matches selected.</p>
+    <a href="/predict" class="btn btn-primary" style="margin-top: 1rem; display: inline-block;">Go to Predict Page</a>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+    // ============================================================
+    // STATE
+    // ============================================================
+    const matchDataStore = new Map(); // url -> { crexData, status, payload, result }
+    let simulationRunning = false;
+    let simulationAborted = false;
+    let currentAbortController = null;
+    let venuesCache = null; // Cache venue list so we only fetch once
+    
+    // ============================================================
+    // ROLE NORMALIZATION (same as predict.html)
+    // ============================================================
+    function normalizeRole(role) {
+        if (!role) return 'BAT';
+        const r = role.toLowerCase();
+        if (r.includes('keep') || r.includes('wk')) return 'WK';
+        if (r.includes('all') || r.includes('ar')) return 'AR';
+        if (r.includes('bowl')) return 'BOWL';
+        return 'BAT';
+    }
+    
+    // ============================================================
+    // AUTO-SELECT XI (same logic as renderTeamPanels in predict.html)
+    // ============================================================
+    function autoSelectXI(squad) {
+        if (!squad || squad.length === 0) return [];
+        
+        const wicketkeepers = squad.filter(p => normalizeRole(p.role || p.player_role) === 'WK' || p.is_wicketkeeper);
+        const batters = squad.filter(p => normalizeRole(p.role || p.player_role) === 'BAT' && !p.is_wicketkeeper);
+        const allrounders = squad.filter(p => normalizeRole(p.role || p.player_role) === 'AR');
+        const bowlers = squad.filter(p => normalizeRole(p.role || p.player_role) === 'BOWL');
+        
+        let selected = [];
+        
+        // 1 WK minimum
+        const wkCount = Math.min(wicketkeepers.length, Math.max(1, wicketkeepers.length <= 2 ? wicketkeepers.length : 1));
+        selected.push(...wicketkeepers.slice(0, wkCount));
+        
+        // Batters (aim for 3-4)
+        selected.push(...batters.slice(0, Math.min(batters.length, 4)));
+        
+        // All-rounders (aim for 2-3)
+        selected.push(...allrounders.slice(0, Math.min(allrounders.length, 3)));
+        
+        // Bowlers (aim for 3-4)
+        selected.push(...bowlers.slice(0, Math.min(bowlers.length, 4)));
+        
+        // Fill to 11
+        if (selected.length < 11) {
+            const selectedIds = new Set(selected.map(p => p.db_player_id || p.player_id || p.crex_id));
+            const remaining = squad.filter(p => !selectedIds.has(p.db_player_id || p.player_id || p.crex_id));
+            selected.push(...remaining.slice(0, 11 - selected.length));
+        }
+        
+        return selected.slice(0, 11);
+    }
+    
+    // ============================================================
+    // BUILD SIMULATION PAYLOAD (same logic as runSimulation in predict.html)
+    // ============================================================
+    function buildPayload(team1Selected, team2Selected, venueId, gender, nSims, useToss, team1Id, team2Id) {
+        // Helper: get valid player ID, filtering out undefined/null
+        function getPlayerId(p) {
+            const pid = p.db_player_id || p.player_id || p.id;
+            return (pid !== undefined && pid !== null && pid !== 'undefined') ? String(pid) : null;
+        }
+        
+        const team1Batters = team1Selected.map(getPlayerId).filter(Boolean);
+        const team2Batters = team2Selected.map(getPlayerId).filter(Boolean);
+        
+        const team1Bowlers = team1Selected
+            .filter(p => { const r = normalizeRole(p.role || p.player_role); return r === 'BOWL' || r === 'AR'; })
+            .map(getPlayerId).filter(Boolean);
+        
+        const team2Bowlers = team2Selected
+            .filter(p => { const r = normalizeRole(p.role || p.player_role); return r === 'BOWL' || r === 'AR'; })
+            .map(getPlayerId).filter(Boolean);
+        
+        const playerNames = {};
+        [...team1Selected, ...team2Selected].forEach(p => {
+            const pid = getPlayerId(p);
+            if (pid) playerNames[pid] = p.name || p.short_name || `Player ${pid}`;
+        });
+        
+        return {
+            team1_batters: team1Batters,
+            team1_bowlers: team1Bowlers,
+            team2_batters: team2Batters,
+            team2_bowlers: team2Bowlers,
+            simulator: 'nn',
+            n_simulations: nSims,
+            venue_id: venueId,
+            use_toss: useToss,
+            gender: gender,
+            team1_id: team1Id || null,
+            team2_id: team2Id || null,
+            player_names: playerNames
+        };
+    }
+    
+    // ============================================================
+    // ASSESS MATCH READINESS
+    // ============================================================
+    function assessMatch(matchData) {
+        const match = matchData.match;
+        const issues = [];
+        
+        const team1Players = match.team1?.players || [];
+        const team2Players = match.team2?.players || [];
+        const team1Matched = team1Players.filter(p => p.db_player_id).length;
+        const team2Matched = team2Players.filter(p => p.db_player_id).length;
+        
+        // Auto-select XIs
+        const team1XI = autoSelectXI(team1Players);
+        const team2XI = autoSelectXI(team2Players);
+        
+        const team1XIMatched = team1XI.filter(p => p.db_player_id).length;
+        const team2XIMatched = team2XI.filter(p => p.db_player_id).length;
+        
+        if (team1XI.length < 11) issues.push(`Team 1 has only ${team1XI.length} players`);
+        if (team2XI.length < 11) issues.push(`Team 2 has only ${team2XI.length} players`);
+        if (team1XIMatched < 6) issues.push(`Team 1: only ${team1XIMatched}/11 matched to DB`);
+        if (team2XIMatched < 6) issues.push(`Team 2: only ${team2XIMatched}/11 matched to DB`);
+        if (!match.venue?.db_venue_id) issues.push('Venue not matched');
+        
+        const team1Name = match.team1_db?.name || match.team1?.name || 'Team 1';
+        const team2Name = match.team2_db?.name || match.team2?.name || 'Team 2';
+        const venueId = match.venue?.db_venue_id || null;
+        const venueName = match.venue?.db_venue_name || match.venue?.name || null;
+        const gender = match.gender || 'male';
+        const team1Id = match.team1_db?.team_id || null;
+        const team2Id = match.team2_db?.team_id || null;
+        
+        return {
+            team1Name, team2Name,
+            team1Players, team2Players,
+            team1XI, team2XI,
+            team1Matched: team1XIMatched, team2Matched: team2XIMatched,
+            venueId, venueName, gender,
+            team1Id, team2Id,
+            issues,
+            ready: issues.length === 0,
+            needsReview: issues.length > 0
+        };
+    }
+    
+    // ============================================================
+    // RENDER REVIEW TABLE ROW
+    // ============================================================
+    function renderReviewRow(url, info, idx) {
+        const statusClass = info.ready ? 'status-ready' : 'status-review';
+        const statusText = info.ready ? 'Ready' : 'Needs Review';
+        const expandId = `expand-${idx}`;
+        
+        const t1SquadText = `${info.team1Matched}/${info.team1XI.length}`;
+        const t2SquadText = `${info.team2Matched}/${info.team2XI.length}`;
+        // Always render a venue dropdown so users can change/fix the venue
+        // Pre-select the matched venue if found, otherwise show warning border
+        const venueBorder = info.venueId ? 'var(--accent-primary)' : 'var(--accent-warning)';
+        const venueText = `<select id="venue-inline-${idx}" class="bulk-venue-inline" data-auto-venue="${info.venueId || ''}" style="width: 100%; font-size: 0.8rem; padding: 0.3rem; background: var(--bg-tertiary); border: 1px solid ${venueBorder}; border-radius: 4px; color: var(--text-primary);" onchange="onVenueSelect(${idx}, this.value)">
+                 <option value="">-- Neutral Venue --</option>
+               </select>`;
+        
+        // Squad & ground match indicators
+        const bothSquadsOk = info.team1XI.length >= 11 && info.team2XI.length >= 11 && info.team1Matched >= 6 && info.team2Matched >= 6;
+        const squadIcon = bothSquadsOk
+            ? '<span title="Squads matched" style="color: var(--accent-primary);">&#10003; Matched</span>'
+            : '<span title="Squad issues" style="color: var(--accent-warning);">&#9888; Incomplete</span>';
+        const groundIcon = info.venueId
+            ? '<span title="Ground matched" style="color: var(--accent-primary);">&#10003; Matched</span>'
+            : '<span title="Ground not found" style="color: var(--accent-warning);">&#9888; Not found</span>';
+        
+        let row = `
+            <tr id="row-${idx}" data-url="${url}">
+                <td style="text-align: center; cursor: pointer;" onclick="toggleExpand(${idx})">
+                    <span id="arrow-${idx}" style="font-size: 0.7rem; color: var(--text-muted);">▶</span>
+                </td>
+                <td style="font-weight: 500;">${info.team1Name} vs ${info.team2Name}</td>
+                <td><span class="${info.team1Matched >= 6 ? '' : 'status-review'}">${t1SquadText} matched</span></td>
+                <td><span class="${info.team2Matched >= 6 ? '' : 'status-review'}">${t2SquadText} matched</span></td>
+                <td>${venueText}</td>
+                <td style="text-align: center; font-size: 0.8rem;">${squadIcon}</td>
+                <td style="text-align: center; font-size: 0.8rem;">${groundIcon}</td>
+                <td><span class="${statusClass}" id="status-${idx}">${statusText}</span></td>
+                <td style="text-align: center;" id="result-cell-${idx}">--</td>
+            </tr>
+            <tr class="expand-row" id="${expandId}" style="display: none;">
+                <td colspan="9">
+                    <div class="expand-content">
+                        <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 1rem;">
+                            <div>
+                                <div style="font-weight: 500; margin-bottom: 0.5rem; font-size: 0.85rem;">${info.team1Name} XI</div>
+                                <div class="squad-mini">
+                                    ${info.team1XI.map(p => `<span class="squad-mini-player ${p.db_player_id ? 'matched' : 'unmatched'}">${p.name || p.short_name} <small>${normalizeRole(p.role)}</small></span>`).join('')}
+                                </div>
+                            </div>
+                            <div>
+                                <div style="font-weight: 500; margin-bottom: 0.5rem; font-size: 0.85rem;">${info.team2Name} XI</div>
+                                <div class="squad-mini">
+                                    ${info.team2XI.map(p => `<span class="squad-mini-player ${p.db_player_id ? 'matched' : 'unmatched'}">${p.name || p.short_name} <small>${normalizeRole(p.role)}</small></span>`).join('')}
+                                </div>
+                            </div>
+                        </div>
+                        ${info.issues.length > 0 ? `
+                        <div style="margin-top: 0.75rem; padding: 0.5rem; background: rgba(245, 158, 11, 0.1); border-radius: 4px; font-size: 0.8rem; color: var(--accent-warning);">
+                            Issues: ${info.issues.join(' | ')}
+                        </div>
+                        <div style="margin-top: 0.5rem;">
+                            <button class="btn btn-secondary" style="padding: 0.3rem 0.75rem; font-size: 0.8rem;" onclick="skipMatch(${idx})">Skip this match</button>
+                            <button class="btn btn-primary" style="padding: 0.3rem 0.75rem; font-size: 0.8rem; margin-left: 0.5rem;" onclick="forceReady(${idx})">Run anyway</button>
+                        </div>
+                        ` : ''}
+                    </div>
+                </td>
+            </tr>
+        `;
+        return row;
+    }
+    
+    function toggleExpand(idx) {
+        const expandRow = document.getElementById(`expand-${idx}`);
+        const arrow = document.getElementById(`arrow-${idx}`);
+        if (expandRow.style.display === 'none') {
+            expandRow.style.display = '';
+            arrow.textContent = '▼';
+        } else {
+            expandRow.style.display = 'none';
+            arrow.textContent = '▶';
+        }
+    }
+    
+    function skipMatch(idx) {
+        const rows = document.querySelectorAll(`[id="row-${idx}"], [id="expand-${idx}"]`);
+        const url = document.getElementById(`row-${idx}`).getAttribute('data-url');
+        const entry = matchDataStore.get(url);
+        if (entry) entry.status = 'skipped';
+        
+        document.getElementById(`status-${idx}`).textContent = 'Skipped';
+        document.getElementById(`status-${idx}`).className = 'status-skipped';
+        document.getElementById(`expand-${idx}`).style.display = 'none';
+        updateReviewSummary();
+    }
+    
+    function forceReady(idx) {
+        const url = document.getElementById(`row-${idx}`).getAttribute('data-url');
+        const entry = matchDataStore.get(url);
+        if (entry) entry.status = 'ready';
+        
+        document.getElementById(`status-${idx}`).textContent = 'Ready';
+        document.getElementById(`status-${idx}`).className = 'status-ready';
+        document.getElementById(`expand-${idx}`).style.display = 'none';
+        updateReviewSummary();
+    }
+    
+    // ============================================================
+    // VENUE DROPDOWN FOR MATCHES MISSING GROUND
+    // ============================================================
+    async function loadVenuesForBulk() {
+        if (venuesCache) return venuesCache;
+        try {
+            const response = await fetch('/api/venues?gender=male&min_matches=3');
+            const data = await response.json();
+            if (data.success) {
+                venuesCache = data;
+                return data;
+            }
+        } catch (e) {
+            console.error('Failed to load venues:', e);
+        }
+        return null;
+    }
+    
+    async function populateVenueDropdowns() {
+        const data = await loadVenuesForBulk();
+        if (!data) return;
+        
+        // Populate both inline (in venue column) and expand-section dropdowns
+        const allSelects = document.querySelectorAll('.bulk-venue-inline, .bulk-venue-select');
+        allSelects.forEach(select => {
+            if (select.options.length > 1) return; // Already populated
+            
+            if (data.venues_hierarchical) {
+                data.venues_hierarchical.forEach(country => {
+                    const group = document.createElement('optgroup');
+                    group.label = `${country.flag} ${country.name}`;
+                    country.cities.forEach(city => {
+                        city.venues.forEach(venue => {
+                            const opt = document.createElement('option');
+                            opt.value = venue.venue_id;
+                            opt.textContent = `${venue.name}${city.name ? ', ' + city.name : ''} (${venue.match_count} matches)`;
+                            group.appendChild(opt);
+                        });
+                    });
+                    if (group.children.length > 0) select.appendChild(group);
+                });
+            } else if (data.venues) {
+                data.venues.forEach(v => {
+                    const opt = document.createElement('option');
+                    opt.value = v.venue_id;
+                    opt.textContent = `${v.name}${v.city ? ', ' + v.city : ''} (${v.match_count} matches)`;
+                    select.appendChild(opt);
+                });
+            }
+            
+            // Auto-select the DB-matched venue if one was found
+            const autoVenue = select.getAttribute('data-auto-venue');
+            if (autoVenue) {
+                select.value = autoVenue;
+            }
+        });
+    }
+    
+    function onVenueSelect(idx, venueId) {
+        const row = document.getElementById(`row-${idx}`);
+        const url = row.getAttribute('data-url');
+        const entry = matchDataStore.get(url);
+        if (!entry) return;
+        
+        const vid = venueId ? parseInt(venueId) : null;
+        entry.info.venueId = vid;
+        
+        // Column indices: 0=arrow, 1=match, 2=team1, 3=team2, 4=venue, 5=squads, 6=ground, 7=status, 8=result
+        const groundCell = row.children[6];
+        const statusEl = document.getElementById(`status-${idx}`);
+        const inlineSelect = document.getElementById(`venue-inline-${idx}`);
+        
+        if (vid) {
+            // Get selected venue name
+            const venueName = inlineSelect ? inlineSelect.options[inlineSelect.selectedIndex].textContent : '';
+            entry.info.venueName = venueName;
+            
+            // Update dropdown border to green (confirmed)
+            if (inlineSelect) {
+                inlineSelect.style.borderColor = 'var(--accent-primary)';
+            }
+            
+            // Update ground icon to matched
+            groundCell.innerHTML = '<span title="Ground selected" style="color: var(--accent-primary); font-size: 0.8rem;">&#10003; Selected</span>';
+            
+            // Remove "Venue not matched" from issues
+            entry.info.issues = entry.info.issues.filter(i => i !== 'Venue not matched');
+            
+            // Re-check readiness -- if no remaining issues, mark as ready
+            if (entry.info.issues.length === 0) {
+                entry.status = 'ready';
+                statusEl.textContent = 'Ready';
+                statusEl.className = 'status-ready';
+            }
+        } else {
+            // User selected "Neutral Venue" -- clear the venue
+            entry.info.venueName = null;
+            
+            // Update dropdown border back to amber
+            if (inlineSelect) {
+                inlineSelect.style.borderColor = 'var(--accent-warning)';
+            }
+            
+            // Update ground icon back to not found
+            groundCell.innerHTML = '<span title="No ground selected" style="color: var(--accent-warning); font-size: 0.8rem;">&#9888; Neutral</span>';
+            
+            // Add venue issue back if not already there
+            if (!entry.info.issues.includes('Venue not matched')) {
+                entry.info.issues.push('Venue not matched');
+            }
+            entry.status = 'review';
+            statusEl.textContent = 'Needs Review';
+            statusEl.className = 'status-review';
+        }
+        
+        updateReviewSummary();
+    }
+    
+    // ============================================================
+    // STOP SIMULATIONS
+    // ============================================================
+    function stopSimulations() {
+        simulationAborted = true;
+        if (currentAbortController) {
+            currentAbortController.abort();
+        }
+    }
+    
+    function updateReviewSummary() {
+        let ready = 0, review = 0, skipped = 0, done = 0;
+        matchDataStore.forEach(entry => {
+            if (entry.status === 'ready') ready++;
+            else if (entry.status === 'review') review++;
+            else if (entry.status === 'skipped') skipped++;
+            else if (entry.status === 'done') done++;
+        });
+        const summaryEl = document.getElementById('review-summary');
+        const parts = [];
+        if (ready > 0) parts.push(`${ready} ready`);
+        if (review > 0) parts.push(`${review} needs review`);
+        if (skipped > 0) parts.push(`${skipped} skipped`);
+        if (done > 0) parts.push(`${done} complete`);
+        summaryEl.textContent = parts.join(' | ');
+    }
+    
+    // ============================================================
+    // SET PHASE
+    // ============================================================
+    function setPhase(phase) {
+        ['fetch', 'review', 'simulate', 'results'].forEach(p => {
+            const el = document.getElementById(`phase-${p}`);
+            el.className = 'phase-step';
+        });
+        
+        const phases = ['fetch', 'review', 'simulate', 'results'];
+        const idx = phases.indexOf(phase);
+        for (let i = 0; i < idx; i++) {
+            document.getElementById(`phase-${phases[i]}`).classList.add('done');
+        }
+        document.getElementById(`phase-${phase}`).classList.add('active');
+    }
+    
+    // ============================================================
+    // FETCH ALL MATCHES
+    // ============================================================
+    async function fetchAllMatches() {
+        const raw = sessionStorage.getItem('bulkPredictMatches');
+        if (!raw) {
+            document.getElementById('fetch-card').style.display = 'none';
+            document.getElementById('empty-state').style.display = 'block';
+            return;
+        }
+        
+        const matches = JSON.parse(raw);
+        if (matches.length === 0) {
+            document.getElementById('fetch-card').style.display = 'none';
+            document.getElementById('empty-state').style.display = 'block';
+            return;
+        }
+        
+        setPhase('fetch');
+        const progressEl = document.getElementById('fetch-progress');
+        const fillEl = document.getElementById('fetch-progress-fill');
+        
+        for (let i = 0; i < matches.length; i++) {
+            const m = matches[i];
+            progressEl.textContent = `Fetching ${i + 1} of ${matches.length}: ${m.title}...`;
+            fillEl.style.width = `${((i) / matches.length) * 100}%`;
+            
+            try {
+                const response = await fetch(`/api/crex/match?url=${encodeURIComponent(m.url)}`);
+                const data = await response.json();
+                
+                if (data.success && data.match) {
+                    const info = assessMatch(data);
+                    matchDataStore.set(m.url, {
+                        crexData: data,
+                        info: info,
+                        status: info.ready ? 'ready' : 'review',
+                        result: null,
+                        gender: m.gender || data.match.gender || 'male'
+                    });
+                } else {
+                    matchDataStore.set(m.url, {
+                        crexData: null,
+                        info: { team1Name: m.title.split(' vs ')[0] || 'Team 1', team2Name: m.title.split(' vs ')[1] || 'Team 2', issues: ['Failed to fetch: ' + (data.error || 'Unknown error')], ready: false, needsReview: true, team1XI: [], team2XI: [], team1Matched: 0, team2Matched: 0, venueName: null },
+                        status: 'review',
+                        result: null,
+                        gender: m.gender || 'male'
+                    });
+                }
+            } catch (err) {
+                matchDataStore.set(m.url, {
+                    crexData: null,
+                    info: { team1Name: 'Error', team2Name: '', issues: ['Network error: ' + err.message], ready: false, needsReview: true, team1XI: [], team2XI: [], team1Matched: 0, team2Matched: 0, venueName: null },
+                    status: 'review',
+                    result: null,
+                    gender: m.gender || 'male'
+                });
+            }
+            
+            fillEl.style.width = `${((i + 1) / matches.length) * 100}%`;
+        }
+        
+        progressEl.textContent = `All ${matches.length} matches loaded.`;
+        
+        // Show review
+        setTimeout(() => {
+            document.getElementById('fetch-card').style.display = 'none';
+            showReviewTable();
+        }, 500);
+    }
+    
+    // ============================================================
+    // SHOW REVIEW TABLE
+    // ============================================================
+    function showReviewTable() {
+        setPhase('review');
+        
+        const tbody = document.getElementById('review-tbody');
+        let rowsHtml = '';
+        let idx = 0;
+        matchDataStore.forEach((entry, url) => {
+            rowsHtml += renderReviewRow(url, entry.info, idx);
+            idx++;
+        });
+        tbody.innerHTML = rowsHtml;
+        
+        document.getElementById('review-card').style.display = '';
+        document.getElementById('controls-bar').style.display = '';
+        updateReviewSummary();
+        
+        // Populate venue dropdowns for matches missing ground
+        populateVenueDropdowns();
+    }
+    
+    // ============================================================
+    // RUN ALL SIMULATIONS
+    // ============================================================
+    async function runAllSimulations() {
+        if (simulationRunning) return;
+        simulationRunning = true;
+        simulationAborted = false;
+        
+        const runBtn = document.getElementById('run-all-btn');
+        const stopBtn = document.getElementById('stop-btn');
+        runBtn.disabled = true;
+        runBtn.textContent = 'Running...';
+        stopBtn.style.display = '';
+        
+        setPhase('simulate');
+        
+        const nSims = parseInt(document.getElementById('bulk-n-simulations').value) || 10000;
+        const useToss = document.getElementById('bulk-use-toss').checked;
+        
+        // Count ready matches for ETA
+        let readyCount = 0;
+        matchDataStore.forEach(e => { if (e.status === 'ready') readyCount++; });
+        let matchesDone = 0;
+        let lastKnownRate = 0;
+        
+        // Show total ETA bar
+        const etaBar = document.getElementById('total-eta-bar');
+        etaBar.style.display = 'flex';
+        document.getElementById('eta-matches-total').textContent = readyCount;
+        document.getElementById('eta-matches-done').textContent = '0';
+        
+        // Initial total ETA estimate (will be refined once first progress comes in)
+        document.getElementById('eta-total-time').textContent = 'calculating...';
+        
+        let idx = 0;
+        for (const [url, entry] of matchDataStore) {
+            if (entry.status !== 'ready') {
+                idx++;
+                continue;
+            }
+            
+            // Check if user hit stop
+            if (simulationAborted) {
+                break;
+            }
+            
+            const info = entry.info;
+            const statusEl = document.getElementById(`status-${idx}`);
+            const resultCell = document.getElementById(`result-cell-${idx}`);
+            
+            statusEl.textContent = 'Running...';
+            statusEl.className = 'status-running';
+            
+            // Show progress bar + convergence chart + ETA in result cell
+            const chartPoints = []; // [{pct, t1WinPct}]
+            resultCell.innerHTML = `
+                <div style="min-width: 200px;">
+                    <div class="sim-progress">
+                        <div class="sim-progress-fill" id="sim-fill-${idx}" style="width: 0%;"></div>
+                    </div>
+                    <div style="display: flex; justify-content: space-between; font-size: 0.7rem; color: var(--text-muted); margin-top: 0.15rem;">
+                        <span id="sim-pct-${idx}">0%</span>
+                        <span id="sim-eta-${idx}"></span>
+                    </div>
+                    <canvas id="chart-${idx}" class="convergence-canvas" width="200" height="50" style="margin-top: 0.25rem;"></canvas>
+                </div>
+            `;
+            
+            const payload = buildPayload(
+                info.team1XI, info.team2XI,
+                info.venueId, entry.gender, nSims, useToss,
+                info.team1Id, info.team2Id
+            );
+            
+            // Create abort controller for this request
+            currentAbortController = new AbortController();
+            
+            try {
+                // Use streaming endpoint for progress
+                const response = await fetch('/api/simulate-stream', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(payload),
+                    signal: currentAbortController.signal
+                });
+                
+                const reader = response.body.getReader();
+                const decoder = new TextDecoder();
+                let buffer = '';
+                let finalResult = null;
+                
+                while (true) {
+                    const { done, value } = await reader.read();
+                    if (done) break;
+                    
+                    buffer += decoder.decode(value, { stream: true });
+                    const lines = buffer.split('\n');
+                    buffer = lines.pop();
+                    
+                    for (const line of lines) {
+                        if (line.startsWith('data: ')) {
+                            try {
+                                const msg = JSON.parse(line.slice(6));
+                                if (msg.type === 'progress') {
+                                    const fillEl = document.getElementById(`sim-fill-${idx}`);
+                                    const pctEl = document.getElementById(`sim-pct-${idx}`);
+                                    const etaEl = document.getElementById(`sim-eta-${idx}`);
+                                    if (fillEl) fillEl.style.width = msg.pct + '%';
+                                    if (pctEl) pctEl.textContent = msg.pct.toFixed(0) + '%';
+                                    
+                                    // Per-match ETA
+                                    if (etaEl && msg.eta_seconds !== undefined) {
+                                        etaEl.textContent = formatETA(msg.eta_seconds);
+                                    }
+                                    
+                                    // Track latest rate for total ETA calculation
+                                    if (msg.rate) {
+                                        lastKnownRate = msg.rate;
+                                        updateTotalETA(matchesDone, readyCount, nSims, msg.rate, msg.eta_seconds);
+                                    }
+                                    
+                                    // Feed convergence chart
+                                    if (msg.running_team1_win_pct !== undefined) {
+                                        chartPoints.push({ pct: msg.pct, t1: msg.running_team1_win_pct });
+                                        drawConvergenceChart(`chart-${idx}`, chartPoints, info.team1Name, info.team2Name);
+                                    }
+                                } else if (msg.type === 'result') {
+                                    finalResult = msg;
+                                }
+                            } catch (e) {}
+                        }
+                    }
+                }
+                
+                if (finalResult && finalResult.success) {
+                    entry.result = finalResult;
+                    entry.status = 'done';
+                    
+                    const t1Pct = finalResult.team1_win_prob;
+                    const t2Pct = finalResult.team2_win_prob;
+                    const t1Fav = t1Pct >= t2Pct;
+                    
+                    resultCell.innerHTML = `
+                        <div style="min-width: 160px;">
+                            <div style="display: flex; justify-content: space-between; align-items: baseline;">
+                                <span class="win-pct ${t1Fav ? 'win-pct-fav' : 'win-pct-dog'}">${t1Pct.toFixed(1)}%</span>
+                                <span style="color: var(--text-muted); font-size: 0.7rem;">vs</span>
+                                <span class="win-pct ${!t1Fav ? 'win-pct-fav' : 'win-pct-dog'}">${t2Pct.toFixed(1)}%</span>
+                            </div>
+                            <div class="result-bar">
+                                <div class="result-bar-fill" style="width: ${t1Pct}%; background: ${t1Fav ? 'var(--accent-primary)' : 'var(--accent-secondary)'};"></div>
+                                <div class="result-bar-fill" style="width: ${t2Pct}%; background: ${!t1Fav ? 'var(--accent-primary)' : 'var(--accent-secondary)'};"></div>
+                            </div>
+                            <div style="display: flex; justify-content: space-between; font-size: 0.7rem; color: var(--text-muted); margin-top: 0.15rem;">
+                                <span>Avg ${finalResult.avg_team1_score}</span>
+                                <span>${(finalResult.elapsed_ms / 1000).toFixed(1)}s</span>
+                                <span>Avg ${finalResult.avg_team2_score}</span>
+                            </div>
+                        </div>
+                    `;
+                    
+                    statusEl.textContent = 'Done';
+                    statusEl.className = 'status-done';
+                    matchesDone++;
+                    document.getElementById('eta-matches-done').textContent = matchesDone;
+                    updateTotalETA(matchesDone, readyCount, nSims, lastKnownRate, 0);
+                } else {
+                    entry.status = 'review';
+                    statusEl.textContent = 'Error';
+                    statusEl.className = 'status-error';
+                    resultCell.innerHTML = '<span style="color: #ef4444; font-size: 0.8rem;">Failed</span>';
+                    matchesDone++;
+                    document.getElementById('eta-matches-done').textContent = matchesDone;
+                }
+            } catch (err) {
+                if (err.name === 'AbortError') {
+                    // User cancelled
+                    statusEl.textContent = 'Stopped';
+                    statusEl.className = 'status-skipped';
+                    resultCell.innerHTML = '<span style="color: var(--text-muted); font-size: 0.8rem;">Stopped</span>';
+                } else {
+                    entry.status = 'review';
+                    statusEl.textContent = 'Error';
+                    statusEl.className = 'status-error';
+                    resultCell.innerHTML = `<span style="color: #ef4444; font-size: 0.8rem;">${err.message}</span>`;
+                }
+            }
+            
+            currentAbortController = null;
+            updateReviewSummary();
+            idx++;
+        }
+        
+        setPhase('results');
+        runBtn.disabled = false;
+        runBtn.textContent = 'Run All Ready Matches';
+        stopBtn.style.display = 'none';
+        simulationRunning = false;
+        
+        // Update total ETA bar to show completion
+        document.getElementById('eta-total-time').textContent = 'Complete';
+        document.getElementById('eta-total-time').style.color = 'var(--accent-primary)';
+    }
+    
+    // ============================================================
+    // ETA HELPERS
+    // ============================================================
+    function formatETA(seconds) {
+        if (!seconds || seconds <= 0) return '';
+        if (seconds < 60) return `~${Math.ceil(seconds)}s`;
+        const mins = Math.floor(seconds / 60);
+        const secs = Math.ceil(seconds % 60);
+        if (mins < 60) return `~${mins}m ${secs}s`;
+        const hrs = Math.floor(mins / 60);
+        const remMins = mins % 60;
+        return `~${hrs}h ${remMins}m`;
+    }
+    
+    function updateTotalETA(matchesDone, totalReady, nSims, rate, currentMatchEtaSec) {
+        const matchesRemaining = totalReady - matchesDone;
+        const rateEl = document.getElementById('eta-rate');
+        const timeEl = document.getElementById('eta-total-time');
+        
+        if (rate > 0) {
+            rateEl.textContent = Math.round(rate).toLocaleString();
+            // Time for remaining matches = (matchesRemaining * nSims / rate) + current match ETA
+            const remainingSec = (matchesRemaining * nSims / rate) + (currentMatchEtaSec || 0);
+            timeEl.textContent = formatETA(remainingSec);
+            timeEl.style.color = 'var(--accent-secondary)';
+        }
+    }
+    
+    // ============================================================
+    // CONVERGENCE CHART (lightweight inline canvas, log x-axis)
+    // ============================================================
+    // Logarithmic x mapping: compresses noisy early sims, expands settled end
+    // Maps pct (0-100) to x (0-w) using log10 scale
+    function logX(pct, w) {
+        if (pct <= 0) return 0;
+        // log10(1) = 0, log10(100) = 2 -> map [0,2] to [0,w]
+        // Use pct directly: log10(pct) ranges from ~0 (pct=1) to 2 (pct=100)
+        // Clamp min to 0.5% to avoid -infinity
+        const clamped = Math.max(pct, 0.5);
+        const logVal = Math.log10(clamped);    // range: ~-0.3 to 2
+        const logMin = Math.log10(0.5);        // -0.3
+        const logMax = Math.log10(100);        // 2
+        return ((logVal - logMin) / (logMax - logMin)) * w;
+    }
+    
+    function drawConvergenceChart(canvasId, points, team1Name, team2Name) {
+        const canvas = document.getElementById(canvasId);
+        if (!canvas || points.length < 2) return;
+        
+        const ctx = canvas.getContext('2d');
+        const w = canvas.width;
+        const h = canvas.height;
+        
+        ctx.clearRect(0, 0, w, h);
+        
+        // Background
+        ctx.fillStyle = 'rgba(31, 41, 55, 0.5)';
+        ctx.fillRect(0, 0, w, h);
+        
+        // 50% win line
+        ctx.strokeStyle = 'rgba(107, 114, 128, 0.4)';
+        ctx.setLineDash([2, 2]);
+        ctx.beginPath();
+        ctx.moveTo(0, h / 2);
+        ctx.lineTo(w, h / 2);
+        ctx.stroke();
+        ctx.setLineDash([]);
+        
+        // Log scale gridlines at 1%, 10%, 50%
+        ctx.strokeStyle = 'rgba(107, 114, 128, 0.15)';
+        ctx.setLineDash([1, 3]);
+        [1, 10, 50].forEach(pct => {
+            const gx = logX(pct, w);
+            ctx.beginPath();
+            ctx.moveTo(gx, 0);
+            ctx.lineTo(gx, h);
+            ctx.stroke();
+        });
+        ctx.setLineDash([]);
+        
+        // Draw team 1 win % line (green) -- log x-axis
+        ctx.strokeStyle = '#10b981';
+        ctx.lineWidth = 1.5;
+        ctx.beginPath();
+        for (let i = 0; i < points.length; i++) {
+            const x = logX(points[i].pct, w);
+            const y = h - (points[i].t1 / 100) * h;
+            if (i === 0) ctx.moveTo(x, y);
+            else ctx.lineTo(x, y);
+        }
+        ctx.stroke();
+        
+        // Draw team 2 win % line (blue) -- log x-axis
+        ctx.strokeStyle = '#3b82f6';
+        ctx.lineWidth = 1.5;
+        ctx.beginPath();
+        for (let i = 0; i < points.length; i++) {
+            const x = logX(points[i].pct, w);
+            const y = h - ((100 - points[i].t1) / 100) * h;
+            if (i === 0) ctx.moveTo(x, y);
+            else ctx.lineTo(x, y);
+        }
+        ctx.stroke();
+        
+        // Latest values label
+        if (points.length > 0) {
+            const last = points[points.length - 1];
+            const lx = logX(last.pct, w);
+            const t1y = h - (last.t1 / 100) * h;
+            const t2y = h - ((100 - last.t1) / 100) * h;
+            ctx.font = '9px JetBrains Mono, monospace';
+            ctx.fillStyle = '#10b981';
+            ctx.fillText(`${last.t1.toFixed(0)}%`, Math.min(lx + 3, w - 28), Math.max(t1y - 2, 9));
+            ctx.fillStyle = '#3b82f6';
+            ctx.fillText(`${(100 - last.t1).toFixed(0)}%`, Math.min(lx + 3, w - 28), Math.min(t2y + 9, h - 1));
+        }
+    }
+    
+    // ============================================================
+    // INIT
+    // ============================================================
+    document.addEventListener('DOMContentLoaded', () => {
+        fetchAllMatches();
+    });
+</script>
+{% endblock %}

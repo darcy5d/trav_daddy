@@ -507,6 +507,9 @@
             <span style="font-size: 1.5rem;">🏏</span> Upcoming Matches
         </h2>
         <div style="display: flex; gap: 0.5rem; align-items: center;">
+            <button class="btn" id="bulk-select-toggle" onclick="toggleBulkSelect()" style="padding: 0.5rem 1rem; font-size: 0.85rem; background: var(--accent-primary); color: white;">
+                ☑ Multi-Select
+            </button>
             <button class="btn" onclick="loadUpcomingMatches(true)" style="padding: 0.5rem 1rem;">
                 🔄 Refresh
             </button>
@@ -538,6 +541,14 @@
     <div id="matches-empty" style="display: none; text-align: center; padding: 2rem; color: var(--text-secondary);">
         <p>No matches scheduled in the next 24 hours.</p>
         <p style="font-size: 0.875rem; margin-top: 0.5rem;">You can still manually select teams below.</p>
+    </div>
+    
+    <!-- Bulk Predict floating bar (hidden until multi-select active) -->
+    <div id="bulk-predict-bar" style="padding: 0.75rem 1rem; background: linear-gradient(135deg, rgba(16, 185, 129, 0.15), rgba(59, 130, 246, 0.15)); border: 1px solid var(--accent-primary); border-radius: 8px; margin-top: 0.75rem; display: flex; align-items: center; justify-content: space-between;">
+        <span id="bulk-select-count" style="font-weight: 500;">0 matches selected</span>
+        <button class="btn btn-primary" onclick="launchBulkPredict()" style="padding: 0.5rem 1.25rem;">
+            Bulk Predict →
+        </button>
     </div>
     
     <div id="t20-match-info" style="display: none; margin-top: 1rem; padding: 1rem; background: var(--bg-tertiary); border-radius: 8px;">
@@ -1933,6 +1944,11 @@
                 
                 // Status display updated (no prefetch needed)
                 updatePrefetchStatusDisplay();
+                
+                // Apply bulk select mode to newly loaded cards
+                if (bulkSelectMode) {
+                    applyBulkSelectToCards();
+                }
             } else {
                 emptyEl.style.display = 'block';
             }
@@ -3946,6 +3962,124 @@
         
         // Show first innings by default
         showInnings(1);
+    }
+    
+    // ============================================================
+    // BULK SELECT / MULTI-SELECT MODE
+    // ============================================================
+    let bulkSelectMode = true; // On by default
+    let bulkSelectedMatches = new Map(); // url -> {url, gender, title}
+    
+    function toggleBulkSelect() {
+        bulkSelectMode = !bulkSelectMode;
+        const toggleBtn = document.getElementById('bulk-select-toggle');
+        const bar = document.getElementById('bulk-predict-bar');
+        
+        if (bulkSelectMode) {
+            toggleBtn.style.background = 'var(--accent-primary)';
+            toggleBtn.style.color = 'white';
+            bar.style.display = 'flex';
+            bulkSelectedMatches.clear();
+        } else {
+            toggleBtn.style.background = '';
+            toggleBtn.style.color = '';
+            bar.style.display = 'none';
+            bulkSelectedMatches.clear();
+        }
+        
+        applyBulkSelectToCards();
+        updateBulkBar();
+    }
+    
+    // Apply or remove checkboxes on all match cards based on bulkSelectMode
+    function applyBulkSelectToCards() {
+        document.querySelectorAll('[data-match-url]').forEach(card => {
+            const url = card.getAttribute('data-match-url');
+            if (!url) return;
+            
+            // Find the button area (last child div with the Select button)
+            const btnArea = card.lastElementChild;
+            if (!btnArea) return;
+            
+            if (bulkSelectMode) {
+                // Hide select button, add checkbox
+                const selectBtn = btnArea.querySelector('.btn-primary');
+                if (selectBtn) selectBtn.style.display = 'none';
+                
+                const existingCb = btnArea.querySelector('.bulk-cb');
+                if (!existingCb) {
+                    const cb = document.createElement('input');
+                    cb.type = 'checkbox';
+                    cb.className = 'bulk-cb';
+                    cb.style.cssText = 'width: 20px; height: 20px; cursor: pointer; accent-color: var(--accent-primary);';
+                    cb.onchange = () => onBulkCheckChange(cb, card);
+                    btnArea.appendChild(cb);
+                }
+            } else {
+                // Remove checkbox, show button
+                const selectBtn = btnArea.querySelector('.btn-primary');
+                if (selectBtn) selectBtn.style.display = '';
+                const cb = btnArea.querySelector('.bulk-cb');
+                if (cb) cb.remove();
+                card.style.outline = '';
+            }
+        });
+    }
+    
+    // Initialize bulk select visual state on page load
+    (function initBulkSelect() {
+        // Defer until DOM is ready
+        const init = () => {
+            const toggleBtn = document.getElementById('bulk-select-toggle');
+            const bar = document.getElementById('bulk-predict-bar');
+            if (bulkSelectMode && toggleBtn) {
+                toggleBtn.style.background = 'var(--accent-primary)';
+                toggleBtn.style.color = 'white';
+                if (bar) bar.style.display = 'flex';
+            }
+        };
+        if (document.readyState === 'loading') {
+            document.addEventListener('DOMContentLoaded', init);
+        } else {
+            init();
+        }
+    })();
+    
+    function onBulkCheckChange(checkbox, card) {
+        const url = card.getAttribute('data-match-url');
+        const titleEl = card.querySelector('div[style*="font-weight: 500"]');
+        const title = titleEl ? titleEl.textContent.trim() : 'Unknown Match';
+        // Determine gender from the border color
+        const borderStyle = card.style.borderLeft || '';
+        const gender = borderStyle.includes('#e91e63') ? 'female' : 'male';
+        
+        if (checkbox.checked) {
+            bulkSelectedMatches.set(url, { url, gender, title });
+            card.style.outline = '2px solid var(--accent-primary)';
+            card.style.outlineOffset = '-2px';
+        } else {
+            bulkSelectedMatches.delete(url);
+            card.style.outline = '';
+        }
+        
+        updateBulkBar();
+    }
+    
+    function updateBulkBar() {
+        const count = bulkSelectedMatches.size;
+        const countEl = document.getElementById('bulk-select-count');
+        countEl.textContent = `${count} match${count !== 1 ? 'es' : ''} selected`;
+    }
+    
+    function launchBulkPredict() {
+        if (bulkSelectedMatches.size === 0) {
+            alert('Please select at least one match');
+            return;
+        }
+        
+        const matches = Array.from(bulkSelectedMatches.values());
+        sessionStorage.setItem('bulkPredictMatches', JSON.stringify(matches));
+        window.location.href = '/bulk-predict';
     }
 </script>
 {% endblock %}

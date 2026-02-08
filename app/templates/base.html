@@ -76,6 +76,46 @@
             color: var(--accent-primary);
         }
         
+        .nav-dropdown {
+            position: relative;
+        }
+        
+        .nav-dropdown > a {
+            cursor: pointer;
+        }
+        
+        .nav-dropdown-menu {
+            display: none;
+            position: absolute;
+            top: 100%;
+            left: 0;
+            background: var(--bg-secondary);
+            border: 1px solid var(--border-color);
+            border-radius: 8px;
+            padding: 0.5rem 0;
+            min-width: 180px;
+            z-index: 200;
+            box-shadow: 0 8px 24px rgba(0,0,0,0.3);
+        }
+        
+        .nav-dropdown:hover .nav-dropdown-menu {
+            display: block;
+        }
+        
+        .nav-dropdown-menu a {
+            display: block;
+            padding: 0.5rem 1rem;
+            color: var(--text-secondary);
+            text-decoration: none;
+            font-weight: 500;
+            transition: background 0.2s;
+        }
+        
+        .nav-dropdown-menu a:hover {
+            background: var(--bg-tertiary);
+            color: var(--accent-primary);
+        }
+        
         .container {
             max-width: 1400px;
             margin: 0 auto;
@@ -308,7 +348,13 @@
         <ul class="nav-links">
             <li><a href="/" class="{% if request.path == '/' %}active{% endif %}">Home</a></li>
             <li><a href="/training" class="{% if request.path == '/training' %}active{% endif %}">Data & Training</a></li>
-            <li><a href="/predict" class="{% if request.path == '/predict' %}active{% endif %}">Predict</a></li>
+            <li class="nav-dropdown">
+                <a class="{% if request.path in ['/predict', '/bulk-predict'] %}active{% endif %}">Predict ▾</a>
+                <div class="nav-dropdown-menu">
+                    <a href="/predict" class="{% if request.path == '/predict' %}active{% endif %}">Single Match</a>
+                    <a href="/bulk-predict" class="{% if request.path == '/bulk-predict' %}active{% endif %}">Bulk Predict</a>
+                </div>
+            </li>
             <li><a href="/rankings" class="{% if request.path == '/rankings' %}active{% endif %}">Rankings</a></li>
         </ul>
         <div class="timezone-selector">
