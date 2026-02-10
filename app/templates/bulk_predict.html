@@ -391,8 +391,8 @@
         if (team2XIMatched < 6) issues.push(`Team 2: only ${team2XIMatched}/11 matched to DB`);
         if (!match.venue?.db_venue_id) issues.push('Venue not matched');
         
-        const team1Name = match.team1_db?.name || match.team1?.name || 'Team 1';
-        const team2Name = match.team2_db?.name || match.team2?.name || 'Team 2';
+        const team1Name = match.team1_db?.name || match.team1?.name || match.team1_name || 'Team 1';
+        const team2Name = match.team2_db?.name || match.team2?.name || match.team2_name || 'Team 2';
         const venueId = match.venue?.db_venue_id || null;
         const venueName = match.venue?.db_venue_name || match.venue?.name || null;
         const gender = match.gender || 'male';

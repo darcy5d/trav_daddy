@@ -10,6 +10,9 @@ Provides a web interface and API for:
 
 import os
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
+# Disable XLA JIT compilation to avoid Apple Silicon Metal backend issues
+# Must be set BEFORE importing TensorFlow
+os.environ['TF_XLA_FLAGS'] = '--tf_xla_auto_jit=0'
 
 # Configure TensorFlow threading BEFORE importing TensorFlow
 # This must happen before any module imports TensorFlow
@@ -29,6 +32,12 @@ try:
     tf.config.threading.set_intra_op_parallelism_threads(max(4, N_CPU_CORES // 2))
 except RuntimeError:
     pass  # Already configured
+
+# Disable XLA JIT at the optimizer level (Apple Silicon Metal + XLA can crash)
+try:
+    tf.config.optimizer.set_jit(False)
+except (AttributeError, RuntimeError):
+    pass
 
 from flask import Flask, render_template, request, jsonify
 from flask_cors import CORS
@@ -3150,13 +3159,35 @@ def get_crex_match():
             return best_match
         
         if not team1_db and hasattr(match, 'team1_name') and match.team1_name:
-            team_match = find_team_in_db(match.team1_name, match.gender)
+            # First try the scraper's abbreviation-aware matching (handles USA, QAT, OMA, etc.)
+            # Use team name as abbreviation too (NOT the CREX internal ID which can collide
+            # with domestic league abbreviations, e.g. CREX ID "BH" -> Brisbane Heat not Bahrain)
+            from src.api.crex_scraper import CREXTeam as _CREXTeam
+            temp_team = _CREXTeam(
+                crex_id=getattr(match, 'team1_id', ''),
+                name=match.team1_name,
+                abbreviation=match.team1_name
+            )
+            team_match = scraper.match_team_to_db(temp_team, match.gender)
+            # Fall back to simpler fuzzy match if abbreviation matching didn't work
+            if not team_match:
+                team_match = find_team_in_db(match.team1_name, match.gender)
             if team_match:
                 team1_db = {'team_id': team_match[0], 'name': team_match[1]}
                 logger.info(f"Matched team name '{match.team1_name}' to DB: {team1_db['name']}")
         
         if not team2_db and hasattr(match, 'team2_name') and match.team2_name:
-            team_match = find_team_in_db(match.team2_name, match.gender)
+            # First try the scraper's abbreviation-aware matching (handles USA, QAT, OMA, etc.)
+            from src.api.crex_scraper import CREXTeam as _CREXTeam
+            temp_team = _CREXTeam(
+                crex_id=getattr(match, 'team2_id', ''),
+                name=match.team2_name,
+                abbreviation=match.team2_name
+            )
+            team_match = scraper.match_team_to_db(temp_team, match.gender)
+            # Fall back to simpler fuzzy match if abbreviation matching didn't work
+            if not team_match:
+                team_match = find_team_in_db(match.team2_name, match.gender)
             if team_match:
                 team2_db = {'team_id': team_match[0], 'name': team_match[1]}
                 logger.info(f"Matched team name '{match.team2_name}' to DB: {team2_db['name']}")
@@ -3249,6 +3280,8 @@ def get_crex_match():
             'match': {
                 'crex_id': match.crex_id,
                 'title': match.title,
+                'team1_name': match.team1_name,
+                'team2_name': match.team2_name,
                 'series_name': match.series_name,
                 'series_id': match.series_id,
                 'match_type': match.match_type,
