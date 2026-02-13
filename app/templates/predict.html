@@ -1912,7 +1912,7 @@
                                     let statusIcons = '';
                                     
                                     return `
-                                    <div style="display: flex; justify-content: space-between; align-items: center; padding: 0.75rem 1rem; background: var(--bg-tertiary); border-radius: 8px; border-left: 3px solid ${series.gender === 'female' ? '#e91e63' : '#2196f3'};" data-match-url="${matchUrl}">
+                                    <div style="display: flex; justify-content: space-between; align-items: center; padding: 0.75rem 1rem; background: var(--bg-tertiary); border-radius: 8px; border-left: 3px solid ${series.gender === 'female' ? '#e91e63' : '#2196f3'};" data-match-url="${matchUrl}" data-gender="${series.gender || 'male'}">
                                         <div style="flex: 1;">
                                             <div style="font-weight: 500;">${matchTitle}${matchType ? ' <span style="font-weight: 400; color: var(--text-muted); font-size: 0.85rem;">(' + matchType + ')</span>' : ''}</div>
                                             <div style="font-size: 0.8rem; color: var(--text-muted);">
@@ -4049,9 +4049,8 @@
         const url = card.getAttribute('data-match-url');
         const titleEl = card.querySelector('div[style*="font-weight: 500"]');
         const title = titleEl ? titleEl.textContent.trim() : 'Unknown Match';
-        // Determine gender from the border color
-        const borderStyle = card.style.borderLeft || '';
-        const gender = borderStyle.includes('#e91e63') ? 'female' : 'male';
+        // Read gender from data attribute (set from CREX API series.gender)
+        const gender = card.getAttribute('data-gender') || 'male';
         
         if (checkbox.checked) {
             bulkSelectedMatches.set(url, { url, gender, title });

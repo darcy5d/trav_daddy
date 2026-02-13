@@ -134,6 +134,43 @@
         transition: width 0.3s ease;
     }
     
+    /* Gender & format tags */
+    .tag-gender, .tag-format {
+        display: inline-block;
+        padding: 0.15rem 0.45rem;
+        border-radius: 4px;
+        font-size: 0.7rem;
+        font-weight: 600;
+        letter-spacing: 0.3px;
+        text-transform: uppercase;
+        line-height: 1.4;
+    }
+    .tag-gender-male {
+        background: rgba(33, 150, 243, 0.15);
+        color: #2196f3;
+        border: 1px solid rgba(33, 150, 243, 0.3);
+    }
+    .tag-gender-female {
+        background: rgba(233, 30, 99, 0.15);
+        color: #e91e63;
+        border: 1px solid rgba(233, 30, 99, 0.3);
+    }
+    .tag-format-t20 {
+        background: rgba(16, 185, 129, 0.15);
+        color: var(--accent-primary);
+        border: 1px solid rgba(16, 185, 129, 0.3);
+    }
+    .tag-format-odi {
+        background: rgba(245, 158, 11, 0.15);
+        color: var(--accent-warning);
+        border: 1px solid rgba(245, 158, 11, 0.3);
+    }
+    .tag-format-test {
+        background: rgba(139, 92, 246, 0.15);
+        color: #8b5cf6;
+        border: 1px solid rgba(139, 92, 246, 0.3);
+    }
+
     .controls-bar {
         display: flex;
         justify-content: space-between;
@@ -204,6 +241,8 @@
             <tr>
                 <th style="width: 24px;"></th>
                 <th>Match</th>
+                <th style="text-align: center; width: 50px;"></th>
+                <th style="text-align: center; width: 44px;"></th>
                 <th>Team 1</th>
                 <th>Team 2</th>
                 <th>Venue</th>
@@ -396,6 +435,7 @@
         const venueId = match.venue?.db_venue_id || null;
         const venueName = match.venue?.db_venue_name || match.venue?.name || null;
         const gender = match.gender || 'male';
+        const format = match.format || 'T20';
         const team1Id = match.team1_db?.team_id || null;
         const team2Id = match.team2_db?.team_id || null;
         
@@ -404,7 +444,7 @@
             team1Players, team2Players,
             team1XI, team2XI,
             team1Matched: team1XIMatched, team2Matched: team2XIMatched,
-            venueId, venueName, gender,
+            venueId, venueName, gender, format,
             team1Id, team2Id,
             issues,
             ready: issues.length === 0,
@@ -438,12 +478,20 @@
             ? '<span title="Ground matched" style="color: var(--accent-primary);">&#10003; Matched</span>'
             : '<span title="Ground not found" style="color: var(--accent-warning);">&#9888; Not found</span>';
         
+        // Gender & format tags
+        const genderLabel = info.gender === 'female' ? 'Women' : 'Men';
+        const genderClass = info.gender === 'female' ? 'tag-gender-female' : 'tag-gender-male';
+        const formatUpper = (info.format || 'T20').toUpperCase();
+        const formatClass = formatUpper === 'ODI' ? 'tag-format-odi' : (formatUpper === 'TEST' ? 'tag-format-test' : 'tag-format-t20');
+        
         let row = `
             <tr id="row-${idx}" data-url="${url}">
                 <td style="text-align: center; cursor: pointer;" onclick="toggleExpand(${idx})">
                     <span id="arrow-${idx}" style="font-size: 0.7rem; color: var(--text-muted);">▶</span>
                 </td>
                 <td style="font-weight: 500;">${info.team1Name} vs ${info.team2Name}</td>
+                <td style="text-align: center;"><span class="tag-gender ${genderClass}">${genderLabel}</span></td>
+                <td style="text-align: center;"><span class="tag-format ${formatClass}">${formatUpper}</span></td>
                 <td><span class="${info.team1Matched >= 6 ? '' : 'status-review'}">${t1SquadText} matched</span></td>
                 <td><span class="${info.team2Matched >= 6 ? '' : 'status-review'}">${t2SquadText} matched</span></td>
                 <td>${venueText}</td>
@@ -453,7 +501,7 @@
                 <td style="text-align: center;" id="result-cell-${idx}">--</td>
             </tr>
             <tr class="expand-row" id="${expandId}" style="display: none;">
-                <td colspan="9">
+                <td colspan="11">
                     <div class="expand-content">
                         <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 1rem;">
                             <div>
@@ -526,9 +574,51 @@
     async function loadVenuesForBulk() {
         if (venuesCache) return venuesCache;
         try {
-            const response = await fetch('/api/venues?gender=male&min_matches=3');
+            // Determine if any female matches are present to load correct venues
+            let hasFemaleBulk = false;
+            matchDataStore.forEach(entry => {
+                if (entry.info && entry.info.gender === 'female') hasFemaleBulk = true;
+            });
+            // Load venues for the gender present (default male; if mixed, load both)
+            let hasMaleBulk = false;
+            matchDataStore.forEach(entry => {
+                if (!entry.info || entry.info.gender !== 'female') hasMaleBulk = true;
+            });
+            const genderParam = hasFemaleBulk && !hasMaleBulk ? 'female' : (hasMaleBulk && !hasFemaleBulk ? 'male' : 'male');
+            const response = await fetch(`/api/venues?gender=${genderParam}&min_matches=3`);
             const data = await response.json();
             if (data.success) {
+                // If we have both genders, also fetch female venues and merge
+                if (hasFemaleBulk && hasMaleBulk) {
+                    try {
+                        const resp2 = await fetch('/api/venues?gender=female&min_matches=3');
+                        const data2 = await resp2.json();
+                        if (data2.success && data2.venues_hierarchical) {
+                            // Merge unique venues from female into main data
+                            const existingIds = new Set((data.venues || []).map(v => v.venue_id));
+                            (data2.venues || []).forEach(v => {
+                                if (!existingIds.has(v.venue_id)) {
+                                    data.venues.push(v);
+                                }
+                            });
+                            // For hierarchical, merge country groups
+                            const countryMap = {};
+                            (data.venues_hierarchical || []).forEach(c => { countryMap[c.country] = c; });
+                            (data2.venues_hierarchical || []).forEach(c => {
+                                if (!countryMap[c.country]) {
+                                    data.venues_hierarchical.push(c);
+                                } else {
+                                    const existVenueIds = new Set(countryMap[c.country].venues.map(v => v.venue_id));
+                                    c.venues.forEach(v => {
+                                        if (!existVenueIds.has(v.venue_id)) countryMap[c.country].venues.push(v);
+                                    });
+                                }
+                            });
+                        }
+                    } catch (e2) {
+                        console.warn('Failed to load female venues:', e2);
+                    }
+                }
                 venuesCache = data;
                 return data;
             }
@@ -587,8 +677,8 @@
         const vid = venueId ? parseInt(venueId) : null;
         entry.info.venueId = vid;
         
-        // Column indices: 0=arrow, 1=match, 2=team1, 3=team2, 4=venue, 5=squads, 6=ground, 7=status, 8=result
-        const groundCell = row.children[6];
+        // Column indices: 0=arrow, 1=match, 2=gender, 3=format, 4=team1, 5=team2, 6=venue, 7=squads, 8=ground, 9=status, 10=result
+        const groundCell = row.children[8];
         const statusEl = document.getElementById(`status-${idx}`);
         const inlineSelect = document.getElementById(`venue-inline-${idx}`);
         
@@ -844,9 +934,12 @@
                 </div>
             `;
             
+            // CRITICAL: Use info.gender (from CREX API match response) NOT entry.gender
+            // entry.gender came from a CSS border-color hack that always returned 'male'
+            const simGender = info.gender || entry.gender || 'male';
             const payload = buildPayload(
                 info.team1XI, info.team2XI,
-                info.venueId, entry.gender, nSims, useToss,
+                info.venueId, simGender, nSims, useToss,
                 info.team1Id, info.team2Id
             );
             

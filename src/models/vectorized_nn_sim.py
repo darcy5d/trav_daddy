@@ -139,7 +139,9 @@ class VectorizedNNSimulator:
             venue_stats_path = f'data/processed/venue_stats_{format_type.lower()}_{gender}.pkl'
         
         # Load model
+        logger.info(f"[MODEL_AUDIT] Loading NN model: gender={gender}, format={format_type}, path={model_path}")
         self.model = keras.models.load_model(model_path)
+        logger.info(f"[MODEL_AUDIT] Model loaded successfully: {model_path}")
         
         # Create compiled prediction function for faster inference
         # This uses XLA compilation and is optimized for Metal GPU
@@ -198,7 +200,10 @@ class VectorizedNNSimulator:
         
         # Log initialization with GPU status
         gpu_status = "Metal GPU" if _GPU_AVAILABLE else "CPU only"
-        logger.info(f"VectorizedNNSimulator initialized ({gpu_status}) with {len(self.batter_dists)} batters, {len(self.bowler_dists)} bowlers")
+        logger.info(f"[MODEL_AUDIT] VectorizedNNSimulator initialized: gender={self.gender}, "
+                     f"format={self.format_type}, {gpu_status}, "
+                     f"{len(self.batter_dists)} batters, {len(self.bowler_dists)} bowlers, "
+                     f"model={model_path}, dists={player_dist_path}")
     
     def _load_current_elos(self):
         """Load current ELO ratings for teams and players."""
@@ -347,6 +352,7 @@ class VectorizedNNSimulator:
             total_players = len(team1_batter_ids) + len(team1_bowler_ids) + len(team2_batter_ids) + len(team2_bowler_ids)
             total_found = team1_bat_found + team1_bowl_found + team2_bat_found + team2_bowl_found
             
+            logger.info(f"[DIST] Simulator gender={self.gender}, format={self.format_type}")
             logger.info(f"[DIST] Team1: {team1_bat_found}/{len(team1_batter_ids)} batters, {team1_bowl_found}/{len(team1_bowler_ids)} bowlers have distributions")
             logger.info(f"[DIST] Team2: {team2_bat_found}/{len(team2_batter_ids)} batters, {team2_bowl_found}/{len(team2_bowler_ids)} bowlers have distributions")
             logger.info(f"[DIST] Overall: {total_found}/{total_players} players with ball-by-ball data ({100*total_found/total_players:.1f}%)")

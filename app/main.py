@@ -1546,6 +1546,50 @@ def simulate_match_stream():
     team1_bowlers = fill_with_parttimers(team1_bowlers, team1_batters_raw)
     team2_bowlers = fill_with_parttimers(team2_bowlers, team2_batters_raw)
     
+    # ===== SIMULATION AUDIT LOG =====
+    # Critical for debugging gender/model selection issues
+    team1_name_audit = "unknown"
+    team2_name_audit = "unknown"
+    if team1_id or team2_id:
+        try:
+            conn_audit = get_connection()
+            cur_audit = conn_audit.cursor()
+            if team1_id:
+                cur_audit.execute("SELECT name FROM teams WHERE team_id = ?", (team1_id,))
+                row = cur_audit.fetchone()
+                if row:
+                    team1_name_audit = row[0]
+            if team2_id:
+                cur_audit.execute("SELECT name FROM teams WHERE team_id = ?", (team2_id,))
+                row = cur_audit.fetchone()
+                if row:
+                    team2_name_audit = row[0]
+            conn_audit.close()
+        except Exception as e:
+            logger.warning(f"[SIM_AUDIT] Could not look up team names: {e}")
+    
+    logger.info(f"[SIM_AUDIT] ========== SIMULATION REQUEST ==========")
+    logger.info(f"[SIM_AUDIT] Gender: {gender} | Simulator: {simulator_type}")
+    logger.info(f"[SIM_AUDIT] Team 1: {team1_name_audit} (id={team1_id}) | "
+                f"Batters: {len(team1_batters_raw)} | Bowlers: {len(team1_bowlers_raw)} | "
+                f"XI: {len(team1_batting_order)} unique")
+    logger.info(f"[SIM_AUDIT] Team 2: {team2_name_audit} (id={team2_id}) | "
+                f"Batters: {len(team2_batters_raw)} | Bowlers: {len(team2_bowlers_raw)} | "
+                f"XI: {len(team2_batting_order)} unique")
+    logger.info(f"[SIM_AUDIT] Venue ID: {venue_id} | N sims: {n_simulations} | Use toss: {use_toss}")
+    logger.info(f"[SIM_AUDIT] Team 1 batting order IDs: {team1_batting_order}")
+    logger.info(f"[SIM_AUDIT] Team 2 batting order IDs: {team2_batting_order}")
+    logger.info(f"[SIM_AUDIT] Team 1 bowler IDs: {team1_bowlers}")
+    logger.info(f"[SIM_AUDIT] Team 2 bowler IDs: {team2_bowlers}")
+    
+    # Log player names from frontend for easy identification
+    if frontend_player_names:
+        t1_names = [frontend_player_names.get(str(pid), f"?{pid}") for pid in team1_batting_order]
+        t2_names = [frontend_player_names.get(str(pid), f"?{pid}") for pid in team2_batting_order]
+        logger.info(f"[SIM_AUDIT] Team 1 XI names: {t1_names}")
+        logger.info(f"[SIM_AUDIT] Team 2 XI names: {t2_names}")
+    logger.info(f"[SIM_AUDIT] ========================================")
+    
     logger.info(f"Team 1 batting order: {len(team1_batting_order)} unique players")
     logger.info(f"Team 2 batting order: {len(team2_batting_order)} unique players")
     
@@ -3072,6 +3116,12 @@ def get_crex_match():
         else:
             logger.info(f"[TEAM ASSIGNMENT] Final: Team1='{team1_db['name'] if team1_db else 'Unknown'}', Team2='{team2_db['name'] if team2_db else 'Unknown'}'")
         
+        # Propagate DB team IDs back to the CREXTeam objects
+        if team1_db and match.team1:
+            match.team1.db_team_id = team1_db['team_id']
+        if team2_db and match.team2:
+            match.team2.db_team_id = team2_db['team_id']
+        
         # CREX uses JavaScript tabs for squads - only one team's data is in the HTML
         # If a team has no players, load from database as fallback
         if match.team1 and not match.team1.players and team1_db:
@@ -3239,11 +3289,22 @@ def get_crex_match():
         def team_to_dict(team):
             if not team:
                 return None
+            # Look up DB team name if we have a db_team_id
+            db_team_name = None
+            if team.db_team_id:
+                conn = get_connection()
+                cursor = conn.cursor()
+                cursor.execute("SELECT name FROM teams WHERE team_id = ?", (team.db_team_id,))
+                row = cursor.fetchone()
+                conn.close()
+                if row:
+                    db_team_name = row['name']
             return {
                 'crex_id': team.crex_id,
                 'name': team.name,
                 'abbreviation': team.abbreviation,
                 'db_team_id': team.db_team_id,
+                'db_team_name': db_team_name,
                 'players': [
                     {
                         'crex_id': p.crex_id,

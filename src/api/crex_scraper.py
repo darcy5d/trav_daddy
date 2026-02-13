@@ -242,6 +242,65 @@ class CREXScraper:
             return venue_name.split(',')[-1].strip()
         return ''
     
+    def _clean_repeated_venue(self, venue_name: str) -> str:
+        """
+        Clean venue names that have been repeated due to CREX rendering quirks.
+        
+        e.g., "Bangkok Terdthai Cricket Ground, Bangkok Terdthai Cricket Ground, Bangkok"
+        should become "Terdthai Cricket Ground, Bangkok"
+        """
+        if not venue_name:
+            return venue_name
+        
+        venue_keywords = ['Stadium', 'Ground', 'Gardens', 'Oval', 'Arena', 'Park',
+                          'Centre', 'Center', 'Field', 'Academy', 'Club', 'Complex',
+                          'International Cricket Ground']
+        
+        for keyword in venue_keywords:
+            first_pos = venue_name.find(keyword)
+            if first_pos >= 0:
+                after_keyword = first_pos + len(keyword)
+                # Look for city after the keyword (e.g., ", Bangkok")
+                # Use a non-greedy match that stops at the next uppercase word
+                # (which would be the start of a repeated venue name)
+                city_match = re.match(r',\s*[A-Za-z\s\-]+?(?=\s+[A-Z]|$)', venue_name[after_keyword:])
+                if city_match:
+                    end_pos = after_keyword + len(city_match.group())
+                else:
+                    end_pos = after_keyword
+                # Check if there's more venue text repeated after this
+                remaining = venue_name[end_pos:].strip()
+                if remaining and any(kw in remaining for kw in venue_keywords):
+                    # There's a repeated venue. Take just the first occurrence.
+                    venue_name = venue_name[:end_pos].strip()
+                
+                # Check for stray prefix before the venue name
+                # e.g., "AM Terdthai...", "PM Willowmoore...", "Bangkok Terdthai..."
+                before_venue = venue_name[:first_pos].strip()
+                if before_venue:
+                    city = self._extract_city_from_venue(venue_name)
+                    # Strip common CREX prefixes (AM/PM time indicators, short codes)
+                    before_clean = re.sub(r'^(AM|PM)\s*', '', before_venue, flags=re.I).strip()
+                    # If what's left before the venue keyword is just the city name, strip it
+                    if before_clean and city and before_clean.lower() == city.lower():
+                        venue_name = venue_name[first_pos:].strip()
+                    elif not before_clean:
+                        # Only AM/PM prefix was there, already handled by normalize
+                        pass
+                break
+        
+        # Strip AM/PM time prefix that sometimes leaks into the venue name
+        venue_name = re.sub(r'^(AM|PM)\s+', '', venue_name).strip()
+        
+        # Final check: if venue starts with city name (from previous repetition),
+        # e.g., "Bangkok Terdthai Cricket Ground, Bangkok" -> strip the leading "Bangkok "
+        if ',' in venue_name:
+            city = venue_name.split(',')[-1].strip()
+            if city and venue_name.lower().startswith(city.lower() + ' '):
+                venue_name = venue_name[len(city):].strip()
+        
+        return venue_name
+    
     def _parse_crex_datetime(self, date_str: str, time_str: Optional[str] = None) -> Tuple[Optional[str], Optional[str], Optional[str]]:
         """
         Parse CREX date/time formats.
@@ -673,9 +732,10 @@ class CREXScraper:
         # Look for venue patterns (Stadium, Ground, Oval, etc.)
         # Stop at "Team Form" or other section boundaries
         venue_patterns = [
-            # Match venue name + optional city, stop at Team Form or other sections
-            r'([A-Za-z\s\-\'\.]+(?:Stadium|Ground|Gardens|Oval|Arena|Park|Centre|Center|Field|Academy|Club|Complex|International Cricket Ground)(?:,\s*[A-Za-z\s\-]+)?)\s*(?:Team Form|Head to Head|Match|$)',
-            r'(The\s+[A-Za-z\s\-\'\.]+,\s*[A-Za-z]+)\s*(?:Team Form|Head to Head|Match|$)',
+            # Match venue name + optional city, stop at Team Form, Head to Head, Match, 
+            # temperature/weather patterns (e.g., "25°C", "26.1˚C"), or a repeated venue name
+            r'([A-Za-z\s\-\'\.]+(?:Stadium|Ground|Gardens|Oval|Arena|Park|Centre|Center|Field|Academy|Club|Complex|International Cricket Ground)(?:,\s*[A-Za-z\s\-]+)?)\s*(?:Team Form|Head to Head|Match|\d+(?:\.\d+)?[˚°]|$)',
+            r'(The\s+[A-Za-z\s\-\'\.]+,\s*[A-Za-z]+)\s*(?:Team Form|Head to Head|Match|\d+(?:\.\d+)?[˚°]|$)',
         ]
         
         for pattern in venue_patterns:
@@ -684,12 +744,30 @@ class CREXScraper:
                 venue_name = venue_match.group(1).strip()
                 # Clean up any trailing whitespace or punctuation
                 venue_name = re.sub(r'\s+$', '', venue_name)
+                # Handle CREX rendering quirk where venue text is repeated
+                venue_name = self._clean_repeated_venue(venue_name)
                 break
         
         # Parse date/time
         start_date, start_time, date_time_gmt = None, None, None
         if date_str:
             start_date, start_time, date_time_gmt = self._parse_crex_datetime(date_str)
+        
+        # Fallback: try to extract venue from text between time and temperature
+        # e.g., "8:00 AM Terdthai Cricket Ground, Bangkok 26.1˚C"
+        if not venue_name and date_str:
+            date_pos = all_text.find(date_str)
+            if date_pos >= 0:
+                after_date = all_text[date_pos:]
+                # Look for pattern: time -> venue text -> temperature
+                fallback_match = re.search(
+                    r'(?:AM|PM)\s+(.+?(?:Stadium|Ground|Gardens|Oval|Arena|Park|Centre|Center|Field|Academy|Club|Complex)(?:,\s*[A-Za-z\s\-]+?)?)\s+(?:\d+(?:\.\d+)?[˚°]|\d+(?:\.\d+)?°C)',
+                    after_date
+                )
+                if fallback_match:
+                    venue_name = fallback_match.group(1).strip()
+                    venue_name = self._clean_repeated_venue(venue_name)
+                    logger.info(f"Extracted venue from CREX page (fallback): '{venue_name}'")
         
         # Create venue object
         venue = None
@@ -848,7 +926,8 @@ class CREXScraper:
                 name = link.get('title', '') or link.get_text(strip=True)
                 
                 # Clean up name - remove role text that got concatenated
-                name = re.sub(r'(Batter|Bowler|All Rounder|Wicket Keeper|✈️|\(C\)|\(WK\))+', '', name).strip()
+                name = re.sub(r'(Batter|Bowler|All[- ]?Rounder|Wicket[- ]?[Kk]eeper|WK Batter|✈️|✈|\(C\)|\(WK\)|\(c\)|\(wk\))+', '', name, flags=re.IGNORECASE).strip()
+                name = re.sub(r'\s+', ' ', name).strip()
                 
                 if not name:
                     # Extract from URL: quinton-de-kock -> Quinton De Kock
@@ -1066,16 +1145,104 @@ class CREXScraper:
             team1_tab = None
             team2_tab = None
             
-            for tab_abbr, players in squads.items():
+            def _tab_matches_team(tab_abbr: str, team_abbrs: list, team_name: str) -> bool:
+                """Check if a tab abbreviation matches a team using multiple strategies."""
                 tab_upper = tab_abbr.upper().replace('-', '').replace(' ', '')
                 
+                # Strategy 1: Direct match after removing hyphens/spaces
+                if any(abbr == tab_upper for abbr in team_abbrs):
+                    return True
+                
+                # Strategy 2: Handle compound women's/A-team tab abbreviations
+                # Tabs like 'PAKW-A', 'INDW-A', 'NEP-W', 'UAE-W', 'SA-W', 'OMN-W', 'QAT-W'
+                # Strip common suffixes: -W (women), -A (A team), W-A (women A team)
+                tab_parts = tab_abbr.upper().split('-')
+                tab_base = tab_parts[0]  # e.g., 'PAKW' from 'PAKW-A', 'NEP' from 'NEP-W'
+                
+                # Further strip trailing 'W' from base (e.g., 'PAKW' -> 'PAK', 'INDW' -> 'IND')
+                if tab_base.endswith('W') and len(tab_base) > 2:
+                    tab_core = tab_base[:-1]  # 'PAKW' -> 'PAK'
+                else:
+                    tab_core = tab_base
+                
+                # Check if the core abbreviation matches any team abbreviation
+                if any(abbr == tab_core for abbr in team_abbrs):
+                    return True
+                if any(abbr == tab_base for abbr in team_abbrs):
+                    return True
+                
+                # Strategy 3: Check if team name contains the base country name
+                # e.g., team_name "Pakistan A Women" should match tab "PAKW-A"
+                # by checking if 'PAK' is a known abbreviation for the country in the team name
+                COUNTRY_ABBR_MAP = {
+                    'PAK': 'pakistan', 'IND': 'india', 'AUS': 'australia', 'ENG': 'england',
+                    'NZ': 'new zealand', 'SA': 'south africa', 'WI': 'west indies',
+                    'SL': 'sri lanka', 'BAN': 'bangladesh', 'AFG': 'afghanistan',
+                    'ZIM': 'zimbabwe', 'IRE': 'ireland', 'SCO': 'scotland', 'NED': 'netherlands',
+                    'UAE': 'united arab emirates', 'NAM': 'namibia', 'OMA': 'oman', 'OMN': 'oman',
+                    'USA': 'united states', 'CAN': 'canada', 'NEP': 'nepal', 'QAT': 'qatar',
+                    'BHR': 'bahrain', 'BRN': 'bahrain', 'KEN': 'kenya', 'UGA': 'uganda',
+                    'PNG': 'papua new guinea', 'THA': 'thailand', 'MAS': 'malaysia',
+                    'SIN': 'singapore', 'HK': 'hong kong', 'NOR': 'norway',
+                }
+                
+                # Also build reverse map: country name -> list of abbreviations
+                REVERSE_ABBR_MAP = {}
+                for abbr, country in COUNTRY_ABBR_MAP.items():
+                    REVERSE_ABBR_MAP.setdefault(country, []).append(abbr)
+                
+                team_name_lower = team_name.lower()
+                # Strip qualifiers to get base country name (handles both full names and abbreviations)
+                # Full names: "Pakistan A Women" -> "pakistan", "Nepal Women" -> "nepal"
+                # Abbreviations: "NEP-W" -> "nep", "PAKW-A" -> "pakw" -> "pak"
+                base_name = team_name_lower
+                for suffix in [' a women', ' women', ' a ']:
+                    base_name = base_name.replace(suffix, '').strip()
+                # Also handle hyphenated abbreviation forms: NEP-W, PAKW-A, INDW-A
+                base_name = re.sub(r'-w$', '', base_name, flags=re.I).strip()
+                base_name = re.sub(r'-a$', '', base_name, flags=re.I).strip()
+                # Strip trailing 'w' from merged abbreviations like 'pakw' -> 'pak'
+                if len(base_name) <= 5 and base_name.endswith('w') and len(base_name) > 2:
+                    base_name_core = base_name[:-1]
+                else:
+                    base_name_core = base_name
+                
+                for abbr_candidate in [tab_core, tab_base]:
+                    if abbr_candidate in COUNTRY_ABBR_MAP:
+                        country = COUNTRY_ABBR_MAP[abbr_candidate]
+                        # Check full name match
+                        if country in base_name or base_name in country:
+                            return True
+                        # Check if base_name is itself an abbreviation for this country
+                        if base_name.upper() in REVERSE_ABBR_MAP.get(country, []):
+                            return True
+                        if base_name_core.upper() in REVERSE_ABBR_MAP.get(country, []):
+                            return True
+                
+                # Strategy 4: Direct base comparison for abbreviated team names
+                # When team name IS an abbreviation (e.g., "NEP-W"), compare bases directly
+                # Tab "NEP-W" base = "NEP", Team "NEP-W" base after stripping = "NEP"
+                team_base = team_name.upper().split('-')[0]
+                if team_base.endswith('W') and len(team_base) > 2:
+                    team_core = team_base[:-1]
+                else:
+                    team_core = team_base
+                
+                if tab_core == team_core and len(tab_core) >= 2:
+                    return True
+                if tab_base == team_base and len(tab_base) >= 2:
+                    return True
+                
+                return False
+            
+            for tab_abbr, players in squads.items():
                 # Check if this tab matches team1
-                if any(abbr == tab_upper for abbr in team1_abbrs):
+                if _tab_matches_team(tab_abbr, team1_abbrs, team1_name):
                     team1_players = players
                     team1_tab = tab_abbr
                     logger.info(f"[PLAYWRIGHT] Tab '{tab_abbr}' matched to team1 '{team1_name}'")
                 # Check if this tab matches team2
-                elif any(abbr == tab_upper for abbr in team2_abbrs):
+                elif _tab_matches_team(tab_abbr, team2_abbrs, team2_name):
                     team2_players = players
                     team2_tab = tab_abbr
                     logger.info(f"[PLAYWRIGHT] Tab '{tab_abbr}' matched to team2 '{team2_name}'")
@@ -1225,9 +1392,40 @@ class CREXScraper:
         }
         
         # Check known abbreviations
-        name_lower = team_name.lower().replace(' women', '').replace('-w', '').strip()
+        # Strip ' women', ' a women', ' a', '-w', '-a' to get base country/team name
+        name_lower = team_name.lower().replace(' a women', '').replace(' women', '').replace('-w', '').replace('-a', '').strip()
+        # Also strip trailing ' a' for A-teams (e.g., "pakistan a" -> "pakistan")
+        if name_lower.endswith(' a'):
+            name_lower = name_lower[:-2].strip()
+        # Strip trailing 'w' from merged abbreviations like 'pakw' -> 'pak' (only for short names)
+        if len(name_lower) <= 5 and name_lower.endswith('w') and len(name_lower) > 2:
+            name_lower_core = name_lower[:-1]
+        else:
+            name_lower_core = name_lower
+        
+        # Direct lookup: name_lower is a full country name (e.g., 'nepal', 'pakistan')
         if name_lower in KNOWN_ABBRS:
             abbrs.update(KNOWN_ABBRS[name_lower])
+        elif name_lower_core in KNOWN_ABBRS:
+            abbrs.update(KNOWN_ABBRS[name_lower_core])
+        else:
+            # Reverse lookup: name_lower might itself BE an abbreviation (e.g., 'nep', 'pak')
+            # This happens when CREX uses abbreviated team names like 'NEP-W', 'PAKW-A'
+            for country_name, country_abbrs in KNOWN_ABBRS.items():
+                if name_lower.upper() in country_abbrs or name_lower_core.upper() in country_abbrs:
+                    abbrs.update(country_abbrs)
+                    name_lower = country_name  # Use the full country name for further processing
+                    break
+        
+        # For women's teams, also generate compound abbreviations that CREX uses
+        # e.g., "Nepal Women" -> add 'NEPW', "Pakistan A Women" -> add 'PAKW', 'PAKWA'
+        is_womens = 'women' in team_name.lower() or '-w' in team_name.lower()
+        is_a_team = ' a ' in team_name.lower() or team_name.lower().endswith(' a') or '-a' in team_name.lower()
+        if is_womens and name_lower in KNOWN_ABBRS:
+            for base_abbr in KNOWN_ABBRS[name_lower]:
+                abbrs.add(base_abbr + 'W')  # e.g., NEPW, PAKW, INDW, UAEW
+                if is_a_team:
+                    abbrs.add(base_abbr + 'WA')  # e.g., PAKWA, INDWA
         
         # Also check partial matches for franchise teams (e.g., "Auckland Women" should match "auckland")
         # BUT: Skip partial matching for short names (<=4 chars) to avoid false positives
@@ -1250,9 +1448,10 @@ class CREXScraper:
         }
         
         # Check if this team name is a country (if so, it can use reserved abbrs)
-        is_country_team = name_lower in KNOWN_ABBRS and any(
+        # After reverse lookup above, name_lower is the full country name if it was resolved
+        is_country_team = (name_lower in KNOWN_ABBRS and any(
             abbr in RESERVED_COUNTRY_ABBRS for abbr in KNOWN_ABBRS.get(name_lower, [])
-        )
+        )) or any(abbr in RESERVED_COUNTRY_ABBRS for abbr in abbrs)
         
         # Generate from first letters of words
         words = team_name.replace('-', ' ').split()
@@ -1296,7 +1495,11 @@ class CREXScraper:
                 
                 # Get player name (clean it)
                 name_raw = link.inner_text().strip()
-                name = re.sub(r'(Batter|Bowler|All Rounder|Wicket Keeper|✈️|\(C\)|\(WK\))+', '', name_raw).strip()
+                # Strip newlines, tabs, and role labels that Playwright may include
+                name_clean = re.sub(r'[\n\r\t]+', ' ', name_raw)
+                name = re.sub(r'(Batter|Bowler|All[- ]?Rounder|Wicket[- ]?keeper|Wicket[- ]?Keeper|WK Batter|✈️|✈|\(C\)|\(WK\)|\(c\)|\(wk\))+', '', name_clean, flags=re.IGNORECASE).strip()
+                # Collapse multiple spaces
+                name = re.sub(r'\s+', ' ', name).strip()
                 
                 if not name:
                     name_from_url = href.split('/')[-1].rsplit('-', 1)[0]
@@ -1634,8 +1837,11 @@ class CREXScraper:
             cleaned = re.sub(r'^[A-Z]{1,3}\s+', '', name.strip())
             # Also strip "The " prefix
             cleaned = re.sub(r'^The\s+', '', cleaned, flags=re.I)
-            # Remove trailing notes like "Team Form" that CREX sometimes includes
+            # Remove trailing notes like "Team Form" or "YouTube" that CREX sometimes includes
             cleaned = re.sub(r'\s+Team Form$', '', cleaned, flags=re.I)
+            cleaned = re.sub(r'\s+YouTube$', '', cleaned, flags=re.I)
+            cleaned = re.sub(r'\s+Hotstar$', '', cleaned, flags=re.I)
+            cleaned = re.sub(r'\s+Live$', '', cleaned, flags=re.I)
             return cleaned
         
         venue_name_clean = local_normalize_venue_name(venue.name)
@@ -1790,6 +1996,36 @@ class CREXScraper:
             'hs': 'hobart hurricanes', 'as': 'adelaide strikers',
         }
         
+        # Handle "A" teams (e.g., "Pakistan A Women", "India A Women")
+        # These are development squads that don't have separate DB entries.
+        # Map them to the parent team (Pakistan, India, etc.)
+        # Also handles abbreviated forms like "PAKW-A", "INDW-A"
+        for name in list(team_names):
+            name_norm = name.lower().strip()
+            # Match patterns like "pakistan a women", "india a women", "pakistan a"
+            a_team_match = re.match(r'^(.+?)\s+a(?:\s+women)?$', name_norm)
+            if a_team_match:
+                parent_name = a_team_match.group(1).strip()
+                if parent_name not in [n.lower() for n in team_names]:
+                    team_names.append(parent_name)
+                    team_names.append(parent_name + ' women')
+                    logger.debug(f"Expanded A-team '{name_norm}' to parent '{parent_name}'")
+            
+            # Also handle hyphenated abbreviated forms: "PAKW-A" -> strip -A -> "PAKW" -> strip W -> "PAK"
+            hyphen_a_match = re.match(r'^(.+?)-a$', name_norm, re.I)
+            if hyphen_a_match:
+                base = hyphen_a_match.group(1).strip()
+                # Strip trailing 'w' for women's (pakw -> pak)
+                if base.endswith('w') and len(base) > 2:
+                    core = base[:-1]
+                else:
+                    core = base
+                # Add both base and core as additional names to try
+                for variant in [base, core]:
+                    if variant not in [n.lower() for n in team_names]:
+                        team_names.append(variant)
+                        logger.debug(f"Expanded hyphenated A-team '{name_norm}' to '{variant}'")
+        
         # Add aliases for rebranded teams
         for alias_from, alias_to in nz_rebrand_aliases.items():
             for name in list(team_names):
@@ -1800,12 +2036,24 @@ class CREXScraper:
         
         # Expand abbreviations to full team names
         for name in list(team_names):
-            name_norm = name.lower().replace(' women', '').replace('-w', '').strip()
-            if name_norm in team_abbreviations:
-                full_name = team_abbreviations[name_norm]
-                team_names.append(full_name)
-                team_names.append(full_name + ' women')
-                logger.debug(f"Expanded abbreviation '{name_norm}' to '{full_name}'")
+            name_norm = name.lower().replace(' women', '').replace('-w', '').replace('-a', '').strip()
+            # Also strip trailing ' a' for A-teams
+            if name_norm.endswith(' a'):
+                name_norm = name_norm[:-2].strip()
+            # Strip trailing 'w' from merged abbreviations (e.g., 'pakw' -> 'pak')
+            if len(name_norm) <= 5 and name_norm.endswith('w') and len(name_norm) > 2:
+                name_norm_core = name_norm[:-1]
+            else:
+                name_norm_core = name_norm
+            
+            for variant in [name_norm, name_norm_core]:
+                if variant in team_abbreviations:
+                    full_name = team_abbreviations[variant]
+                    if full_name not in [n.lower() for n in team_names]:
+                        team_names.append(full_name)
+                        team_names.append(full_name + ' women')
+                        logger.debug(f"Expanded abbreviation '{variant}' to '{full_name}'")
+                    break
         
         # Direction words that must match exactly
         directions = {'northern', 'southern', 'eastern', 'western', 'central'}
