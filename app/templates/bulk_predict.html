@@ -366,27 +366,34 @@
     // BUILD SIMULATION PAYLOAD (same logic as runSimulation in predict.html)
     // ============================================================
     function buildPayload(team1Selected, team2Selected, venueId, gender, nSims, useToss, team1Id, team2Id, team1Name, team2Name) {
-        // Helper: get valid player ID, filtering out undefined/null
+        // Helper: get player ID, assigning negative placeholders for unmatched players.
+        // Every player in the XI MUST be sent to the simulator (cricket always has 11 batters).
+        // The simulator uses default distributions for unknown IDs.
+        let _nextPlaceholder = -1;
+        const _placeholderMap = new Map();
         function getPlayerId(p) {
             const pid = p.db_player_id || p.player_id || p.id;
-            return (pid !== undefined && pid !== null && pid !== 'undefined') ? String(pid) : null;
+            if (pid !== undefined && pid !== null && pid !== 'undefined') return String(pid);
+            // Stable placeholder: same player object always gets the same ID
+            if (!_placeholderMap.has(p)) _placeholderMap.set(p, String(_nextPlaceholder--));
+            return _placeholderMap.get(p);
         }
         
-        const team1Batters = team1Selected.map(getPlayerId).filter(Boolean);
-        const team2Batters = team2Selected.map(getPlayerId).filter(Boolean);
+        const team1Batters = team1Selected.map(getPlayerId);
+        const team2Batters = team2Selected.map(getPlayerId);
         
         const team1Bowlers = team1Selected
             .filter(p => { const r = normalizeRole(p.role || p.player_role); return r === 'BOWL' || r === 'AR'; })
-            .map(getPlayerId).filter(Boolean);
+            .map(getPlayerId);
         
         const team2Bowlers = team2Selected
             .filter(p => { const r = normalizeRole(p.role || p.player_role); return r === 'BOWL' || r === 'AR'; })
-            .map(getPlayerId).filter(Boolean);
+            .map(getPlayerId);
         
         const playerNames = {};
         [...team1Selected, ...team2Selected].forEach(p => {
             const pid = getPlayerId(p);
-            if (pid) playerNames[pid] = p.name || p.short_name || `Player ${pid}`;
+            playerNames[pid] = p.name || p.short_name || `Player ${pid}`;
         });
         
         return {
