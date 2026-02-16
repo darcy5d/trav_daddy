@@ -51,11 +51,13 @@ class EloCalculatorV3:
     }
     
     # Tier ceilings (maximum ELO per tier)
+    # Widened in calibration fix: associates need room to express true ability
+    # without bumping into artificial ceilings that compress the rating space
     TIER_CEILINGS = {
         1: 2500,  # No effective ceiling for elite
-        2: 1950,  # Full members max
-        3: 1800,  # Top associates max
-        4: 1700,  # Associates max
+        2: 2050,  # Associates with T20I status (was 1950)
+        3: 1900,  # Top associates / premier franchises (was 1800)
+        4: 1700,  # Associates / regional franchises
         5: 1600,  # Emerging max
     }
     
@@ -69,13 +71,17 @@ class EloCalculatorV3:
     }
     
     # Player K-factor adjustment based on opponent team tier
-    # When playing against weaker teams, K-factor is reduced
+    # When playing against weaker teams, K-factor is reduced.
+    # Flattened in calibration fix: the old scale (1.0 -> 0.2) was too harsh,
+    # causing associate players to accumulate almost no ELO signal from domestic
+    # cricket (attenuation bias). The 0.5 floor ensures every match contributes
+    # at least half the learning rate of a top-tier match.
     PLAYER_TIER_K_ADJUSTMENT = {
         1: 1.0,   # Full K vs Tier 1 (Australia, India, England)
-        2: 0.8,   # 80% K vs Tier 2 (Associates)
-        3: 0.6,   # 60% K vs Tier 3 (Franchise leagues)
-        4: 0.4,   # 40% K vs Tier 4 (Minor leagues)
-        5: 0.2,   # 20% K vs Tier 5 (Development)
+        2: 0.9,   # 90% K vs Tier 2 (Associates) -- was 0.8
+        3: 0.75,  # 75% K vs Tier 3 (Franchise leagues) -- was 0.6
+        4: 0.6,   # 60% K vs Tier 4 (Minor leagues) -- was 0.4
+        5: 0.5,   # 50% K vs Tier 5 (Development) -- was 0.2
     }
     
     # Initial ratings by tier
@@ -142,12 +148,15 @@ class EloCalculatorV3:
             team1_is_higher = False
         
         # Asymmetry multipliers
+        # Softened in calibration fix: the old values (0.4/1.6 for 3+ gap) made
+        # Tier 1 teams' ELOs too "sticky" -- they barely lost rating from upset
+        # losses, preventing the model from learning when the gap is closing.
         if tier_gap == 1:
-            mult_higher, mult_lower = 0.85, 1.15
+            mult_higher, mult_lower = 0.85, 1.15  # unchanged
         elif tier_gap == 2:
-            mult_higher, mult_lower = 0.6, 1.4
+            mult_higher, mult_lower = 0.7, 1.3    # was 0.6, 1.4
         else:  # >= 3
-            mult_higher, mult_lower = 0.4, 1.6
+            mult_higher, mult_lower = 0.55, 1.45   # was 0.4, 1.6
         
         adj_higher = higher_k * mult_higher
         adj_lower = lower_k * mult_lower
@@ -165,19 +174,24 @@ class EloCalculatorV3:
         """
         Calculate expected scores with tier prestige boost.
         
-        Logic: Higher-tier teams get small boost (0.04 per tier gap)
-        Max adjustment: ±0.15 (clamped)
+        Logic: Higher-tier teams get small boost per tier gap.
+        
+        Reduced in calibration fix: the old coefficient (0.04, cap ±0.15) 
+        double-counted the tier advantage already encoded in the ELO ratings 
+        themselves (Tier 1 starts at 1650 vs Tier 2 at 1550). This created
+        a compounding bias that systematically widened the gap between tiers
+        over hundreds of matches. Halved to 0.02 per tier gap (cap ±0.08).
         
         Effect: India (Tier 1) vs Uganda (Tier 4) 
-        → India gets +0.12 expected score boost beyond ELO difference
+        → India gets +0.06 expected score boost beyond ELO difference (was +0.12)
         """
         base_expected1 = self.expected_score(rating1, rating2)
         
         tier_gap = tier1 - tier2  # Negative if team1 is higher tier
-        prestige_adjustment = 0.04 * tier_gap
+        prestige_adjustment = 0.02 * tier_gap  # was 0.04
         
-        # Clamp to ±0.15 max
-        prestige_adjustment = max(-0.15, min(0.15, prestige_adjustment))
+        # Clamp to ±0.08 max (was ±0.15)
+        prestige_adjustment = max(-0.08, min(0.08, prestige_adjustment))
         
         adjusted_expected1 = base_expected1 + prestige_adjustment
         adjusted_expected1 = max(0.05, min(0.95, adjusted_expected1))

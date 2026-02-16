@@ -183,6 +183,13 @@ class VectorizedNNSimulator:
         self.default_bat_dist = np.array([0.35, 0.32, 0.08, 0.02, 0.12, 0.06, 0.04, 0.01], dtype=np.float32)
         self.default_bowl_dist = np.array([0.38, 0.32, 0.07, 0.01, 0.10, 0.05, 0.05, 0.02], dtype=np.float32)
         
+        # Uncertainty modeling: Dirichlet concentration parameters by data quality
+        # Higher alpha = less noise (more trust in NN output)
+        # Lower alpha = more noise (wider score distributions for uncertain matchups)
+        self.UNCERTAINTY_ALPHA_HIGH = 100.0    # 90%+ players known: nearly deterministic
+        self.UNCERTAINTY_ALPHA_MEDIUM = 20.0   # 50-90% players known: moderate spread
+        self.UNCERTAINTY_ALPHA_LOW = 5.0       # <50% players known: wide spread
+        
         # Load venue statistics
         try:
             self.venue_stats = VenueStatsBuilder.load(venue_stats_path)
@@ -255,8 +262,13 @@ class VectorizedNNSimulator:
     def get_team_elo(self, team_id: Optional[int]) -> float:
         """Get current team ELO (default 1500)."""
         if team_id is None:
+            logger.warning("[ELO FALLBACK] team_id is None -- using default ELO 1500. "
+                           "This team was not matched to the database.")
             return 1500.0
-        return self.team_current_elo.get(team_id, 1500.0)
+        elo = self.team_current_elo.get(team_id, 1500.0)
+        if elo == 1500.0 and team_id not in self.team_current_elo:
+            logger.warning(f"[ELO FALLBACK] team_id={team_id} not found in ELO cache -- using default 1500.")
+        return elo
     
     def get_player_batting_elo(self, player_id) -> float:
         """Get current player batting ELO (default 1500)."""
@@ -295,6 +307,53 @@ class VectorizedNNSimulator:
         if self.venue_stats is None or venue_id is None:
             return self.default_venue_features
         return self.venue_stats.get_venue_features(venue_id)
+    
+    def compute_data_quality(
+        self,
+        batter_ids: List[int],
+        bowler_ids: List[int]
+    ) -> float:
+        """
+        Compute data quality score (0-1) for a team based on fraction of
+        players with real distribution data vs defaults.
+        
+        Returns:
+            Float between 0.0 (all defaults) and 1.0 (all players have data)
+        """
+        total = len(batter_ids) + len(bowler_ids)
+        if total == 0:
+            return 0.0
+        
+        def safe_int(x):
+            try:
+                return int(x)
+            except (ValueError, TypeError):
+                return None
+        
+        found = sum(1 for pid in batter_ids if safe_int(pid) in self.batter_dists)
+        found += sum(1 for pid in bowler_ids if safe_int(pid) in self.bowler_dists)
+        
+        return found / total
+    
+    def get_uncertainty_alpha(self, quality_score: float) -> float:
+        """
+        Map data quality score to Dirichlet concentration parameter.
+        
+        Uses linear interpolation between quality thresholds:
+        - quality >= 0.9: alpha = 100 (nearly deterministic)
+        - quality  = 0.5: alpha = 20  (moderate spread)
+        - quality <= 0.1: alpha = 5   (wide spread, high uncertainty)
+        """
+        if quality_score >= 0.9:
+            return self.UNCERTAINTY_ALPHA_HIGH
+        elif quality_score >= 0.5:
+            # Linear interpolation: 0.5->20, 0.9->100
+            t = (quality_score - 0.5) / 0.4
+            return self.UNCERTAINTY_ALPHA_MEDIUM + t * (self.UNCERTAINTY_ALPHA_HIGH - self.UNCERTAINTY_ALPHA_MEDIUM)
+        else:
+            # Linear interpolation: 0.1->5, 0.5->20
+            t = max(0, (quality_score - 0.1) / 0.4)
+            return self.UNCERTAINTY_ALPHA_LOW + t * (self.UNCERTAINTY_ALPHA_MEDIUM - self.UNCERTAINTY_ALPHA_LOW)
     
     def simulate_matches(
         self,
@@ -367,6 +426,16 @@ class VectorizedNNSimulator:
         team2_bat_dists = np.array([self.get_batter_dist(pid) for pid in team2_batter_ids])  # (11, 8)
         team2_bowl_dists = np.array([self.get_bowler_dist(pid) for pid in team2_bowler_ids])  # (5, 8)
         
+        # Compute data quality scores for uncertainty modeling
+        team1_quality = self.compute_data_quality(team1_batter_ids, team1_bowler_ids)
+        team2_quality = self.compute_data_quality(team2_batter_ids, team2_bowler_ids)
+        # Use minimum quality of the two teams -- uncertainty in either team widens outcomes
+        match_quality = min(team1_quality, team2_quality)
+        uncertainty_alpha = self.get_uncertainty_alpha(match_quality)
+        
+        logger.info(f"[UNCERTAINTY] Team1 quality: {team1_quality:.2f}, Team2 quality: {team2_quality:.2f}, "
+                     f"Match quality: {match_quality:.2f}, Dirichlet alpha: {uncertainty_alpha:.1f}")
+        
         # Get venue features (4 features)
         venue_features = self.get_venue_features(venue_id)
         
@@ -416,7 +485,8 @@ class VectorizedNNSimulator:
                     batting_team_elo=team1_elo,
                     bowling_team_elo=team2_elo,
                     batter_elos=team1_bat_elos,
-                    bowler_elos=team2_bowl_elos
+                    bowler_elos=team2_bowl_elos,
+                    uncertainty_alpha=uncertainty_alpha
                 )
                 adjusted_first_runs_t1 = (first_runs_t1 * FIRST_INNINGS_SCORE_BONUS).astype(np.int32)
                 targets_t1 = adjusted_first_runs_t1 + 1
@@ -432,7 +502,8 @@ class VectorizedNNSimulator:
                     batting_team_elo=team2_elo,
                     bowling_team_elo=team1_elo,
                     batter_elos=team2_bat_elos,
-                    bowler_elos=team1_bowl_elos
+                    bowler_elos=team1_bowl_elos,
+                    uncertainty_alpha=uncertainty_alpha
                 )
                 
                 team1_scores[team1_first_mask] = first_runs_t1
@@ -452,7 +523,8 @@ class VectorizedNNSimulator:
                     batting_team_elo=team2_elo,
                     bowling_team_elo=team1_elo,
                     batter_elos=team2_bat_elos,
-                    bowler_elos=team1_bowl_elos
+                    bowler_elos=team1_bowl_elos,
+                    uncertainty_alpha=uncertainty_alpha
                 )
                 adjusted_first_runs_t2 = (first_runs_t2 * FIRST_INNINGS_SCORE_BONUS).astype(np.int32)
                 targets_t2 = adjusted_first_runs_t2 + 1
@@ -468,7 +540,8 @@ class VectorizedNNSimulator:
                     batting_team_elo=team1_elo,
                     bowling_team_elo=team2_elo,
                     batter_elos=team1_bat_elos,
-                    bowler_elos=team2_bowl_elos
+                    bowler_elos=team2_bowl_elos,
+                    uncertainty_alpha=uncertainty_alpha
                 )
                 
                 # Note: Team 2 batted first, so their score is first_runs_t2
@@ -494,7 +567,8 @@ class VectorizedNNSimulator:
                 batting_team_elo=team1_elo,
                 bowling_team_elo=team2_elo,
                 batter_elos=team1_bat_elos,
-                bowler_elos=team2_bowl_elos
+                bowler_elos=team2_bowl_elos,
+                uncertainty_alpha=uncertainty_alpha
             )
             
             adjusted_first_runs = (first_runs * FIRST_INNINGS_SCORE_BONUS).astype(np.int32)
@@ -511,7 +585,8 @@ class VectorizedNNSimulator:
                 batting_team_elo=team2_elo,
                 bowling_team_elo=team1_elo,
                 batter_elos=team2_bat_elos,
-                bowler_elos=team1_bowl_elos
+                bowler_elos=team1_bowl_elos,
+                uncertainty_alpha=uncertainty_alpha
             )
             
             team1_scores = first_runs
@@ -550,7 +625,8 @@ class VectorizedNNSimulator:
         batting_team_elo: float = 1500.0,
         bowling_team_elo: float = 1500.0,
         batter_elos: Optional[np.ndarray] = None,  # (11,) batter ELOs
-        bowler_elos: Optional[np.ndarray] = None   # (5,) bowler ELOs
+        bowler_elos: Optional[np.ndarray] = None,   # (5,) bowler ELOs
+        uncertainty_alpha: float = 100.0             # Dirichlet concentration parameter
     ) -> Tuple[np.ndarray, np.ndarray]:
         """
         Simulate innings for all N matches simultaneously.
@@ -560,6 +636,13 @@ class VectorizedNNSimulator:
         - Compiled TensorFlow prediction
         - Minimized array allocations in hot loop
         - ELO features for team and player context
+        - Epistemic uncertainty via Dirichlet noise on NN output
+        
+        Args:
+            uncertainty_alpha: Dirichlet concentration parameter. Higher = less noise.
+                100.0 = nearly deterministic (high data quality)
+                20.0 = moderate spread
+                5.0 = wide spread (low data quality / many default players)
         
         Returns:
             (runs, wickets) arrays of shape (n_matches,)
@@ -692,6 +775,19 @@ class VectorizedNNSimulator:
             except Exception:
                 # Fallback to regular predict
                 proba = self.model.predict(features_norm, verbose=0, batch_size=n_matches)
+            
+            # Epistemic uncertainty injection via Dirichlet noise
+            # When data quality is low (alpha is small), this widens the per-ball
+            # probability distributions, making each simulation produce different
+            # outcomes and preventing tight convergence to extreme win probabilities.
+            # Uses Gamma sampling + normalization (equivalent to Dirichlet sampling).
+            if uncertainty_alpha < 99.0:
+                eps = 1e-6
+                alpha_matrix = np.maximum(proba * uncertainty_alpha, eps)
+                noise = np.random.gamma(alpha_matrix)
+                row_sums = noise.sum(axis=1, keepdims=True)
+                row_sums = np.maximum(row_sums, eps)  # prevent division by zero
+                proba = (noise / row_sums).astype(np.float32)
             
             # Sample outcomes for all matches (vectorized)
             outcomes = self._vectorized_sample(proba)
