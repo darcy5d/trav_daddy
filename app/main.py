@@ -1258,6 +1258,8 @@ def simulate_match():
         # Get team IDs for ELO lookup (optional - will default to 1500 if not provided)
         team1_id = data.get('team1_id')
         team2_id = data.get('team2_id')
+        team1_name = data.get('team1_name', 'Team 1')
+        team2_name = data.get('team2_name', 'Team 2')
         if team1_id:
             try:
                 team1_id = int(team1_id)
@@ -1268,6 +1270,21 @@ def simulate_match():
                 team2_id = int(team2_id)
             except (ValueError, TypeError):
                 team2_id = None
+        
+        # Track data quality warnings
+        data_warnings = []
+        if not team1_id:
+            data_warnings.append(
+                f"'{team1_name}' has no database ID. Using default ELO (1500). "
+                f"Prediction may be unreliable."
+            )
+            logger.warning(f"[SIM WARNING] Team1 '{team1_name}' has no database ID -- using default ELO 1500")
+        if not team2_id:
+            data_warnings.append(
+                f"'{team2_name}' has no database ID. Using default ELO (1500). "
+                f"Prediction may be unreliable."
+            )
+            logger.warning(f"[SIM WARNING] Team2 '{team2_name}' has no database ID -- using default ELO 1500")
         
         # DEBUG: Log incoming player IDs to diagnose 50/50 results
         logger.info(f"[SIMULATION DEBUG] Team1 batters: {team1_batters_raw[:5]}... ({len(team1_batters_raw)} total)")
@@ -1397,7 +1414,8 @@ def simulate_match():
             'h2h_rate': round(results.get('h2h_rate', 0) * 100, 1) if 'h2h_rate' in results else None,
             'venue_id': venue_id,
             'toss_info': toss_info,
-            'gender': gender
+            'gender': gender,
+            'data_warnings': data_warnings if data_warnings else None
         }
         
         # Generate detailed scorecard for NN simulator
@@ -1480,6 +1498,8 @@ def simulate_match_stream():
     # Get team IDs for ELO lookup (optional - will default to 1500 if not provided)
     team1_id = data.get('team1_id')
     team2_id = data.get('team2_id')
+    team1_name = data.get('team1_name', 'Team 1')
+    team2_name = data.get('team2_name', 'Team 2')
     if team1_id:
         try:
             team1_id = int(team1_id)
@@ -1490,6 +1510,21 @@ def simulate_match_stream():
             team2_id = int(team2_id)
         except (ValueError, TypeError):
             team2_id = None
+    
+    # Track data quality warnings
+    stream_data_warnings = []
+    if not team1_id:
+        stream_data_warnings.append(
+            f"'{team1_name}' has no database ID. Using default ELO (1500). "
+            f"Prediction may be unreliable."
+        )
+        logger.warning(f"[SIM_STREAM WARNING] Team1 '{team1_name}' has no database ID -- using default ELO 1500")
+    if not team2_id:
+        stream_data_warnings.append(
+            f"'{team2_name}' has no database ID. Using default ELO (1500). "
+            f"Prediction may be unreliable."
+        )
+        logger.warning(f"[SIM_STREAM WARNING] Team2 '{team2_name}' has no database ID -- using default ELO 1500")
     
     # CRICKET XI LOGIC: Batting order = top-order batters + bowlers at tail
     # This ensures 11 UNIQUE players (no duplicates possible)
@@ -1588,6 +1623,10 @@ def simulate_match_stream():
         t2_names = [frontend_player_names.get(str(pid), f"?{pid}") for pid in team2_batting_order]
         logger.info(f"[SIM_AUDIT] Team 1 XI names: {t1_names}")
         logger.info(f"[SIM_AUDIT] Team 2 XI names: {t2_names}")
+    if not team1_id:
+        logger.warning(f"[SIM_AUDIT] CAUTION: Team 1 '{team1_name_audit}' has no database ID -- using default ELO 1500. Results may be unreliable.")
+    if not team2_id:
+        logger.warning(f"[SIM_AUDIT] CAUTION: Team 2 '{team2_name_audit}' has no database ID -- using default ELO 1500. Results may be unreliable.")
     logger.info(f"[SIM_AUDIT] ========================================")
     
     logger.info(f"Team 1 batting order: {len(team1_batting_order)} unique players")
@@ -1715,7 +1754,8 @@ def simulate_match_stream():
                 'elapsed_ms': round(elapsed * 1000, 1),
                 'venue_id': venue_id,
                 'toss_info': toss_info,
-                'gender': gender
+                'gender': gender,
+                'data_warnings': stream_data_warnings if stream_data_warnings else None
             }
             
             # Generate scorecard for NN simulator
@@ -3335,9 +3375,26 @@ def get_crex_match():
                 'spin_pct': stats.spin_pct
             }
         
+        # Collect any warnings from the scraper (auto-created teams, unmatched teams, etc.)
+        match_warnings = list(scraper._warnings)
+        scraper._warnings.clear()
+        
+        # Add warnings for teams that still have no DB match
+        if not team1_db:
+            match_warnings.append(
+                f"Team '{match.team1_name}' could not be identified. "
+                f"Using default ELO (1500). Prediction will be unreliable."
+            )
+        if not team2_db:
+            match_warnings.append(
+                f"Team '{match.team2_name}' could not be identified. "
+                f"Using default ELO (1500). Prediction will be unreliable."
+            )
+        
         result = {
             'success': True,
             'source': 'crex',
+            'warnings': match_warnings,
             'match': {
                 'crex_id': match.crex_id,
                 'title': match.title,

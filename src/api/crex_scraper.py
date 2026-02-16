@@ -154,6 +154,7 @@ class CREXScraper:
         self.request_delay = request_delay
         self._last_request_time = 0
         self._name_matcher = None
+        self._warnings = []  # Collects warnings during team/venue matching
     
     def _rate_limit(self):
         """Enforce rate limiting between requests."""
@@ -294,10 +295,31 @@ class CREXScraper:
         
         # Final check: if venue starts with city name (from previous repetition),
         # e.g., "Bangkok Terdthai Cricket Ground, Bangkok" -> strip the leading "Bangkok "
+        # BUT only strip if the city prefix is truly redundant. Don't strip if the city
+        # name IS part of the proper venue name (e.g., "Sydney Cricket Ground",
+        # "Melbourne Cricket Ground", "Eden Gardens").
+        # We detect this by checking if what remains after stripping is purely generic
+        # venue words -- if so, the city is part of the name and must stay.
+        generic_venue_words = {
+            'cricket', 'international', 'sports', 'national', 'provincial',
+            'municipal', 'city', 'regional', 'central', 'new', 'old', 'the',
+        }
+        generic_venue_words.update(kw.lower() for kw in venue_keywords)
+        
         if ',' in venue_name:
             city = venue_name.split(',')[-1].strip()
             if city and venue_name.lower().startswith(city.lower() + ' '):
-                venue_name = venue_name[len(city):].strip()
+                stripped = venue_name[len(city):].strip()
+                # Check if stripped text (before city suffix) is all generic venue words
+                name_part = stripped.split(',')[0].strip()  # "Cricket Ground"
+                words = [w.lower() for w in name_part.split() if w.strip()]
+                all_generic = all(w in generic_venue_words for w in words)
+                if not all_generic:
+                    # There's a unique name in there -> safe to strip city prefix
+                    # e.g., "Bangkok Terdthai Cricket Ground" -> "Terdthai Cricket Ground"
+                    venue_name = stripped
+                # else: city IS part of the venue name, don't strip
+                # e.g., "Sydney Cricket Ground" stays as is
         
         return venue_name
     
@@ -1895,6 +1917,10 @@ class CREXScraper:
         """
         Match CREX team to database team.
         
+        Uses a two-pass approach:
+        1. First searches teams with T20 match history (preferred -- confirms real participant)
+        2. Falls back to ALL teams in the database (catches manually-inserted teams like Afghanistan)
+        
         Args:
             team: CREX team data
             gender: 'male' or 'female' for team filtering
@@ -1908,6 +1934,7 @@ class CREXScraper:
         conn = get_connection()
         cursor = conn.cursor()
         
+        # Pass 1: Teams with T20 match history (most reliable)
         cursor.execute("""
             SELECT DISTINCT t.team_id, t.name
             FROM teams t
@@ -2066,42 +2093,141 @@ class CREXScraper:
                     return word
             return None
         
-        best_match = None
-        best_score = 0.0
-        
-        for row in db_teams:
-            db_name = row['name']
-            db_direction = get_direction(db_name)
+        def _match_against_candidates(candidates, source_label):
+            """Try to match team_names against a list of DB team candidates."""
+            from difflib import SequenceMatcher
+            best_match = None
+            best_score = 0.0
             
-            for crex_name in team_names:
-                # Normalize for comparison
-                crex_norm = crex_name.lower().replace(' women', '').replace('-w', '').strip()
-                db_norm = db_name.lower().strip()
+            for row in candidates:
+                db_name = row['name']
+                db_direction = get_direction(db_name)
                 
-                crex_direction = get_direction(crex_name)
-                
-                # If both have direction words, they MUST match (Northern != Southern)
-                if crex_direction and db_direction:
-                    if crex_direction != db_direction:
-                        continue  # Skip - wrong direction
-                
-                # Exact match
-                if crex_norm == db_norm:
-                    return (row['team_id'], row['name'])
-                
-                # Fuzzy match
-                from difflib import SequenceMatcher
-                score = SequenceMatcher(None, crex_norm, db_norm).ratio()
-                
-                if score > best_score:
-                    best_score = score
-                    best_match = (row['team_id'], row['name'])
+                for crex_name in team_names:
+                    crex_norm = crex_name.lower().replace(' women', '').replace('-w', '').strip()
+                    db_norm = db_name.lower().strip()
+                    
+                    crex_direction = get_direction(crex_name)
+                    
+                    if crex_direction and db_direction:
+                        if crex_direction != db_direction:
+                            continue
+                    
+                    if crex_norm == db_norm:
+                        logger.info(f"Matched team '{team.name}' to '{db_name}' (exact, {source_label})")
+                        return (row['team_id'], row['name'])
+                    
+                    score = SequenceMatcher(None, crex_norm, db_norm).ratio()
+                    if score > best_score:
+                        best_score = score
+                        best_match = (row['team_id'], row['name'])
+            
+            if best_match and best_score >= 0.8:
+                logger.info(f"Matched team '{team.name}' to '{best_match[1]}' "
+                            f"(score: {best_score:.2f}, {source_label})")
+                return best_match
+            return None
         
-        if best_match and best_score >= 0.8:  # Increased threshold from 0.7 to 0.8
-            logger.info(f"Matched team '{team.name}' to '{best_match[1]}' (score: {best_score:.2f})")
-            return best_match
+        # Pass 1: Match against teams with T20 match history
+        result = _match_against_candidates(db_teams, "pass 1: match history")
+        if result:
+            return result
         
+        # Pass 2: Fall back to ALL teams in DB (catches manually-inserted teams)
+        logger.info(f"[TEAM MATCH] Pass 1 failed for '{team.name}', trying all teams (pass 2)...")
+        conn2 = get_connection()
+        cursor2 = conn2.cursor()
+        cursor2.execute("SELECT team_id, name FROM teams")
+        all_teams = cursor2.fetchall()
+        conn2.close()
+        
+        result = _match_against_candidates(all_teams, "pass 2: all teams")
+        if result:
+            return result
+        
+        # Pass 3: Known ICC teams safety net -- auto-create if recognized
+        from config import KNOWN_ICC_TEAMS
+        team_name_lower = team.name.lower().strip()
+        # Also check expanded team_names (which include abbreviation expansions)
+        matched_icc_key = None
+        for candidate in team_names:
+            candidate_norm = candidate.lower().replace(' women', '').replace('-w', '').strip()
+            if candidate_norm in KNOWN_ICC_TEAMS:
+                matched_icc_key = candidate_norm
+                break
+        
+        if matched_icc_key:
+            icc_info = KNOWN_ICC_TEAMS[matched_icc_key]
+            canonical_name = matched_icc_key.title()
+            # Handle multi-word names
+            if matched_icc_key == 'united arab emirates':
+                canonical_name = 'United Arab Emirates'
+            elif matched_icc_key == 'united states of america':
+                canonical_name = 'United States of America'
+            elif matched_icc_key == 'new zealand':
+                canonical_name = 'New Zealand'
+            elif matched_icc_key == 'south africa':
+                canonical_name = 'South Africa'
+            elif matched_icc_key == 'sri lanka':
+                canonical_name = 'Sri Lanka'
+            elif matched_icc_key == 'west indies':
+                canonical_name = 'West Indies'
+            elif matched_icc_key == 'hong kong':
+                canonical_name = 'Hong Kong'
+            elif matched_icc_key == 'papua new guinea':
+                canonical_name = 'Papua New Guinea'
+            
+            logger.warning(
+                f"[ICC SAFETY NET] '{team.name}' is a known ICC team but not in database. "
+                f"Auto-creating '{canonical_name}' with tier={icc_info['tier']}."
+            )
+            
+            conn3 = get_connection()
+            cursor3 = conn3.cursor()
+            try:
+                cursor3.execute("""
+                    INSERT INTO teams (name, country_code, is_international, team_type, tier, tier_notes)
+                    VALUES (?, ?, 1, ?, ?, ?)
+                """, (
+                    canonical_name,
+                    canonical_name[:3].upper(),
+                    icc_info['team_type'],
+                    icc_info['tier'],
+                    f"Auto-created by ICC safety net (was missing from database)"
+                ))
+                new_team_id = cursor3.lastrowid
+                
+                # Insert default ELO
+                elo_col = f'default_elo_t20_{gender}'
+                default_elo = icc_info.get(elo_col, 1500.0)
+                cursor3.execute("""
+                    INSERT INTO team_current_elo (team_id, elo_t20_male, elo_odi_male)
+                    VALUES (?, ?, ?)
+                """, (new_team_id, icc_info.get('default_elo_t20_male', 1500.0),
+                      icc_info.get('default_elo_odi_male', 1450.0)))
+                
+                conn3.commit()
+                warn_msg = (
+                    f"'{canonical_name}' was not in the database and was auto-created "
+                    f"with estimated ELO {icc_info.get('default_elo_t20_male', 1500.0):.0f} (tier {icc_info['tier']}). "
+                    f"Prediction reliability may be reduced."
+                )
+                logger.warning(f"[ICC SAFETY NET] Created team '{canonical_name}' (id={new_team_id}, "
+                               f"tier={icc_info['tier']}, T20m ELO={icc_info.get('default_elo_t20_male', 1500.0)})")
+                self._warnings.append(warn_msg)
+                return (new_team_id, canonical_name)
+            except Exception as e:
+                logger.error(f"[ICC SAFETY NET] Failed to auto-create team '{canonical_name}': {e}")
+                conn3.rollback()
+            finally:
+                conn3.close()
+        
+        warn_msg = (
+            f"'{team.name}' could not be matched to any team in the database. "
+            f"Using default ELO (1500). Prediction will be unreliable."
+        )
         logger.warning(f"No database match for team: {team.name}")
+        self._warnings.append(warn_msg)
         return None
     
     def match_players_to_db(self, team: CREXTeam, db_team_name: str, gender: str = 'male') -> List[CREXPlayer]:

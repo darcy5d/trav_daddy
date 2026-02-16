@@ -129,3 +129,36 @@ BALL_OUTCOMES = {
     "wickets": ["bowled", "caught", "lbw", "run out", "stumped", "hit wicket"],
 }
 
+# Known ICC teams safety net
+# When a team is scraped from CREX but cannot be matched to the database,
+# check this list. If the team is a known ICC member, auto-create it with
+# the specified tier and default ELO. This prevents phantom "Unknown" teams
+# from producing misleading predictions.
+KNOWN_ICC_TEAMS = {
+    # Full Members (Tier 1)
+    'afghanistan': {'tier': 1, 'team_type': 'international', 'default_elo_t20_male': 1700.0, 'default_elo_odi_male': 1650.0},
+    'australia': {'tier': 1, 'team_type': 'international', 'default_elo_t20_male': 1650.0, 'default_elo_odi_male': 1650.0},
+    'bangladesh': {'tier': 1, 'team_type': 'international', 'default_elo_t20_male': 1600.0, 'default_elo_odi_male': 1600.0},
+    'england': {'tier': 1, 'team_type': 'international', 'default_elo_t20_male': 1650.0, 'default_elo_odi_male': 1650.0},
+    'india': {'tier': 1, 'team_type': 'international', 'default_elo_t20_male': 1650.0, 'default_elo_odi_male': 1650.0},
+    'ireland': {'tier': 1, 'team_type': 'international', 'default_elo_t20_male': 1550.0, 'default_elo_odi_male': 1550.0},
+    'new zealand': {'tier': 1, 'team_type': 'international', 'default_elo_t20_male': 1650.0, 'default_elo_odi_male': 1650.0},
+    'pakistan': {'tier': 1, 'team_type': 'international', 'default_elo_t20_male': 1650.0, 'default_elo_odi_male': 1650.0},
+    'south africa': {'tier': 1, 'team_type': 'international', 'default_elo_t20_male': 1650.0, 'default_elo_odi_male': 1650.0},
+    'sri lanka': {'tier': 1, 'team_type': 'international', 'default_elo_t20_male': 1600.0, 'default_elo_odi_male': 1600.0},
+    'west indies': {'tier': 1, 'team_type': 'international', 'default_elo_t20_male': 1600.0, 'default_elo_odi_male': 1600.0},
+    'zimbabwe': {'tier': 1, 'team_type': 'international', 'default_elo_t20_male': 1550.0, 'default_elo_odi_male': 1550.0},
+    # Top Associates (Tier 2)
+    'canada': {'tier': 2, 'team_type': 'international', 'default_elo_t20_male': 1500.0, 'default_elo_odi_male': 1450.0},
+    'hong kong': {'tier': 2, 'team_type': 'international', 'default_elo_t20_male': 1450.0, 'default_elo_odi_male': 1400.0},
+    'namibia': {'tier': 2, 'team_type': 'international', 'default_elo_t20_male': 1550.0, 'default_elo_odi_male': 1500.0},
+    'nepal': {'tier': 2, 'team_type': 'international', 'default_elo_t20_male': 1550.0, 'default_elo_odi_male': 1500.0},
+    'netherlands': {'tier': 2, 'team_type': 'international', 'default_elo_t20_male': 1500.0, 'default_elo_odi_male': 1500.0},
+    'oman': {'tier': 2, 'team_type': 'international', 'default_elo_t20_male': 1450.0, 'default_elo_odi_male': 1400.0},
+    'papua new guinea': {'tier': 2, 'team_type': 'international', 'default_elo_t20_male': 1450.0, 'default_elo_odi_male': 1400.0},
+    'scotland': {'tier': 2, 'team_type': 'international', 'default_elo_t20_male': 1550.0, 'default_elo_odi_male': 1500.0},
+    'united arab emirates': {'tier': 2, 'team_type': 'international', 'default_elo_t20_male': 1500.0, 'default_elo_odi_male': 1450.0},
+    'united states of america': {'tier': 2, 'team_type': 'international', 'default_elo_t20_male': 1500.0, 'default_elo_odi_male': 1450.0},
+    'uganda': {'tier': 2, 'team_type': 'international', 'default_elo_t20_male': 1500.0, 'default_elo_odi_male': 1450.0},
+}
+
