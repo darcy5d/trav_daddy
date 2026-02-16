@@ -136,7 +136,7 @@ BALL_OUTCOMES = {
 # from producing misleading predictions.
 KNOWN_ICC_TEAMS = {
     # Full Members (Tier 1)
-    'afghanistan': {'tier': 1, 'team_type': 'international', 'default_elo_t20_male': 1700.0, 'default_elo_odi_male': 1650.0},
+    'afghanistan': {'tier': 1, 'team_type': 'international', 'default_elo_t20_male': 1700.0, 'default_elo_odi_male': 1650.0, 'note': 'Cricsheet withheld all Afghanistan match data (Nov 2024) due to ICC women\'s cricket policy. ELO is manually estimated.'},
     'australia': {'tier': 1, 'team_type': 'international', 'default_elo_t20_male': 1650.0, 'default_elo_odi_male': 1650.0},
     'bangladesh': {'tier': 1, 'team_type': 'international', 'default_elo_t20_male': 1600.0, 'default_elo_odi_male': 1600.0},
     'england': {'tier': 1, 'team_type': 'international', 'default_elo_t20_male': 1650.0, 'default_elo_odi_male': 1650.0},

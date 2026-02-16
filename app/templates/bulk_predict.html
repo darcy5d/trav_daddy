@@ -432,6 +432,23 @@
         if (team2XIMatched < 6) issues.push(`Team 2: only ${team2XIMatched}/11 matched to DB`);
         if (!match.venue?.db_venue_id) issues.push('Venue not matched');
         
+        // Check team database matching -- missing team IDs mean default ELO (1500)
+        const _t1Name = match.team1?.name || match.team1_name || 'Team 1';
+        const _t2Name = match.team2?.name || match.team2_name || 'Team 2';
+        if (!match.team1_db?.team_id) issues.push(`'${_t1Name}' has no DB match (default ELO 1500)`);
+        if (!match.team2_db?.team_id) issues.push(`'${_t2Name}' has no DB match (default ELO 1500)`);
+        
+        // Merge backend warnings (e.g. Afghanistan data withholding note, auto-created teams)
+        // These also trigger "Needs Review" so the user must acknowledge before simulation.
+        // Skip warnings about unmatched teams -- already covered by team ID checks above.
+        const backendWarnings = matchData.warnings || [];
+        for (const w of backendWarnings) {
+            const isUnmatchedTeamWarning = w.includes('could not be matched') || w.includes('Using default ELO (1500)');
+            if (!isUnmatchedTeamWarning) {
+                issues.push(w);
+            }
+        }
+        
         const team1Name = match.team1_db?.name || match.team1?.name || match.team1_name || 'Team 1';
         const team2Name = match.team2_db?.name || match.team2?.name || match.team2_name || 'Team 2';
         const venueId = match.venue?.db_venue_id || null;
@@ -519,11 +536,6 @@
                                 </div>
                             </div>
                         </div>
-                        ${warnings && warnings.length > 0 ? `
-                        <div style="margin-top: 0.75rem; padding: 0.5rem; background: rgba(245, 158, 11, 0.15); border: 1px solid rgba(245, 158, 11, 0.4); border-radius: 4px; font-size: 0.8rem; color: var(--accent-warning);">
-                            <strong>&#9888; Data Warning:</strong> ${warnings.join(' | ')}
-                        </div>
-                        ` : ''}
                         ${info.issues.length > 0 ? `
                         <div style="margin-top: 0.75rem; padding: 0.5rem; background: rgba(245, 158, 11, 0.1); border-radius: 4px; font-size: 0.8rem; color: var(--accent-warning);">
                             Issues: ${info.issues.join(' | ')}
@@ -1023,8 +1035,8 @@
                     const t1Fav = t1Pct >= t2Pct;
                     
                     const hasDataWarnings = finalResult.data_warnings && finalResult.data_warnings.length > 0;
-                    const warningBanner = hasDataWarnings
-                        ? `<div style="font-size: 0.65rem; color: var(--accent-warning); margin-top: 0.2rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;" title="${finalResult.data_warnings.join(' | ')}">&#9888; ${finalResult.data_warnings[0]}</div>`
+                    const warningIcon = hasDataWarnings
+                        ? `<span style="color: var(--accent-warning); cursor: help;" title="${finalResult.data_warnings.join(' | ')}">&#9888;</span>`
                         : '';
                     
                     resultCell.innerHTML = `
@@ -1040,10 +1052,9 @@
                             </div>
                             <div style="display: flex; justify-content: space-between; font-size: 0.7rem; color: var(--text-muted); margin-top: 0.15rem;">
                                 <span>Avg ${finalResult.avg_team1_score}</span>
-                                <span>${(finalResult.elapsed_ms / 1000).toFixed(1)}s</span>
+                                <span>${warningIcon} ${(finalResult.elapsed_ms / 1000).toFixed(1)}s</span>
                                 <span>Avg ${finalResult.avg_team2_score}</span>
                             </div>
-                            ${warningBanner}
                         </div>
                     `;
                     

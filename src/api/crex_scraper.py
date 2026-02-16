@@ -2141,12 +2141,24 @@ class CREXScraper:
         all_teams = cursor2.fetchall()
         conn2.close()
         
+        from config import KNOWN_ICC_TEAMS
+        
         result = _match_against_candidates(all_teams, "pass 2: all teams")
         if result:
+            # Check if this team has a note in KNOWN_ICC_TEAMS (e.g. Afghanistan data withholding)
+            matched_name_lower = result[1].lower().strip()
+            if matched_name_lower in KNOWN_ICC_TEAMS:
+                icc_entry = KNOWN_ICC_TEAMS[matched_name_lower]
+                if icc_entry.get('note'):
+                    warn_msg = (
+                        f"'{result[1]}' matched with estimated ELO (no match history). "
+                        f"{icc_entry['note']}"
+                    )
+                    self._warnings.append(warn_msg)
+                    logger.info(f"[TEAM MATCH] Added note for '{result[1]}': {icc_entry['note']}")
             return result
         
         # Pass 3: Known ICC teams safety net -- auto-create if recognized
-        from config import KNOWN_ICC_TEAMS
         team_name_lower = team.name.lower().strip()
         # Also check expanded team_names (which include abbreviation expansions)
         matched_icc_key = None
@@ -2212,6 +2224,8 @@ class CREXScraper:
                     f"with estimated ELO {icc_info.get('default_elo_t20_male', 1500.0):.0f} (tier {icc_info['tier']}). "
                     f"Prediction reliability may be reduced."
                 )
+                if icc_info.get('note'):
+                    warn_msg += f" Note: {icc_info['note']}"
                 logger.warning(f"[ICC SAFETY NET] Created team '{canonical_name}' (id={new_team_id}, "
                                f"tier={icc_info['tier']}, T20m ELO={icc_info.get('default_elo_t20_male', 1500.0)})")
                 self._warnings.append(warn_msg)
