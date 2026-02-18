@@ -294,6 +294,7 @@
     <div style="font-size: 0.85rem; color: var(--text-secondary);">
         Est. remaining: <strong id="eta-total-time" style="color: var(--accent-secondary); font-family: 'JetBrains Mono', monospace;">--</strong>
     </div>
+    <div id="bulk-run-summary" style="font-size: 0.8rem; color: var(--text-secondary); margin-top: 0.5rem;"></div>
 </div>
 
 <!-- Empty state -->
@@ -313,6 +314,18 @@
     let simulationAborted = false;
     let currentAbortController = null;
     let venuesCache = null; // Cache venue list so we only fetch once
+    let availablePredictionModels = []; // { gender, format }[] from GET /api/prediction/available-models
+
+    function hasModelFor(gender, format) {
+        const fmt = (format || 'T20').toUpperCase();
+        return availablePredictionModels.some(m => m.gender === gender && (m.format || 'T20').toUpperCase() === fmt);
+    }
+
+    function modelFormatFromDisplayFormat(format) {
+        const f = (format || 'T20').toUpperCase();
+        if (f === 'T10' || f === '100') return 'T20';
+        return f;
+    }
     
     // ============================================================
     // ROLE NORMALIZATION (same as predict.html)
@@ -365,7 +378,7 @@
     // ============================================================
     // BUILD SIMULATION PAYLOAD (same logic as runSimulation in predict.html)
     // ============================================================
-    function buildPayload(team1Selected, team2Selected, venueId, gender, nSims, useToss, team1Id, team2Id, team1Name, team2Name) {
+    function buildPayload(team1Selected, team2Selected, venueId, gender, format, nSims, useToss, team1Id, team2Id, team1Name, team2Name) {
         // Helper: get player ID, assigning negative placeholders for unmatched players.
         // Every player in the XI MUST be sent to the simulator (cricket always has 11 batters).
         // The simulator uses default distributions for unknown IDs.
@@ -406,6 +419,7 @@
             venue_id: venueId,
             use_toss: useToss,
             gender: gender,
+            format: (format || 'T20').toUpperCase(),
             team1_id: team1Id || null,
             team2_id: team2Id || null,
             team1_name: team1Name || 'Team 1',
@@ -509,6 +523,11 @@
         const genderClass = info.gender === 'female' ? 'tag-gender-female' : 'tag-gender-male';
         const formatUpper = (info.format || 'T20').toUpperCase();
         const formatClass = formatUpper === 'ODI' ? 'tag-format-odi' : (formatUpper === 'TEST' ? 'tag-format-test' : 'tag-format-t20');
+        const modelFmt = modelFormatFromDisplayFormat(info.format);
+        const modelAvailable = availablePredictionModels.length === 0 ? null : hasModelFor(info.gender || 'male', modelFmt);
+        const modelIcon = modelAvailable === null ? '' : (modelAvailable
+            ? ' <span title="Model available" style="color: var(--accent-primary);">✓</span>'
+            : ' <span title="No active model" style="color: var(--accent-warning);">⚠</span>');
         
         let row = `
             <tr id="row-${idx}" data-url="${url}">
@@ -517,7 +536,7 @@
                 </td>
                 <td style="font-weight: 500;">${info.team1Name} vs ${info.team2Name}</td>
                 <td style="text-align: center;"><span class="tag-gender ${genderClass}">${genderLabel}</span></td>
-                <td style="text-align: center;"><span class="tag-format ${formatClass}">${formatUpper}</span></td>
+                <td style="text-align: center;"><span class="tag-format ${formatClass}">${formatUpper}</span>${modelIcon}</td>
                 <td><span class="${info.team1Matched >= 6 ? '' : 'status-review'}">${t1SquadText} matched</span></td>
                 <td><span class="${info.team2Matched >= 6 ? '' : 'status-review'}">${t2SquadText} matched</span></td>
                 <td>${venueText}</td>
@@ -579,6 +598,8 @@
         
         document.getElementById(`status-${idx}`).textContent = 'Skipped';
         document.getElementById(`status-${idx}`).className = 'status-skipped';
+        const resultCellSkip = document.getElementById(`result-cell-${idx}`);
+        if (resultCellSkip) resultCellSkip.innerHTML = '<span class="status-skipped" title="Skipped by user">Skipped</span>';
         document.getElementById(`expand-${idx}`).style.display = 'none';
         updateReviewSummary();
     }
@@ -922,12 +943,86 @@
         // Show total ETA bar
         const etaBar = document.getElementById('total-eta-bar');
         etaBar.style.display = 'flex';
-        document.getElementById('eta-matches-total').textContent = readyCount;
+        const summaryEl = document.getElementById('bulk-run-summary');
+        if (summaryEl) summaryEl.textContent = '';
         document.getElementById('eta-matches-done').textContent = '0';
         
-        // Initial total ETA estimate (will be refined once first progress comes in)
-        document.getElementById('eta-total-time').textContent = 'calculating...';
+        // Snapshot matches that are not ready (needs review) so we can report them and update their result cells later
+        const needsReviewAtStartNames = [];
+        const needsReviewAtStartIndices = [];
+        let idxSnapshot = 0;
+        matchDataStore.forEach(entry => {
+            if (entry.status !== 'ready') {
+                const info = entry.info;
+                if (info) {
+                    needsReviewAtStartNames.push(`${info.team1Name} vs ${info.team2Name}`);
+                    needsReviewAtStartIndices.push(idxSnapshot);
+                }
+            }
+            idxSnapshot++;
+        });
+
+        // Pre-loop: mark ready matches without an active model as skipped; build skippedNoModelNames and runnableCount
+        const skippedNoModelNames = [];
+        let idxPre = 0;
+        for (const [url, entry] of matchDataStore) {
+            if (entry.status !== 'ready') { idxPre++; continue; }
+            const info = entry.info;
+            const g = entry.gender || info.gender || 'male';
+            const modelFmt = modelFormatFromDisplayFormat(info.format);
+            if (availablePredictionModels.length > 0 && !hasModelFor(g, modelFmt)) {
+                entry.status = 'skipped';
+                const label = info.gender === 'female' ? "Women's" : "Men's";
+                const formatLabel = (info.format || 'T20').toUpperCase();
+                const matchName = `${info.team1Name} vs ${info.team2Name}`;
+                skippedNoModelNames.push(matchName);
+                const statusElPre = document.getElementById(`status-${idxPre}`);
+                const resultCellPre = document.getElementById(`result-cell-${idxPre}`);
+                if (statusElPre) {
+                    statusElPre.textContent = 'Skipped (no model)';
+                    statusElPre.className = 'status-skipped';
+                }
+                if (resultCellPre) {
+                    resultCellPre.innerHTML = `<span class="status-skipped" title="No active model for ${label} ${formatLabel}">No model – ${label} ${formatLabel}</span>`;
+                }
+            }
+            idxPre++;
+        }
+        updateReviewSummary();
         
+        let runnableCount = 0;
+        matchDataStore.forEach(e => { if (e.status === 'ready') runnableCount++; });
+        
+        if (runnableCount === 0) {
+            simulationRunning = false;
+            runBtn.disabled = false;
+            runBtn.textContent = 'Run simulations';
+            stopBtn.style.display = 'none';
+            document.getElementById('eta-matches-total').textContent = '0';
+            needsReviewAtStartIndices.forEach(rowIdx => {
+                const resultCell = document.getElementById(`result-cell-${rowIdx}`);
+                if (resultCell) {
+                    resultCell.innerHTML = '<span class="status-skipped" title="Match was not ready (e.g. incomplete squads, venue not matched)">Not run – needs review</span>';
+                }
+            });
+            const timeEl0 = document.getElementById('eta-total-time');
+            timeEl0.textContent = 'No matches run.';
+            timeEl0.style.color = 'var(--accent-warning, #f59e0b)';
+            if (summaryEl) {
+                const parts = ['0 run.'];
+                if (skippedNoModelNames.length > 0) parts.push('Skipped (no model): ' + skippedNoModelNames.join(', ') + '.');
+                if (needsReviewAtStartNames.length > 0) parts.push(needsReviewAtStartNames.length + ' not run (needs review): ' + needsReviewAtStartNames.join(', ') + '.');
+                summaryEl.textContent = parts.join(' ');
+            }
+            return;
+        }
+        
+        document.getElementById('eta-matches-total').textContent = runnableCount;
+        document.getElementById('eta-total-time').textContent = 'calculating...';
+        document.getElementById('eta-total-time').style.color = 'var(--accent-secondary)';
+        
+        let hadSimulationError = false;
+        let runErrorCount = 0;
         let idx = 0;
         for (const [url, entry] of matchDataStore) {
             if (entry.status !== 'ready') {
@@ -966,9 +1061,10 @@
             // correctly detects gender from series data), then fall back to info.gender
             // (from CREX API response) which can sometimes lose gender for "A" teams.
             const simGender = entry.gender || info.gender || 'male';
+            const modelFmt = modelFormatFromDisplayFormat(info.format);
             const payload = buildPayload(
                 info.team1XI, info.team2XI,
-                info.venueId, simGender, nSims, useToss,
+                info.venueId, simGender, modelFmt, nSims, useToss,
                 info.team1Id, info.team2Id,
                 info.team1Name, info.team2Name
             );
@@ -984,6 +1080,29 @@
                     body: JSON.stringify(payload),
                     signal: currentAbortController.signal
                 });
+                
+                if (!response.ok) {
+                    hadSimulationError = true;
+                    runErrorCount++;
+                    const errData = await response.json().catch(() => ({}));
+                    const msg = errData.error || `Request failed (${response.status})`;
+                    if (resultCell) {
+                        resultCell.innerHTML = `<span class="status-error" title="${msg}">Error</span>`;
+                    }
+                    if (statusEl) {
+                        statusEl.textContent = 'Error';
+                        statusEl.className = 'status-error';
+                    }
+                    matchesDone++;
+                    document.getElementById('eta-matches-done').textContent = matchesDone;
+                    const timeEl = document.getElementById('eta-total-time');
+                    if (timeEl) {
+                        timeEl.textContent = 'Failed – ' + (errData.error || msg);
+                        timeEl.style.color = 'var(--accent-warning, #f59e0b)';
+                    }
+                    idx++;
+                    continue;
+                }
                 
                 const reader = response.body.getReader();
                 const decoder = new TextDecoder();
@@ -1017,7 +1136,7 @@
                                     // Track latest rate for total ETA calculation
                                     if (msg.rate) {
                                         lastKnownRate = msg.rate;
-                                        updateTotalETA(matchesDone, readyCount, nSims, msg.rate, msg.eta_seconds);
+                                        updateTotalETA(matchesDone, runnableCount, nSims, msg.rate, msg.eta_seconds);
                                     }
                                     
                                     // Feed convergence chart
@@ -1069,8 +1188,10 @@
                     statusEl.className = 'status-done';
                     matchesDone++;
                     document.getElementById('eta-matches-done').textContent = matchesDone;
-                    updateTotalETA(matchesDone, readyCount, nSims, lastKnownRate, 0);
+                    updateTotalETA(matchesDone, runnableCount, nSims, lastKnownRate, 0);
                 } else {
+                    hadSimulationError = true;
+                    runErrorCount++;
                     entry.status = 'review';
                     statusEl.textContent = 'Error';
                     statusEl.className = 'status-error';
@@ -1085,6 +1206,8 @@
                     statusEl.className = 'status-skipped';
                     resultCell.innerHTML = '<span style="color: var(--text-muted); font-size: 0.8rem;">Stopped</span>';
                 } else {
+                    hadSimulationError = true;
+                    runErrorCount++;
                     entry.status = 'review';
                     statusEl.textContent = 'Error';
                     statusEl.className = 'status-error';
@@ -1103,9 +1226,33 @@
         stopBtn.style.display = 'none';
         simulationRunning = false;
         
-        // Update total ETA bar to show completion
-        document.getElementById('eta-total-time').textContent = 'Complete';
-        document.getElementById('eta-total-time').style.color = 'var(--accent-primary)';
+        // Final report: runSuccess count, summary text, and set result cells for "not run (needs review)" rows
+        let runSuccess = 0;
+        matchDataStore.forEach(e => { if (e.status === 'done') runSuccess++; });
+        needsReviewAtStartIndices.forEach(rowIdx => {
+            const resultCell = document.getElementById(`result-cell-${rowIdx}`);
+            if (resultCell) {
+                resultCell.innerHTML = '<span class="status-skipped" title="Match was not ready (e.g. incomplete squads, venue not matched)">Not run – needs review</span>';
+            }
+        });
+        const timeEl = document.getElementById('eta-total-time');
+        if (hadSimulationError) {
+            timeEl.textContent = 'Finished with errors';
+            timeEl.style.color = 'var(--accent-warning, #f59e0b)';
+        } else {
+            timeEl.textContent = 'Complete.';
+            timeEl.style.color = 'var(--accent-primary)';
+        }
+        const skipList = skippedNoModelNames.length > 0 ? skippedNoModelNames.join(', ') : '';
+        const needsReviewList = needsReviewAtStartNames.length > 0 ? needsReviewAtStartNames.join(', ') : '';
+        if (summaryEl) {
+            const parts = [];
+            parts.push(runSuccess + ' match(es) run successfully.');
+            if (skippedNoModelNames.length > 0) parts.push(skippedNoModelNames.length + ' skipped (no model): ' + skipList + '.');
+            if (needsReviewAtStartNames.length > 0) parts.push(needsReviewAtStartNames.length + ' not run (needs review): ' + needsReviewList + '.');
+            if (runErrorCount > 0) parts.push(runErrorCount + ' failed (error).');
+            summaryEl.textContent = parts.join(' ');
+        }
     }
     
     // ============================================================
@@ -1229,7 +1376,16 @@
     // ============================================================
     // INIT
     // ============================================================
-    document.addEventListener('DOMContentLoaded', () => {
+    document.addEventListener('DOMContentLoaded', async () => {
+        try {
+            const r = await fetch('/api/prediction/available-models');
+            const data = await r.json();
+            if (data.success && Array.isArray(data.available)) {
+                availablePredictionModels = data.available;
+            }
+        } catch (e) {
+            console.warn('Could not load available prediction models:', e);
+        }
         fetchAllMatches();
     });
 </script>

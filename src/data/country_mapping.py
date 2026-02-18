@@ -655,6 +655,10 @@ VENUE_TO_LOCATION = {
     # Romania
     "Moara Vlasiei Cricket Ground": ("Ilfov County", "Romania"),
     
+    # New Zealand
+    "Basin Reserve": ("Wellington", "New Zealand"),
+    "The Basin Reserve": ("Wellington", "New Zealand"),
+
     # Guyana
     "Guyana National Stadium, Providence": ("Providence", "Guyana"),
     

@@ -258,6 +258,9 @@ VENUE_ALIASES = {
     "sophia gardens": "Sophia Gardens",
     "county ground bristol": "County Ground, Bristol",
     "county ground taunton": "County Ground, Taunton",
+    # New Zealand
+    "basin reserve": "Basin Reserve",
+    "the basin reserve": "Basin Reserve",
 }
 
 

@@ -104,6 +104,15 @@ def get_toss_simulator():
     return _toss_simulator
 
 
+def has_active_model(gender: str, format_type: str) -> bool:
+    """Return True if an active model exists for (gender, format_type)."""
+    from src.data.database import get_model_versions, init_model_versions_table
+    init_model_versions_table()
+    fmt = (format_type or 'T20').upper()
+    models = get_model_versions(gender=gender, format_type=fmt, active_only=True)
+    return len(models) > 0
+
+
 # ============================================================================
 # Web Routes
 # ============================================================================
@@ -1217,6 +1226,29 @@ def optimize_team_from_squad():
         return jsonify({'success': False, 'error': str(e)}), 500
 
 
+@app.route('/api/prediction/available-models', methods=['GET'])
+def get_available_prediction_models():
+    """
+    Return (gender, format) pairs for which an active model exists.
+    Used by single and bulk predict to disable Run or show per-match model status.
+    """
+    try:
+        from src.data.database import get_model_versions, init_model_versions_table
+        init_model_versions_table()
+        models = get_model_versions(active_only=True)
+        seen = set()
+        available = []
+        for m in models:
+            key = (m['gender'], (m.get('format_type') or 'T20').upper())
+            if key not in seen:
+                seen.add(key)
+                available.append({'gender': key[0], 'format': key[1]})
+        return jsonify({'success': True, 'available': available})
+    except Exception as e:
+        logger.error(f"Error getting available models: {e}")
+        return jsonify({'success': False, 'error': str(e), 'available': []}), 500
+
+
 @app.route('/api/simulate', methods=['POST'])
 def simulate_match():
     """
@@ -1262,6 +1294,12 @@ def simulate_match():
         gender = data.get('gender', 'male')
         format_param = data.get('format', 'T20')
         model_format = format_type_to_model_format(format_param)
+
+        if not has_active_model(gender, model_format):
+            return jsonify({
+                'success': False,
+                'error': f"No active model for {gender} {model_format}. Please train a model on the Training page."
+            }), 503
 
         # Get team IDs for ELO lookup (optional - will default to 1500 if not provided)
         team1_id = data.get('team1_id')
@@ -1505,6 +1543,12 @@ def simulate_match_stream():
     format_param = data.get('format', 'T20')
     model_format = format_type_to_model_format(format_param)
     frontend_player_names = data.get('player_names', {})  # Names from frontend
+
+    if not has_active_model(gender, model_format):
+        return jsonify({
+            'success': False,
+            'error': f"No active model for {gender} {model_format}. Please train a model on the Training page."
+        }), 503
 
     # Get team IDs for ELO lookup (optional - will default to 1500 if not provided)
     team1_id = data.get('team1_id')

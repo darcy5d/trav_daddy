@@ -867,9 +867,10 @@
         </div>
         <div class="form-group">
             <label>&nbsp;</label>
-            <button class="btn btn-primary" onclick="runSimulation()" style="width: 100%;">
+            <button class="btn btn-primary" id="run-simulation-btn" onclick="runSimulation()" style="width: 100%;">
                 Run Simulation
             </button>
+            <div id="predict-model-status" class="predict-model-status" style="margin-top: 0.5rem; font-size: 0.875rem; min-height: 1.25rem;"></div>
         </div>
     </div>
 </div>
@@ -1094,6 +1095,33 @@
     let currentMatchModelFormat = 'T20';  // model format (T10/100 → T20)
     let currentSeriesId = '';
     let currentSeriesName = '';
+
+    // Available (gender, format) pairs with an active model (from GET /api/prediction/available-models)
+    let availablePredictionModels = [];
+
+    function hasModelFor(gender, format) {
+        const fmt = (format || 'T20').toUpperCase();
+        return availablePredictionModels.some(m => m.gender === gender && (m.format || 'T20').toUpperCase() === fmt);
+    }
+
+    function updatePredictModelStatus() {
+        const el = document.getElementById('predict-model-status');
+        if (!el) return;
+        if (availablePredictionModels.length === 0) {
+            el.textContent = '';
+            el.className = 'predict-model-status';
+            return;
+        }
+        const hasModel = hasModelFor(currentGender, currentMatchModelFormat);
+        const genderLabel = currentGender === 'female' ? "Women's" : "Men's";
+        if (hasModel) {
+            el.textContent = `Model: ${genderLabel} ${currentMatchModelFormat}`;
+            el.className = 'predict-model-status text-success';
+        } else {
+            el.textContent = `No active model for ${genderLabel} ${currentMatchModelFormat}. Train a model on the Training page.`;
+            el.className = 'predict-model-status text-warning';
+        }
+    }
     
     // Data source: 'crex', 'espn', or 'api'
     let currentDataSource = 'crex';
@@ -1709,7 +1737,7 @@
     }
     
     // Initialize on page load
-    document.addEventListener('DOMContentLoaded', () => {
+    document.addEventListener('DOMContentLoaded', async () => {
         // Set timezone dropdown to saved value
         const tzSelect = document.getElementById('timezone-select');
         if (tzSelect) {
@@ -1720,6 +1748,18 @@
         loadTeamsForTeam(2);
         loadVenues();
         loadUpcomingMatches();  // Load upcoming matches
+
+        // Fetch available prediction models for Run button state and model status
+        try {
+            const r = await fetch('/api/prediction/available-models');
+            const data = await r.json();
+            if (data.success && Array.isArray(data.available)) {
+                availablePredictionModels = data.available;
+            }
+        } catch (e) {
+            console.warn('Could not load available prediction models:', e);
+        }
+        updatePredictButtonState();
     });
     
     // Listen for timezone changes from global selector
@@ -2176,6 +2216,7 @@
         } else {
             await loadT20MatchById(matchIdOrUrl);
         }
+        updatePredictButtonState();
     }
     
     async function loadCrexMatch(matchUrl) {
@@ -3278,10 +3319,14 @@
         // Also check if venue is selected
         const venueSelected = document.getElementById('venue-select').value !== '';
         
-        // Enable predict button only if all valid
-        const predictBtn = document.querySelector('button[onclick="runSimulation()"]');
+        // Model availability: disable Run if no active model for (gender, format)
+        const modelAvailable = availablePredictionModels.length === 0 ? true : hasModelFor(currentGender, currentMatchModelFormat);
+        updatePredictModelStatus();
+
+        // Enable predict button only if all valid and model available
+        const predictBtn = document.getElementById('run-simulation-btn') || document.querySelector('button[onclick="runSimulation()"]');
         if (predictBtn) {
-            predictBtn.disabled = !(team1Errors.length === 0 && team2Errors.length === 0 && venueSelected);
+            predictBtn.disabled = !(team1Errors.length === 0 && team2Errors.length === 0 && venueSelected && modelAvailable);
         }
     }
     
@@ -3667,6 +3712,13 @@
     }
     
     async function runSimulation() {
+        // Block if no active model for current (gender, format) - backend will also return 503
+        if (availablePredictionModels.length > 0 && !hasModelFor(currentGender, currentMatchModelFormat)) {
+            const genderLabel = currentGender === 'female' ? "Women's" : "Men's";
+            alert(`No active model for ${genderLabel} ${currentMatchModelFormat}. Please train a model on the Training page.`);
+            return;
+        }
+
         // Get team names from panel data or dropdown
         const team1Name = teamPlayerData[1].teamName || document.getElementById('team1-select').selectedOptions[0]?.text || 'Team 1';
         const team2Name = teamPlayerData[2].teamName || document.getElementById('team2-select').selectedOptions[0]?.text || 'Team 2';
@@ -3831,6 +3883,14 @@
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify(payload)
             });
+            
+            if (!response.ok) {
+                const errData = await response.json().catch(() => ({}));
+                const msg = errData.error || `Request failed (${response.status})`;
+                document.getElementById('loading').style.display = 'none';
+                alert(msg);
+                return;
+            }
             
             const reader = response.body.getReader();
             const decoder = new TextDecoder();
