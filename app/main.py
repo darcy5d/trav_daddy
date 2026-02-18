@@ -22,7 +22,7 @@ N_CPU_CORES = multiprocessing.cpu_count()
 import logging
 import sys
 from pathlib import Path
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Optional
 
 # Configure TensorFlow early (before any imports that might use it)
@@ -44,9 +44,10 @@ from flask_cors import CORS
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from config import DATABASE_PATH
+from config import DATABASE_PATH, CRICSHEET_MATCHES_URL
 from src.data.database import get_connection
 from src.features.toss_stats import TossSimulator
+from src.api.crex_scraper import format_type_to_model_format
 
 # Initialize Flask app
 app = Flask(__name__)
@@ -67,6 +68,11 @@ logger = logging.getLogger(__name__)
 _fast_simulators = {}  # {'male': simulator, 'female': simulator}
 _nn_simulators = {}
 _toss_simulator = None
+
+# Cricsheet source status cache (TTL 20 minutes)
+_source_status_cache = None
+_source_status_cache_expires = None
+SOURCE_STATUS_CACHE_TTL_SECONDS = 20 * 60
 
 
 def get_fast_simulator(gender: str = 'male'):
@@ -1254,7 +1260,9 @@ def simulate_match():
         venue_id = data.get('venue_id')
         use_toss = data.get('use_toss', False)
         gender = data.get('gender', 'male')
-        
+        format_param = data.get('format', 'T20')
+        model_format = format_type_to_model_format(format_param)
+
         # Get team IDs for ELO lookup (optional - will default to 1500 if not provided)
         team1_id = data.get('team1_id')
         team2_id = data.get('team2_id')
@@ -1415,9 +1423,10 @@ def simulate_match():
             'venue_id': venue_id,
             'toss_info': toss_info,
             'gender': gender,
+            'format': model_format,
             'data_warnings': data_warnings if data_warnings else None
         }
-        
+
         # Generate detailed scorecard for NN simulator
         if simulator_type == 'nn' and hasattr(simulator, 'simulate_detailed_match'):
             try:
@@ -1493,8 +1502,10 @@ def simulate_match_stream():
     venue_id = data.get('venue_id')
     use_toss = data.get('use_toss', False)
     gender = data.get('gender', 'male')
+    format_param = data.get('format', 'T20')
+    model_format = format_type_to_model_format(format_param)
     frontend_player_names = data.get('player_names', {})  # Names from frontend
-    
+
     # Get team IDs for ELO lookup (optional - will default to 1500 if not provided)
     team1_id = data.get('team1_id')
     team2_id = data.get('team2_id')
@@ -1755,9 +1766,10 @@ def simulate_match_stream():
                 'venue_id': venue_id,
                 'toss_info': toss_info,
                 'gender': gender,
+                'format': model_format,
                 'data_warnings': stream_data_warnings if stream_data_warnings else None
             }
-            
+
             # Generate scorecard for NN simulator
             if simulator_type == 'nn' and hasattr(simulator, 'simulate_detailed_match'):
                 try:
@@ -2228,7 +2240,9 @@ def get_upcoming_matches():
                     'venue': m.venue or 'TBD',
                     'date': m.date,
                     'status': m.status,
-                    'has_squad': m.has_squad
+                    'has_squad': m.has_squad,
+                    'format': 'T20',
+                    'model_format': 'T20',
                 })
                 total_matches += 1
             
@@ -2620,7 +2634,9 @@ def get_espn_upcoming():
                 'date_time_gmt': m.date_time_gmt,  # ISO format GMT
                 'venue_city': m.venue_city,  # City name from schedule
                 'match_url': m.match_url,
-                'gender': m.gender
+                'gender': m.gender,
+                'format': 'T20',
+                'model_format': 'T20',
             })
         
         result = {
@@ -2776,21 +2792,23 @@ def get_crex_scraper():
 @app.route('/api/crex/upcoming', methods=['GET'])
 def get_crex_upcoming():
     """
-    Get upcoming T20 matches from CREX.
+    Get upcoming matches from CREX.
     
     Query params:
-        format: 'T20' or 'ODI' (default 'T20')
+        format: 'T20', 'ODI', or omit / 'all' to include all formats (default: all).
         
     Returns:
         List of upcoming matches with basic info, grouped by series
     """
     try:
-        format_type = request.args.get('format', 'T20')
-        formats = [format_type] if format_type else None
-        
+        format_param = request.args.get('format')
+        if format_param and format_param.lower() == 'all':
+            format_param = None
+        formats = [format_param] if format_param else None
+
         scraper = get_crex_scraper()
         matches = scraper.get_schedule(formats=formats)
-        
+
         # Group by series
         series_dict = {}
         for m in matches:
@@ -2802,7 +2820,7 @@ def get_crex_upcoming():
                     'gender': m.gender,
                     'matches': []
                 }
-            
+
             series_dict[series_key]['matches'].append({
                 'crex_id': m.crex_id,
                 'title': m.title,
@@ -2812,6 +2830,7 @@ def get_crex_upcoming():
                 'team2_id': m.team2_id,
                 'match_type': m.match_type,
                 'format': m.format_type,
+                'model_format': format_type_to_model_format(m.format_type),
                 'slug': m.slug,
                 'status': m.status,
                 'start_date': m.start_date,
@@ -3542,14 +3561,37 @@ def get_db_status():
         total_deliveries = cursor.fetchone()[0]
         
         conn.close()
-        
-        return jsonify({
+
+        # Optional: include Cricsheet source freshness (cached)
+        source_status = None
+        try:
+            global _source_status_cache, _source_status_cache_expires
+            now = datetime.now()
+            if (
+                _source_status_cache is not None
+                and _source_status_cache_expires is not None
+                and now < _source_status_cache_expires
+            ):
+                source_status = _source_status_cache
+            else:
+                from src.api.cricsheet_source_status import get_source_status
+                source_status = get_source_status(CRICSHEET_MATCHES_URL)
+                if source_status is not None:
+                    _source_status_cache = source_status
+                    _source_status_cache_expires = now + timedelta(seconds=SOURCE_STATUS_CACHE_TTL_SECONDS)
+        except Exception as e:
+            logger.debug("Source status fetch skipped or failed: %s", e)
+
+        payload = {
             'success': True,
             'match_stats': match_stats,
             'total_players': total_players,
             'total_teams': total_teams,
             'total_deliveries': total_deliveries
-        })
+        }
+        if source_status is not None:
+            payload['source_status'] = source_status
+        return jsonify(payload)
         
     except Exception as e:
         logger.error(f"Error getting DB status: {e}")

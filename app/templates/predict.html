@@ -17,6 +17,7 @@
     
     .segmented-control button {
         flex: 1;
+        min-width: 0;
         padding: 0.5rem 1rem;
         border: none;
         background: transparent;
@@ -26,6 +27,15 @@
         border-radius: 6px;
         cursor: pointer;
         transition: all 0.2s ease;
+    }
+
+    .segmented-control-equal {
+        width: 280px;
+    }
+    .segmented-control-equal button {
+        flex: 1;
+        min-width: 0;
+        text-align: center;
     }
     
     .segmented-control button:hover {
@@ -178,6 +188,38 @@
     
     .validation-item.info {
         color: #6b7280;
+    }
+
+    /* Format tags (T20 / ODI / Test / T10 / Hundred) */
+    .tag-format {
+        display: inline-block;
+        padding: 2px 6px;
+        border-radius: 4px;
+        font-size: 0.7rem;
+        font-weight: 600;
+        letter-spacing: 0.3px;
+        text-transform: uppercase;
+        margin-left: 0.35rem;
+    }
+    .tag-format-t20 {
+        background: rgba(16, 185, 129, 0.2);
+        color: var(--accent-primary);
+        border: 1px solid rgba(16, 185, 129, 0.35);
+    }
+    .tag-format-odi {
+        background: rgba(245, 158, 11, 0.2);
+        color: var(--text-warning, #f59e0b);
+        border: 1px solid rgba(245, 158, 11, 0.35);
+    }
+    .tag-format-test {
+        background: rgba(139, 92, 246, 0.2);
+        color: #8b5cf6;
+        border: 1px solid rgba(139, 92, 246, 0.35);
+    }
+    .tag-format-t10, .tag-format-hundred {
+        background: rgba(16, 185, 129, 0.15);
+        color: var(--accent-primary);
+        border: 1px solid rgba(16, 185, 129, 0.3);
     }
     
     .team-actions {
@@ -527,6 +569,27 @@
         <small id="source-info" style="color: var(--text-muted); display: block; margin-top: 0.25rem;">
             CREX provides comprehensive T20 coverage with squads, venue stats, and live toss data
         </small>
+    </div>
+
+    <!-- Upcoming matches filters: Gender and Format -->
+    <div style="display: flex; flex-wrap: wrap; gap: 1.5rem; margin-bottom: 1rem; align-items: flex-end;">
+        <div>
+            <span class="team-filter-label">Gender</span>
+            <div class="segmented-control segmented-control-equal" id="upcoming-gender-filter" style="width: 220px;">
+                <button class="active" data-value="all" onclick="setUpcomingGenderFilter('all')">All</button>
+                <button data-value="male" onclick="setUpcomingGenderFilter('male')">Men's</button>
+                <button data-value="female" onclick="setUpcomingGenderFilter('female')">Women's</button>
+            </div>
+        </div>
+        <div>
+            <span class="team-filter-label">Format</span>
+            <div class="segmented-control segmented-control-equal" id="upcoming-format-filter">
+                <button class="active" data-value="all" onclick="setUpcomingFormatFilter('all')">All</button>
+                <button data-value="t20" onclick="setUpcomingFormatFilter('t20')">T20</button>
+                <button data-value="odi" onclick="setUpcomingFormatFilter('odi')">ODI</button>
+                <button data-value="test" onclick="setUpcomingFormatFilter('test')">Test</button>
+            </div>
+        </div>
     </div>
     
     <div id="matches-loading" style="text-align: center; padding: 2rem;">
@@ -1027,11 +1090,18 @@
 <script>
     // Current gender selection (for API match loading)
     let currentGender = 'male';
+    let currentMatchFormat = 'T20';   // display format (T20, ODI, Test, T10, 100)
+    let currentMatchModelFormat = 'T20';  // model format (T10/100 → T20)
     let currentSeriesId = '';
     let currentSeriesName = '';
     
     // Data source: 'crex', 'espn', or 'api'
     let currentDataSource = 'crex';
+
+    // Upcoming matches list filters (client-side)
+    let upcomingMatchesRaw = null;   // full response from last load
+    let upcomingGenderFilter = 'all'; // 'all' | 'male' | 'female'
+    let upcomingFormatFilter = 'all'; // 'all' | 't20' | 'odi' | 'test'
     
     // Team filter state (for manual selection)
     const teamFilters = {
@@ -1812,6 +1882,141 @@
         document.getElementById(`team${teamNum}-batters`).innerHTML = '';
         document.getElementById(`team${teamNum}-bowlers`).innerHTML = '';
     }
+
+    function updateUpcomingFilterButtons() {
+        document.querySelectorAll('#upcoming-gender-filter button').forEach(btn => {
+            btn.classList.toggle('active', btn.dataset.value === upcomingGenderFilter);
+        });
+        document.querySelectorAll('#upcoming-format-filter button').forEach(btn => {
+            btn.classList.toggle('active', btn.dataset.value === upcomingFormatFilter);
+        });
+    }
+
+    function setUpcomingGenderFilter(val) {
+        upcomingGenderFilter = val;
+        updateUpcomingFilterButtons();
+        if (upcomingMatchesRaw) renderUpcomingMatchesList(applyUpcomingFilters(upcomingMatchesRaw));
+    }
+
+    function setUpcomingFormatFilter(val) {
+        upcomingFormatFilter = val;
+        updateUpcomingFilterButtons();
+        if (upcomingMatchesRaw) renderUpcomingMatchesList(applyUpcomingFilters(upcomingMatchesRaw));
+    }
+
+    function applyUpcomingFilters(rawData) {
+        if (!rawData || !rawData.matches_by_series) return [];
+        const result = [];
+        for (const series of rawData.matches_by_series) {
+            if (upcomingGenderFilter !== 'all' && series.gender !== upcomingGenderFilter) continue;
+            const filteredMatches = series.matches.filter(m => {
+                const fmt = (m.format || '').toUpperCase();
+                const modelFmt = (m.model_format || m.format || 'T20').toUpperCase();
+                if (upcomingFormatFilter === 'all') return true;
+                if (upcomingFormatFilter === 't20') return modelFmt === 'T20';
+                if (upcomingFormatFilter === 'odi') return modelFmt === 'ODI';
+                if (upcomingFormatFilter === 'test') return fmt === 'TEST';
+                return true;
+            });
+            if (filteredMatches.length > 0) result.push({ ...series, matches: filteredMatches });
+        }
+        return result;
+    }
+
+    function getFormatTag(format) {
+        const f = (format || 'T20').toUpperCase();
+        const map = {
+            'T20': { label: 'T20', cls: 'tag-format-t20' },
+            'ODI': { label: 'ODI', cls: 'tag-format-odi' },
+            'TEST': { label: 'Test', cls: 'tag-format-test' },
+            'T10': { label: 'T10', cls: 'tag-format-t10' },
+            'HUNDRED': { label: '100', cls: 'tag-format-hundred' },
+            '100': { label: '100', cls: 'tag-format-hundred' }
+        };
+        const t = map[f] || map['T20'];
+        return `<span class="tag-format ${t.cls}">${t.label}</span>`;
+    }
+
+    function renderUpcomingMatchesList(seriesList) {
+        const listEl = document.getElementById('matches-list');
+        const emptyEl = document.getElementById('matches-empty');
+        if (!seriesList || seriesList.length === 0) {
+            listEl.style.display = 'none';
+            emptyEl.style.display = 'block';
+            if (upcomingMatchesRaw && upcomingMatchesRaw.matches_by_series && upcomingMatchesRaw.matches_by_series.length > 0) {
+                emptyEl.innerHTML = '<p>No matches match the current filters.</p><p style="font-size: 0.875rem; margin-top: 0.5rem;">Try changing Gender or Format above.</p>';
+            } else {
+                emptyEl.innerHTML = '<p>No matches scheduled in the next 24 hours.</p><p style="font-size: 0.875rem; margin-top: 0.5rem;">You can still manually select teams below.</p>';
+            }
+            return;
+        }
+        listEl.innerHTML = '';
+        const isCrex = currentDataSource === 'crex';
+        const isEspn = currentDataSource === 'espn';
+        seriesList.forEach(series => {
+            const genderBadge = series.gender === 'female' ?
+                '<span style="background: #e91e63; color: white; padding: 2px 6px; border-radius: 4px; font-size: 0.7rem; margin-left: 0.5rem;">W</span>' :
+                '<span style="background: #2196f3; color: white; padding: 2px 6px; border-radius: 4px; font-size: 0.7rem; margin-left: 0.5rem;">M</span>';
+            const seriesFormat = (series.matches && series.matches[0] && (series.matches[0].format || series.matches[0].model_format)) || 'T20';
+            const formatBadge = getFormatTag(seriesFormat);
+            const seriesHtml = `
+                <div style="margin-bottom: 1.5rem;">
+                    <h3 style="font-size: 1rem; color: var(--accent-primary); margin-bottom: 0.5rem; display: flex; align-items: center; flex-wrap: wrap; gap: 0.35rem;">
+                        ${series.series_name} ${genderBadge} ${formatBadge}
+                    </h3>
+                    <div style="display: flex; flex-direction: column; gap: 0.5rem;">
+                        ${series.matches.map(m => {
+                            let displayDateTime = '';
+                            let countdownHtml = '';
+                            let matchTimestamp = 0;
+                            if (m.date_time_gmt) {
+                                const formatted = formatTimeInTimezone(m.date_time_gmt);
+                                if (formatted) displayDateTime = formatted;
+                                const countdown = calculateCountdown(m.date_time_gmt);
+                                if (countdown) {
+                                    matchTimestamp = countdown.timestamp;
+                                    countdownHtml = '<span class="countdown-timer" data-timestamp="' + matchTimestamp + '" style="font-weight: 600; color: ' + countdown.color + '; font-size: 0.85rem; min-width: 70px; text-align: right;">' + countdown.text + '</span>';
+                                }
+                            }
+                            if (!displayDateTime) displayDateTime = m.start_time ? m.start_time : (m.status || 'TBD');
+                            let matchTitle = (m.team1 && m.team2) ? (m.team1 + ' vs ' + m.team2) : (m.title || 'TBD vs TBD');
+                            const matchType = m.match_type || '';
+                            const matchFormat = m.format || m.model_format || 'T20';
+                            const matchModelFormat = m.model_format || matchFormat || 'T20';
+                            const matchVenue = m.venue_city || m.venue || '';
+                            const matchId = m.match_id || m.crex_id || m.espn_id || '';
+                            const matchUrl = m.match_url || '';
+                            const isExternalSource = isCrex || isEspn;
+                            const formatTagHtml = getFormatTag(matchFormat);
+                            let sourceLabel = isCrex ? '<span style="color: #4caf50; margin-left: 0.5rem;">CREX</span>' : (isEspn ? '<span style="color: #ff9800; margin-left: 0.5rem;">ESPNcricinfo</span>' : '');
+                            const escapedUrl = (isExternalSource ? matchUrl : matchId).replace(/'/g, "\\'");
+                            return `
+                            <div style="display: flex; justify-content: space-between; align-items: center; padding: 0.75rem 1rem; background: var(--bg-tertiary); border-radius: 8px; border-left: 3px solid ${series.gender === 'female' ? '#e91e63' : '#2196f3'};" data-match-url="${matchUrl}" data-gender="${series.gender || 'male'}" data-format="${matchFormat}" data-model-format="${matchModelFormat}">
+                                <div style="flex: 1;">
+                                    <div style="font-weight: 500;">${matchTitle}${matchType ? ' <span style="font-weight: 400; color: var(--text-muted); font-size: 0.85rem;">(' + matchType + ')</span>' : ''} ${formatTagHtml}</div>
+                                    <div style="font-size: 0.8rem; color: var(--text-muted);">
+                                        <span style="color: var(--text-secondary);">${displayDateTime}</span>${matchVenue ? ' • ' + matchVenue : ''}
+                                        <span class="prefetch-status" style="margin-left: 0.5rem;"></span>
+                                        ${sourceLabel}
+                                    </div>
+                                </div>
+                                <div style="display: flex; align-items: center; gap: 0.75rem;">
+                                    ${countdownHtml}
+                                    <button class="btn btn-primary" style="padding: 0.4rem 1rem; font-size: 0.85rem;" 
+                                            onclick="selectMatch('${escapedUrl}', '${series.gender}', ${isExternalSource}, '${matchFormat}', '${matchModelFormat}')">
+                                        Select
+                                    </button>
+                                </div>
+                            </div>
+                        `}).join('')}
+                    </div>
+                </div>
+            `;
+            listEl.innerHTML += seriesHtml;
+        });
+        listEl.style.display = 'block';
+        emptyEl.style.display = 'none';
+    }
     
     // Upcoming Matches Functions
     async function loadUpcomingMatches(forceRefresh = false) {
@@ -1842,124 +2047,29 @@
             console.log(`[loadUpcomingMatches] Response success: ${data.success}, series count: ${data.matches_by_series?.length || 0}`);
             
             loadingEl.style.display = 'none';
-            
+
             if (data.success && data.matches_by_series && data.matches_by_series.length > 0) {
-                listEl.innerHTML = '';
-                
-                data.matches_by_series.forEach(series => {
-                    const genderBadge = series.gender === 'female' ? 
-                        '<span style="background: #e91e63; color: white; padding: 2px 6px; border-radius: 4px; font-size: 0.7rem; margin-left: 0.5rem;">W</span>' :
-                        '<span style="background: #2196f3; color: white; padding: 2px 6px; border-radius: 4px; font-size: 0.7rem; margin-left: 0.5rem;">M</span>';
-                    
-                    const seriesHtml = `
-                        <div style="margin-bottom: 1.5rem;">
-                            <h3 style="font-size: 1rem; color: var(--accent-primary); margin-bottom: 0.5rem; display: flex; align-items: center;">
-                                ${series.series_name} ${genderBadge}
-                            </h3>
-                            <div style="display: flex; flex-direction: column; gap: 0.5rem;">
-                                ${series.matches.map(m => {
-                                    // Use timezone-aware formatting
-                                    let displayDateTime = '';
-                                    let countdownHtml = '';
-                                    let matchTimestamp = 0;
-                                    
-                                    if (m.date_time_gmt) {
-                                        // Format in selected timezone
-                                        const formatted = formatTimeInTimezone(m.date_time_gmt);
-                                        if (formatted) {
-                                            displayDateTime = formatted;
-                                        }
-                                        
-                                        // Calculate countdown
-                                        const countdown = calculateCountdown(m.date_time_gmt);
-                                        if (countdown) {
-                                            matchTimestamp = countdown.timestamp;
-                                            countdownHtml = '<span class="countdown-timer" data-timestamp="' + matchTimestamp + '" style="font-weight: 600; color: ' + countdown.color + '; font-size: 0.85rem; min-width: 70px; text-align: right;">' + countdown.text + '</span>';
-                                        }
-                                    }
-                                    
-                                    // Fallback if no parsed datetime
-                                    if (!displayDateTime) {
-                                        displayDateTime = m.start_time ? m.start_time : (m.status || 'TBD');
-                                    }
-                                    
-                                    // Handle CREX, ESPN and API data formats
-                                    let matchTitle;
-                                    if (m.team1 && m.team2) {
-                                        matchTitle = m.team1 + ' vs ' + m.team2;
-                                    } else {
-                                        matchTitle = m.title || 'TBD vs TBD';
-                                    }
-                                    const matchType = m.match_type || '';
-                                    // Use venue_city from schedule, fallback to venue
-                                    const matchVenue = m.venue_city || m.venue || '';
-                                    const matchId = m.match_id || m.crex_id || m.espn_id || '';
-                                    const matchUrl = m.match_url || '';
-                                    const hasSquad = m.has_squad || m.has_squads || false;
-                                    const isCrex = currentDataSource === 'crex';
-                                    const isEspn = currentDataSource === 'espn';
-                                    const isExternalSource = isCrex || isEspn;
-                                    
-                                    // Source label for display
-                                    let sourceLabel = '';
-                                    if (isCrex) {
-                                        sourceLabel = '<span style="color: #4caf50; margin-left: 0.5rem;">CREX</span>';
-                                    } else if (isEspn) {
-                                        sourceLabel = '<span style="color: #ff9800; margin-left: 0.5rem;">ESPNcricinfo</span>';
-                                    }
-                                    
-                                    // Status indicators (data fetched fresh on selection)
-                                    let statusIcons = '';
-                                    
-                                    return `
-                                    <div style="display: flex; justify-content: space-between; align-items: center; padding: 0.75rem 1rem; background: var(--bg-tertiary); border-radius: 8px; border-left: 3px solid ${series.gender === 'female' ? '#e91e63' : '#2196f3'};" data-match-url="${matchUrl}" data-gender="${series.gender || 'male'}">
-                                        <div style="flex: 1;">
-                                            <div style="font-weight: 500;">${matchTitle}${matchType ? ' <span style="font-weight: 400; color: var(--text-muted); font-size: 0.85rem;">(' + matchType + ')</span>' : ''}</div>
-                                            <div style="font-size: 0.8rem; color: var(--text-muted);">
-                                                <span style="color: var(--text-secondary);">${displayDateTime}</span>${matchVenue ? ' • ' + matchVenue : ''}
-                                                <span class="prefetch-status" style="margin-left: 0.5rem;">${statusIcons}</span>
-                                                ${sourceLabel}
-                                            </div>
-                                        </div>
-                                        <div style="display: flex; align-items: center; gap: 0.75rem;">
-                                            ${countdownHtml}
-                                            <button class="btn btn-primary" style="padding: 0.4rem 1rem; font-size: 0.85rem;" 
-                                                    onclick="selectMatch('${isExternalSource ? matchUrl : matchId}', '${series.gender}', ${isExternalSource})">
-                                                Select
-                                            </button>
-                                        </div>
-                                    </div>
-                                `}).join('')}
-                            </div>
-                        </div>
-                    `;
-                    listEl.innerHTML += seriesHtml;
-                });
-                
-                listEl.style.display = 'block';
+                upcomingMatchesRaw = data;
+                const filteredSeries = applyUpcomingFilters(data);
+                renderUpcomingMatchesList(filteredSeries);
                 console.log(`Loaded ${data.total_matches} upcoming matches`);
-                
-                // Start the countdown timer updater
                 startCountdownUpdater();
-                
-                // Status display updated (no prefetch needed)
                 updatePrefetchStatusDisplay();
-                
-                // Apply bulk select mode to newly loaded cards
-                if (bulkSelectMode) {
-                    applyBulkSelectToCards();
-                }
+                if (bulkSelectMode) applyBulkSelectToCards();
             } else {
+                upcomingMatchesRaw = null;
+                emptyEl.innerHTML = '<p>No matches scheduled in the next 24 hours.</p><p style="font-size: 0.875rem; margin-top: 0.5rem;">You can still manually select teams below.</p>';
                 emptyEl.style.display = 'block';
             }
         } catch (error) {
             console.error('Error loading upcoming matches:', error);
+            upcomingMatchesRaw = null;
             loadingEl.style.display = 'none';
             emptyEl.innerHTML = '<p style="color: var(--danger);">Error loading matches. Please try again.</p>';
             emptyEl.style.display = 'block';
         }
     }
-    
+
     // Update match cards with status indicators (no prefetch needed - data fetched fresh)
     function updateMatchCardsWithPrefetchStatus() {
         // No-op - status indicators removed since we fetch fresh on selection
@@ -2020,9 +2130,11 @@
         });
     }
     
-    async function selectMatch(matchIdOrUrl, gender, isExternalSource = false) {
-        // Set the gender for correct model selection
+    async function selectMatch(matchIdOrUrl, gender, isExternalSource = false, format, modelFormat) {
+        // Set the gender and format for correct model selection
         currentGender = gender;
+        currentMatchFormat = format || 'T20';
+        currentMatchModelFormat = modelFormat || format || 'T20';
         
         // Sync segmented controls to match gender AND set type to "all" for API matches
         // (API matches can be international or franchise, so we need all teams)
@@ -3708,6 +3820,7 @@
             venue_id: venueId,
             use_toss: useToss,
             gender: currentGender,
+            format: currentMatchModelFormat,
             player_names: playerNames  // Include names for scorecard
         };
         

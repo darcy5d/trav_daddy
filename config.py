@@ -21,6 +21,9 @@ DATABASE_URL = f"sqlite:///{DATABASE_PATH}"
 
 # Data sources - Cricsheet URLs
 CRICSHEET_BASE_URL = "https://cricsheet.org/downloads/"
+CRICSHEET_HOMEPAGE = "https://cricsheet.org/"
+# Page that contains "The most recent matches added to the site are: ..."
+CRICSHEET_MATCHES_URL = "https://cricsheet.org/matches/"
 DATA_SOURCES = {
     "t20i": f"{CRICSHEET_BASE_URL}t20s_json.zip",           # All T20s (men + women internationals)
     "t20s_female": f"{CRICSHEET_BASE_URL}t20s_female_json.zip",  # Women's T20 internationals

@@ -216,6 +216,10 @@
                     <div class="metric-value" id="total-deliveries">-</div>
                 </div>
             </div>
+            <div id="db-status-freshness" class="metric-sublabel" style="margin-top: 1rem; display: none;">
+                <span id="source-freshness-text"></span>
+                <span id="db-days-behind-summary"></span>
+            </div>
         </div>
     </div>
 
@@ -468,7 +472,26 @@ async function loadDatabaseStatus() {
             document.getElementById('total-players').textContent = formatNumber(data.total_players);
             document.getElementById('total-teams').textContent = formatNumber(data.total_teams);
             document.getElementById('total-deliveries').textContent = formatNumber(data.total_deliveries);
-            
+
+            // Freshness summary: source (Cricsheet) and database "up to X days behind"
+            const maleDays = maleStats.days_since_latest != null ? maleStats.days_since_latest : 0;
+            const femaleDays = femaleStats.days_since_latest != null ? femaleStats.days_since_latest : 0;
+            const maxDaysBehind = Math.max(maleDays, femaleDays);
+            const freshnessEl = document.getElementById('db-status-freshness');
+            const sourceTextEl = document.getElementById('source-freshness-text');
+            const dbSummaryEl = document.getElementById('db-days-behind-summary');
+            if (data.source_status) {
+                const daysAgo = data.source_status.days_ago;
+                sourceTextEl.textContent = `Latest data on Cricsheet: from ${daysAgo} day${daysAgo !== 1 ? 's' : ''} ago. `;
+                if (data.source_status.snippet) {
+                    sourceTextEl.title = data.source_status.snippet;
+                }
+            } else {
+                sourceTextEl.textContent = 'Source status unavailable. ';
+            }
+            dbSummaryEl.textContent = `Database is up to ${maxDaysBehind} day${maxDaysBehind !== 1 ? 's' : ''} behind.`;
+            freshnessEl.style.display = 'block';
+
             // Show content
             document.getElementById('db-status-loading').classList.add('hidden');
             document.getElementById('db-status-content').classList.remove('hidden');

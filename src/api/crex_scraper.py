@@ -97,7 +97,7 @@ class CREXMatch:
     team2_id: str  # CREX team ID
     match_type: str  # "4th Match", "Qualifier 2", "Final"
     series_name: str
-    format_type: str  # "T20", "ODI"
+    format_type: str  # "T20", "ODI", "TEST", "T10", "HUNDRED" (display)
     status: str  # "upcoming", "live", "completed"
     start_date: Optional[str] = None  # YYYY-MM-DD
     start_time: Optional[str] = None  # HH:MM AM/PM
@@ -112,6 +112,63 @@ class CREXMatch:
     toss_decision: Optional[str] = None  # "bat" or "field"
     playing_xi_available: bool = False
     has_squads: bool = False
+
+
+def format_type_to_model_format(format_type: str) -> str:
+    """
+    Map display format to model/simulation format.
+    T10 and HUNDRED (100-ball) are treated as T20 for the simulator.
+    """
+    if not format_type:
+        return 'T20'
+    u = format_type.upper()
+    if u in ('T20', 'T10', 'HUNDRED', '100'):
+        return 'T20'
+    if u == 'ODI':
+        return 'ODI'
+    if u == 'TEST':
+        return 'TEST'
+    return 'T20'
+
+
+# Known List A / 50-over competitions (series name or slug substrings, lowercase).
+# Used when CREX does not show an explicit "ODI" / "T20" label in the schedule or match text.
+KNOWN_LIST_A_SERIES_STRINGS = frozenset([
+    'ford trophy',
+    'wncl',
+    'womens national cricket league',
+    "women's national cricket league",
+    'marsh cup',
+    'marsh one-day',
+    'royal london cup',
+    'royal london one-day',
+])
+
+
+def _parse_explicit_format(text: str) -> Optional[str]:
+    """
+    Parse CREX's explicit format token from text (whole words only).
+    Order of precedence: Test -> ODI -> T20I -> T20 -> T10 -> Hundred/100.
+    Returns the first match or None.
+    """
+    if not text or not text.strip():
+        return None
+    text_lower = text.lower()
+    # Word-boundary style: look for format as a distinct token (after space, comma, or digit)
+    # Patterns: "30th ODI", "ODI, Ford Trophy", "40th T20", "1st Semi Final T20", "1st ODI"
+    patterns = [
+        (r'\btest\b', 'TEST'),
+        (r'\bodi\b', 'ODI'),
+        (r'\bt20i\b', 'T20'),
+        (r'\bt20\b', 'T20'),
+        (r'\bt10\b', 'T10'),
+        (r'\bhundred\b', 'HUNDRED'),
+        (r'\b100\b', 'HUNDRED'),
+    ]
+    for pattern, fmt in patterns:
+        if re.search(pattern, text_lower):
+            return fmt
+    return None
 
 
 # ============================================================================
@@ -438,9 +495,11 @@ class CREXScraper:
                     # Parse match from the link with current date
                     match = self._parse_schedule_entry(element, href, current_date)
                     if match:
-                        # Filter by format if specified
-                        if formats and match.format_type not in formats:
-                            continue
+                        # Filter by format if specified. T10/HUNDRED count as T20 for filtering.
+                        if formats:
+                            model_fmt = format_type_to_model_format(match.format_type)
+                            if match.format_type not in formats and model_fmt not in formats:
+                                continue
                         matches.append(match)
         
         logger.info(f"Found {len(matches)} matches from CREX schedule")
@@ -500,33 +559,42 @@ class CREXScraper:
             
             # Get full text content for parsing additional info
             text = link_element.get_text(' ', strip=True)
-            
-            # Extract series name from text
-            # Format usually includes series name after match type
-            series_name = ''
-            format_type = 'T20'  # Default
-            
-            # Look for format indicators
             text_lower = text.lower()
-            if 'odi' in text_lower:
-                format_type = 'ODI'
-            elif 't20' in text_lower or 't20i' in text_lower:
-                format_type = 'T20'
-            
-            # Try to extract series name from slug
-            # Example: bhutan-womens-t20i-tri-series-2026
+            slug_lower = slug.lower()
+            combined = text_lower + ' ' + slug_lower
+
+            # Extract series name from slug (needed for series-level format fallback)
+            series_name = ''
             series_match = re.search(r'(?:match|final|qualifier|eliminator|playoff)[-\s]+(.+?)(?:-\d{4})?$', slug.replace('-', ' '), re.I)
             if series_match:
                 series_name = series_match.group(1).strip().title()
             else:
-                # Fallback: use part of slug after team names
                 slug_parts = slug.split('-vs-')
                 if len(slug_parts) > 1:
                     after_teams = slug_parts[1]
-                    # Remove team2 name and match type
                     series_name = re.sub(r'^[a-z-]+-(?:\d+(?:st|nd|rd|th)-)?match-', '', after_teams, flags=re.I)
                     series_name = series_name.replace('-', ' ').title()
-            
+
+            # Format: match-level (CREX explicit label) first, then series-level (known List A), then keyword/slug
+            format_type = _parse_explicit_format(text)
+            if format_type is None:
+                series_lower = series_name.lower() if series_name else ''
+                if any(k in series_lower or k in slug_lower for k in KNOWN_LIST_A_SERIES_STRINGS):
+                    format_type = 'ODI'
+            if format_type is None:
+                if 'test' in combined and 'twenty' not in combined:
+                    format_type = 'TEST'
+                elif 'odi' in combined:
+                    format_type = 'ODI'
+                elif 't10' in combined or 't-10' in combined:
+                    format_type = 'T10'
+                elif '100' in combined or 'hundred' in combined or 'the hundred' in combined:
+                    format_type = 'HUNDRED'
+                elif 't20' in combined or 't20i' in combined:
+                    format_type = 'T20'
+            if format_type is None:
+                format_type = 'T20'
+
             # Detect status from text
             status = 'upcoming'
             if 'live' in text_lower:
@@ -728,12 +796,24 @@ class CREXScraper:
                 if len(team2_candidate) > 3 and len(team2_candidate) > len(team2_name):
                     team2_name = team2_candidate
                 logger.debug(f"Extracted full names from header: {team1_name} vs {team2_name}")
-        
-        # Detect format
-        format_type = 'T20'
-        if 'odi' in match_type.lower():
+
+        # Format: match-level (explicit in title/series link) first, then series-level (known List A)
+        format_type = _parse_explicit_format(match_type) or _parse_explicit_format(title_text)
+        if format_type is None:
+            series_link = soup.find('a', href=re.compile(r'/series/'))
+            if series_link:
+                series_link_text = series_link.get_text(' ', strip=True)
+                format_type = _parse_explicit_format(series_link_text)
+        if format_type is None:
+            series_lower = (series_name or '').lower()
+            slug_lower = (slug or '').lower()
+            if any(k in series_lower or k in slug_lower for k in KNOWN_LIST_A_SERIES_STRINGS):
+                format_type = 'ODI'
+        if format_type is None and 'odi' in match_type.lower():
             format_type = 'ODI'
-        
+        if format_type is None:
+            format_type = 'T20'
+
         # Detect gender
         gender = self._detect_gender(title_text + team1_name + team2_name)
         
