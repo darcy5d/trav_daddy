@@ -436,12 +436,13 @@ def run_tuner(
         'tuned_at':      datetime.now().isoformat(),
     }
 
-    # Quick final validation evaluation
-    results     = best_model.evaluate(X_val, y_val, verbose=0)
-    val_loss_idx = best_model.metrics_names.index('loss')
-    val_acc_idx  = best_model.metrics_names.index('accuracy')
-    best['val_loss']     = float(results[val_loss_idx])
-    best['val_accuracy'] = float(results[val_acc_idx])
+    # Quick final validation evaluation.
+    # Keras 3.x may name the accuracy metric differently after loading from
+    # checkpoint ('accuracy', 'sparse_categorical_accuracy', etc.), so use
+    # positional indexing — compile order is always [loss, accuracy].
+    results = best_model.evaluate(X_val, y_val, verbose=0)
+    best['val_loss']     = float(results[0])
+    best['val_accuracy'] = float(results[1]) if len(results) > 1 else 0.0
 
     # Save
     hparams_path.parent.mkdir(parents=True, exist_ok=True)
