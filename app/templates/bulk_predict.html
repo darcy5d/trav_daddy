@@ -636,28 +636,43 @@
             const data = await response.json();
             if (data.success) {
                 // If we have both genders, also fetch female venues and merge
-                if (hasFemaleBulk && hasMaleBulk) {
+                // Always merge female venues so female-only grounds (e.g. Cricket Central)
+                // appear in the dropdown for mixed-gender bulk predict sessions.
+                if (hasFemaleBulk) {
                     try {
                         const resp2 = await fetch('/api/venues?gender=female&min_matches=3');
                         const data2 = await resp2.json();
                         if (data2.success && data2.venues_hierarchical) {
-                            // Merge unique venues from female into main data
+                            // Merge flat venues list
                             const existingIds = new Set((data.venues || []).map(v => v.venue_id));
                             (data2.venues || []).forEach(v => {
                                 if (!existingIds.has(v.venue_id)) {
                                     data.venues.push(v);
+                                    existingIds.add(v.venue_id);
                                 }
                             });
-                            // For hierarchical, merge country groups
+                            // Merge hierarchical at CITY level (dropdown renders country→city→venue)
                             const countryMap = {};
                             (data.venues_hierarchical || []).forEach(c => { countryMap[c.country] = c; });
                             (data2.venues_hierarchical || []).forEach(c => {
                                 if (!countryMap[c.country]) {
                                     data.venues_hierarchical.push(c);
+                                    countryMap[c.country] = c;
                                 } else {
-                                    const existVenueIds = new Set(countryMap[c.country].venues.map(v => v.venue_id));
-                                    c.venues.forEach(v => {
-                                        if (!existVenueIds.has(v.venue_id)) countryMap[c.country].venues.push(v);
+                                    // Merge at city level
+                                    const cityMap = {};
+                                    (countryMap[c.country].cities || []).forEach(city => { cityMap[city.name] = city; });
+                                    (c.cities || []).forEach(city => {
+                                        if (!cityMap[city.name]) {
+                                            countryMap[c.country].cities.push(city);
+                                        } else {
+                                            const existVenueIds = new Set(cityMap[city.name].venues.map(v => v.venue_id));
+                                            (city.venues || []).forEach(v => {
+                                                if (!existVenueIds.has(v.venue_id)) {
+                                                    cityMap[city.name].venues.push(v);
+                                                }
+                                            });
+                                        }
                                     });
                                 }
                             });

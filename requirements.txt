@@ -30,6 +30,7 @@ xgboost>=2.0.0
 tensorflow>=2.15.0
 torch>=2.1.0
 torchvision>=0.16.0
+keras-tuner>=1.4.0
 
 # Web Framework
 flask>=3.0.0

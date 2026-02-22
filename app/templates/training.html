@@ -294,17 +294,35 @@
                     Full Retrain
                 </label>
             </div>
-            <div class="checkbox-group">
-                <label>
-                    <input type="checkbox" id="retrain-male" checked>
-                    Male Model
-                </label>
-                <label>
-                    <input type="checkbox" id="retrain-female" checked>
-                    Female Model
-                </label>
+            <div style="display: flex; gap: 1.5rem; margin-top: 0.5rem;">
+                <div>
+                    <p style="font-size: 0.75rem; color: var(--text-secondary); margin-bottom: 0.35rem; text-transform: uppercase; letter-spacing: 0.04em;">Gender</p>
+                    <div class="checkbox-group">
+                        <label>
+                            <input type="checkbox" id="retrain-male" checked>
+                            Male
+                        </label>
+                        <label>
+                            <input type="checkbox" id="retrain-female" checked>
+                            Female
+                        </label>
+                    </div>
+                </div>
+                <div>
+                    <p style="font-size: 0.75rem; color: var(--text-secondary); margin-bottom: 0.35rem; text-transform: uppercase; letter-spacing: 0.04em;">Format</p>
+                    <div class="checkbox-group">
+                        <label>
+                            <input type="checkbox" id="retrain-t20" checked>
+                            T20
+                        </label>
+                        <label>
+                            <input type="checkbox" id="retrain-odi" checked>
+                            ODI
+                        </label>
+                    </div>
+                </div>
             </div>
-            <button class="btn btn-primary" onclick="startRetrain()" id="retrain-btn">
+            <button class="btn btn-primary" onclick="startRetrain()" id="retrain-btn" style="margin-top: 0.75rem;">
                 Start Training
             </button>
         </div>
@@ -332,6 +350,81 @@
         </div>
         <p style="color: var(--text-secondary); margin-bottom: 0.5rem;" id="job-step">Initializing...</p>
         <div class="log-output" id="log-output"></div>
+    </div>
+</div>
+
+<!-- Hyperparameter Tuning Section -->
+<div class="card" style="margin-top: 1.5rem;" id="tuning-card">
+    <h2 class="card-title">Hyperparameter Tuning</h2>
+    <p style="color: var(--text-secondary); margin-bottom: 1rem;">
+        Run a Hyperband search (Keras Tuner) to find the best neural network architecture for
+        each format / gender combination. Results are saved and automatically used on the next
+        model training run.
+    </p>
+
+    <div style="display: flex; gap: 1rem; flex-wrap: wrap; align-items: flex-end; margin-bottom: 1rem;">
+        <div>
+            <label style="display: block; margin-bottom: 0.25rem; color: var(--text-secondary); font-size: 0.85rem;">Format</label>
+            <select id="tune-format" class="select-input" style="min-width: 100px;">
+                <option value="T20">T20</option>
+                <option value="ODI">ODI</option>
+            </select>
+        </div>
+        <div>
+            <label style="display: block; margin-bottom: 0.25rem; color: var(--text-secondary); font-size: 0.85rem;">Gender</label>
+            <select id="tune-gender" class="select-input" style="min-width: 110px;">
+                <option value="male">Male</option>
+                <option value="female">Female</option>
+            </select>
+        </div>
+        <div>
+            <label style="display: block; margin-bottom: 0.25rem; color: var(--text-secondary); font-size: 0.85rem;">Options</label>
+            <label style="display: flex; align-items: center; gap: 0.4rem; cursor: pointer;">
+                <input type="checkbox" id="tune-overwrite"> Overwrite previous run
+            </label>
+        </div>
+        <button class="btn btn-primary" onclick="startTuner()" id="tune-btn">Run Tuner</button>
+    </div>
+
+    <!-- Progress panel (shared with retrain) -->
+    <div id="tune-progress-panel" class="hidden" style="margin-top: 1rem;">
+        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.5rem;">
+            <span style="font-weight: 600;" id="tune-job-name">Tuning…</span>
+            <span id="tune-progress-text" style="color: var(--text-secondary);">0%</span>
+        </div>
+        <div style="background: var(--border-color); border-radius: 4px; height: 6px; margin-bottom: 0.75rem;">
+            <div id="tune-progress-bar" style="background: var(--accent-color); height: 100%; border-radius: 4px; width: 0%; transition: width 0.3s;"></div>
+        </div>
+        <p style="color: var(--text-secondary); margin-bottom: 0.5rem;" id="tune-step">Initializing…</p>
+        <div class="log-output" id="tune-log-output"></div>
+    </div>
+
+    <!-- Best Architectures Table -->
+    <div style="margin-top: 1.5rem;">
+        <h3 style="font-size: 1rem; margin-bottom: 0.75rem; color: var(--text-secondary);">Best Architectures Found</h3>
+        <div id="tune-results-loading" class="loading" style="display: none;">Loading…</div>
+        <div id="tune-results-empty" style="color: var(--text-secondary); font-style: italic;">
+            No tuning results yet. Run the tuner for at least one combination.
+        </div>
+        <div id="tune-results-table" class="hidden">
+            <table class="data-table" style="width: 100%;">
+                <thead>
+                    <tr>
+                        <th>Format</th>
+                        <th>Gender</th>
+                        <th>Layers</th>
+                        <th>Units</th>
+                        <th>Dropout</th>
+                        <th>L2 Reg</th>
+                        <th>Lr</th>
+                        <th>Val Loss</th>
+                        <th>Val Acc</th>
+                        <th>Tuned At</th>
+                    </tr>
+                </thead>
+                <tbody id="tune-results-body"></tbody>
+            </table>
+        </div>
     </div>
 </div>
 
@@ -770,31 +863,42 @@ async function startReset() {
 // Start model retrain
 async function startRetrain() {
     const mode = document.querySelector('input[name="retrain-mode"]:checked').value;
-    const retrainMale = document.getElementById('retrain-male').checked;
+    const retrainMale   = document.getElementById('retrain-male').checked;
     const retrainFemale = document.getElementById('retrain-female').checked;
-    
+    const retrainT20    = document.getElementById('retrain-t20').checked;
+    const retrainODI    = document.getElementById('retrain-odi').checked;
+
     if (!retrainMale && !retrainFemale) {
-        alert('Please select at least one model to retrain');
+        alert('Please select at least one gender to retrain');
         return;
     }
-    
+    if (!retrainT20 && !retrainODI) {
+        alert('Please select at least one format to retrain');
+        return;
+    }
+
     const genders = [];
-    if (retrainMale) genders.push('male');
+    if (retrainMale)   genders.push('male');
     if (retrainFemale) genders.push('female');
-    
+
+    const formats = [];
+    if (retrainT20) formats.push('T20');
+    if (retrainODI) formats.push('ODI');
+
     const modeText = mode === 'full' ? 'Full retraining' : 'Quick retraining';
-    if (!confirm(`${modeText} for ${genders.join(' and ')} models. This may take a while. Continue?`)) {
+    const label = `${formats.join(' + ')} / ${genders.join(' + ')}`;
+    if (!confirm(`${modeText} — ${label}. This may take a while. Continue?`)) {
         return;
     }
-    
+
     try {
         document.getElementById('retrain-btn').disabled = true;
         document.getElementById('retrain-btn').textContent = 'Starting...';
-        
+
         const response = await fetch('/api/training/retrain', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ mode, genders })
+            body: JSON.stringify({ mode, genders, formats })
         });
         const data = await response.json();
         
@@ -905,17 +1009,151 @@ document.addEventListener('DOMContentLoaded', () => {
     loadDatabaseStatus();
     loadActiveModels();
     loadVersionHistory();
-    
+    loadTuneResults();
+
     // Auto-refresh DB status every 60 seconds
     setInterval(loadDatabaseStatus, 60000);
 });
 
 // Listen for timezone changes from global selector
 window.addEventListener('timezoneChanged', (event) => {
-    // Reload models and version history to update displayed times
     loadActiveModels();
     loadVersionHistory();
 });
+
+// ── Hyperparameter Tuning ────────────────────────────────────────────────────
+
+let _tuneJobId = null;
+let _tuneJobPollTimer = null;
+
+async function startTuner() {
+    const fmt      = document.getElementById('tune-format').value;
+    const gender   = document.getElementById('tune-gender').value;
+    const overwrite = document.getElementById('tune-overwrite').checked;
+
+    const btn = document.getElementById('tune-btn');
+    btn.disabled = true;
+    btn.textContent = 'Starting…';
+
+    // Show progress panel
+    const panel = document.getElementById('tune-progress-panel');
+    panel.classList.remove('hidden');
+    document.getElementById('tune-job-name').textContent = `Hyperband: ${fmt} / ${gender}`;
+    document.getElementById('tune-progress-bar').style.width = '0%';
+    document.getElementById('tune-progress-text').textContent = '0%';
+    document.getElementById('tune-step').textContent = 'Initializing…';
+    document.getElementById('tune-log-output').textContent = '';
+
+    try {
+        const res = await fetch('/api/training/tune', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ format: fmt, gender, overwrite }),
+        });
+        const data = await res.json();
+        if (!data.success) throw new Error(data.error || 'Unknown error');
+
+        _tuneJobId = data.job_id;
+        btn.textContent = 'Running…';
+        _tuneJobPollTimer = setInterval(pollTuneJobStatus, 2000);
+    } catch (err) {
+        btn.disabled = false;
+        btn.textContent = 'Run Tuner';
+        document.getElementById('tune-step').textContent = `Error: ${err.message}`;
+    }
+}
+
+async function pollTuneJobStatus() {
+    if (!_tuneJobId) return;
+    try {
+        const res = await fetch(`/api/training/job/${_tuneJobId}`);
+        const data = await res.json();
+        if (!data.success) return;
+
+        const job = data.job;
+        const pct = job.progress || 0;
+        document.getElementById('tune-progress-bar').style.width = `${pct}%`;
+        document.getElementById('tune-progress-text').textContent = `${pct}%`;
+        document.getElementById('tune-step').textContent = job.step || '';
+
+        // Show last 100 log lines
+        const logEl = document.getElementById('tune-log-output');
+        if (job.logs && job.logs.length) {
+            logEl.textContent = job.logs.join('\n');
+            logEl.scrollTop = logEl.scrollHeight;
+        }
+
+        if (job.status === 'completed') {
+            clearInterval(_tuneJobPollTimer);
+            document.getElementById('tune-btn').disabled = false;
+            document.getElementById('tune-btn').textContent = 'Run Tuner';
+            document.getElementById('tune-step').textContent = 'Tuning complete!';
+            loadTuneResults();  // Refresh the best-architectures table
+        } else if (job.status === 'failed') {
+            clearInterval(_tuneJobPollTimer);
+            document.getElementById('tune-btn').disabled = false;
+            document.getElementById('tune-btn').textContent = 'Run Tuner';
+            document.getElementById('tune-step').textContent = `Failed: ${job.error || ''}`;
+        }
+    } catch (e) {
+        // Network blip - keep polling
+    }
+}
+
+async function loadTuneResults() {
+    try {
+        const res = await fetch('/api/training/tune-results');
+        const data = await res.json();
+        if (!data.success) return;
+
+        const results = data.results;  // { "t20_male": {...}, ... }
+        const keys = Object.keys(results);
+
+        const emptyEl = document.getElementById('tune-results-empty');
+        const tableEl = document.getElementById('tune-results-table');
+        const bodyEl  = document.getElementById('tune-results-body');
+
+        if (keys.length === 0) {
+            emptyEl.style.display = '';
+            tableEl.classList.add('hidden');
+            return;
+        }
+
+        emptyEl.style.display = 'none';
+        tableEl.classList.remove('hidden');
+        bodyEl.innerHTML = '';
+
+        keys.sort().forEach(key => {
+            const hp = results[key];
+            const tunedAt = hp.tuned_at
+                ? new Date(hp.tuned_at).toLocaleString()
+                : '—';
+            const valAcc = hp.val_accuracy != null
+                ? (hp.val_accuracy * 100).toFixed(1) + '%'
+                : '—';
+            const valLoss = hp.val_loss != null
+                ? hp.val_loss.toFixed(4)
+                : '—';
+
+            const row = document.createElement('tr');
+            row.innerHTML = `
+                <td>${(hp.format_type || key.split('_')[0]).toUpperCase()}</td>
+                <td style="text-transform: capitalize;">${hp.gender || key.split('_')[1] || ''}</td>
+                <td>${hp.n_layers ?? '—'}</td>
+                <td>${hp.units ?? '—'}</td>
+                <td>${hp.dropout ?? '—'}</td>
+                <td>${hp.l2_reg != null ? hp.l2_reg.toExponential(0) : '—'}</td>
+                <td>${hp.learning_rate ?? '—'}</td>
+                <td>${valLoss}</td>
+                <td>${valAcc}</td>
+                <td style="font-size: 0.8rem; color: var(--text-secondary);">${tunedAt}</td>
+            `;
+            bodyEl.appendChild(row);
+        });
+    } catch (e) {
+        // Silently ignore
+    }
+}
 </script>
 {% endblock %}
 

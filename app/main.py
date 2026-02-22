@@ -85,14 +85,15 @@ def get_fast_simulator(gender: str = 'male'):
     return _fast_simulators[gender]
 
 
-def get_nn_simulator(gender: str = 'male'):
-    """Get or initialize the NN simulator for specified gender."""
+def get_nn_simulator(gender: str = 'male', format_type: str = 'T20'):
+    """Get or initialize the NN simulator for the specified gender and format."""
     global _nn_simulators
-    if gender not in _nn_simulators:
+    key = (gender, format_type.upper())
+    if key not in _nn_simulators:
         from src.models.vectorized_nn_sim import VectorizedNNSimulator
-        _nn_simulators[gender] = VectorizedNNSimulator(gender=gender)
-        logger.info(f"NN simulator initialized for {gender}")
-    return _nn_simulators[gender]
+        _nn_simulators[key] = VectorizedNNSimulator(gender=gender, format_type=format_type.upper())
+        logger.info(f"NN simulator initialized for {gender}/{format_type.upper()}")
+    return _nn_simulators[key]
 
 
 def get_toss_simulator():
@@ -1409,9 +1410,9 @@ def simulate_match():
             except:
                 pass  # Use default
         
-        # Select simulator for specified gender
+        # Select simulator for specified gender and format
         if simulator_type == 'nn':
-            simulator = get_nn_simulator(gender)
+            simulator = get_nn_simulator(gender, model_format)
         else:
             simulator = get_fast_simulator(gender)
         
@@ -1699,9 +1700,9 @@ def simulate_match_stream():
                 except:
                     pass
             
-            # Select simulator
+            # Select simulator for specified gender and format
             if simulator_type == 'nn':
-                simulator = get_nn_simulator(gender)
+                simulator = get_nn_simulator(gender, model_format)
             else:
                 simulator = get_fast_simulator(gender)
             
@@ -3661,11 +3662,12 @@ def get_models():
         init_model_versions_table()
         
         gender = request.args.get('gender')
+        format_type = request.args.get('format') or None  # None = all formats
         active_only = request.args.get('active_only', 'false').lower() == 'true'
-        
+
         models = get_model_versions(
             gender=gender,
-            format_type='T20',
+            format_type=format_type,
             active_only=active_only
         )
         
@@ -3860,34 +3862,37 @@ def start_model_retrain():
         data = request.get_json() or {}
         mode = data.get('mode', 'quick')
         genders = data.get('genders', ['male', 'female'])
-        
+        formats = data.get('formats', ['T20', 'ODI'])
+
         def retrain_models():
             """Retrain models based on mode."""
-            from src.utils.job_manager import update_job_progress, get_job_status
+            from src.utils.job_manager import update_job_progress
             import threading
-            
-            # Get current job ID from thread-local storage
+
             job_id = getattr(threading.current_thread(), 'job_id', None)
-            
-            logger.info(f"Starting model retrain: mode={mode}, genders={genders}, job_id={job_id}")
-            
+            logger.info(
+                f"Starting model retrain: mode={mode}, genders={genders}, "
+                f"formats={formats}, job_id={job_id}"
+            )
+
             skip_ingest = (mode == 'quick')
             skip_elo = (mode == 'quick')
             male_only = ('male' in genders and 'female' not in genders)
             female_only = ('female' in genders and 'male' not in genders)
-            
+
             result = run_full_pipeline(
                 skip_ingest=skip_ingest,
                 skip_elo=skip_elo,
                 male_only=male_only,
                 female_only=female_only,
-                progress_callback=lambda pct, step: update_job_progress(job_id, pct, step) if job_id else None
+                formats=formats,
+                progress_callback=lambda pct, step: update_job_progress(job_id, pct, step) if job_id else None,
             )
-            
+
             return result
-        
+
         job_id = start_job(
-            name=f"Model Retrain ({mode}, {', '.join(genders)})",
+            name=f"Model Retrain ({mode}, {', '.join(genders)}, {', '.join(formats)})",
             func=retrain_models
         )
         
@@ -3901,6 +3906,105 @@ def start_model_retrain():
         logger.error(f"Error starting retrain: {e}")
         import traceback
         traceback.print_exc()
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/training/tune', methods=['POST'])
+def start_hyperband_tune():
+    """
+    Start a Hyperband hyperparameter search for a given format/gender combination.
+
+    Request body:
+        {
+            "format":    "T20" or "ODI"    (default: "T20")
+            "gender":    "male" or "female" (default: "male")
+            "overwrite": true | false       (default: false)
+        }
+
+    Returns:
+        JSON with job_id for progress tracking
+    """
+    try:
+        from src.utils.job_manager import start_job
+        import sys
+        from pathlib import Path
+
+        scripts_dir = Path(__file__).resolve().parent.parent / 'scripts'
+        sys.path.insert(0, str(scripts_dir))
+
+        from tune_ball_predictor import run_tuner
+
+        data = request.get_json() or {}
+        fmt    = data.get('format',    'T20')
+        gender = data.get('gender',    'male')
+        overwrite = bool(data.get('overwrite', False))
+
+        if fmt not in ('T20', 'ODI'):
+            return jsonify({'success': False, 'error': f'Invalid format: {fmt}'}), 400
+        if gender not in ('male', 'female'):
+            return jsonify({'success': False, 'error': f'Invalid gender: {gender}'}), 400
+
+        def run_tune_job():
+            from src.utils.job_manager import update_job_progress
+            import threading
+
+            job_id = getattr(threading.current_thread(), 'job_id', None)
+
+            result = run_tuner(
+                format_type=fmt,
+                gender=gender,
+                overwrite=overwrite,
+                progress_callback=lambda pct, msg: update_job_progress(job_id, pct, msg) if job_id else None,
+            )
+            return result
+
+        job_id = start_job(
+            name=f"Hyperband Tune ({fmt}/{gender})",
+            func=run_tune_job,
+        )
+
+        return jsonify({
+            'success': True,
+            'job_id': job_id,
+            'message': f'Hyperband tuning started for {fmt}/{gender}',
+        })
+
+    except Exception as e:
+        logger.error(f"Error starting hyperband tune: {e}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/training/tune-results', methods=['GET'])
+def get_tune_results():
+    """
+    Return saved best hyperparameters for all tuned format/gender combinations.
+
+    Reads all best_hparams_*.json files from data/processed/.
+
+    Returns:
+        JSON dict keyed by "{format}_{gender}", e.g.
+        { "t20_male": { "n_layers": 1, "units": 256, ... }, ... }
+    """
+    try:
+        import json as _json
+        from pathlib import Path
+
+        processed_dir = Path(__file__).resolve().parent.parent / 'data' / 'processed'
+        results = {}
+        for hp_file in processed_dir.glob('best_hparams_*.json'):
+            key = hp_file.stem.replace('best_hparams_', '')
+            try:
+                with open(hp_file) as f:
+                    results[key] = _json.load(f)
+            except Exception as e:
+                logger.warning(f"Could not read {hp_file}: {e}")
+
+        return jsonify({'success': True, 'results': results})
+
+    except Exception as e:
+        logger.error(f"Error fetching tune results: {e}")
         return jsonify({'success': False, 'error': str(e)}), 500
 
 

@@ -310,7 +310,7 @@ class CREXScraper:
         if not venue_name:
             return venue_name
         
-        venue_keywords = ['Stadium', 'Ground', 'Gardens', 'Oval', 'Arena', 'Park',
+        venue_keywords = ['Stadium', 'Ground', 'Gardens', 'Oval', 'Arena', 'Park', 'Reserve',
                           'Centre', 'Center', 'Field', 'Academy', 'Club', 'Complex',
                           'International Cricket Ground']
         
@@ -339,9 +339,15 @@ class CREXScraper:
                     city = self._extract_city_from_venue(venue_name)
                     # Strip common CREX prefixes (AM/PM time indicators, short codes)
                     before_clean = re.sub(r'^(AM|PM)\s*', '', before_venue, flags=re.I).strip()
-                    # If what's left before the venue keyword is just the city name, strip it
+                    # If what's left before the venue keyword is just the city name, strip it.
+                    # Guard: only strip if the proposed result has a distinctive name before
+                    # the keyword. Without this, "PM Adelaide Oval, Adelaide" would strip
+                    # "PM Adelaide" → "Oval, Adelaide" (wrong — "Adelaide" is part of the name).
                     if before_clean and city and before_clean.lower() == city.lower():
-                        venue_name = venue_name[first_pos:].strip()
+                        proposed = venue_name[first_pos:].strip()
+                        proposed_before_kw = proposed[:proposed.find(keyword)].strip()
+                        if proposed_before_kw:
+                            venue_name = proposed
                     elif not before_clean:
                         # Only AM/PM prefix was there, already handled by normalize
                         pass
@@ -629,10 +635,16 @@ class CREXScraper:
                         # Parse venue date
                         venue_date = datetime.strptime(parsed_date, "%Y-%m-%d")
                         
-                        # If GMT time is in the evening (after 6 PM), the GMT date
-                        # is likely the previous day for Asia-Pacific venues
-                        # This handles NZ (UTC+13), AU (UTC+10/11), India (UTC+5:30), etc.
-                        if gmt_hour >= 18:  # 6 PM or later in GMT
+                        # If GMT time is in the evening (after 7 PM UTC), the GMT date
+                        # is likely the previous day for Asia-Pacific venues.
+                        # Threshold is 19:00 UTC (not 18:00) because:
+                        # - Pakistan midnight (PKT=UTC+5) = 19:00 UTC: matches at 18:xx UTC
+                        #   are still same day in Pakistan, CREX shows same local date → no subtract
+                        # - India midnight (IST=UTC+5:30) = 18:30 UTC: matches after 19:00 UTC
+                        #   are next day in India → subtract correctly
+                        # - Australia midnight (AEDT=UTC+11) = 13:00 UTC: any evening UTC match
+                        #   is next day locally → caught by the >= 19 threshold
+                        if gmt_hour >= 19:  # 7 PM or later in GMT
                             gmt_date = venue_date - timedelta(days=1)
                         else:
                             gmt_date = venue_date
@@ -830,46 +842,65 @@ class CREXScraper:
         if date_match:
             date_str = date_match.group(1)
         
-        # Venue is usually on its own line near the date
-        # Look for venue patterns (Stadium, Ground, Oval, etc.)
-        # Stop at "Team Form" or other section boundaries
-        venue_patterns = [
-            # Match venue name + optional city, stop at Team Form, Head to Head, Match, 
-            # temperature/weather patterns (e.g., "25°C", "26.1˚C"), or a repeated venue name
-            r'([A-Za-z\s\-\'\.]+(?:Stadium|Ground|Gardens|Oval|Arena|Park|Centre|Center|Field|Academy|Club|Complex|International Cricket Ground)(?:,\s*[A-Za-z\s\-]+)?)\s*(?:Team Form|Head to Head|Match|\d+(?:\.\d+)?[˚°]|$)',
-            r'(The\s+[A-Za-z\s\-\'\.]+,\s*[A-Za-z]+)\s*(?:Team Form|Head to Head|Match|\d+(?:\.\d+)?[˚°]|$)',
-        ]
-        
-        for pattern in venue_patterns:
-            venue_match = re.search(pattern, all_text)
-            if venue_match:
-                venue_name = venue_match.group(1).strip()
-                # Clean up any trailing whitespace or punctuation
-                venue_name = re.sub(r'\s+$', '', venue_name)
-                # Handle CREX rendering quirk where venue text is repeated
-                venue_name = self._clean_repeated_venue(venue_name)
-                break
-        
         # Parse date/time
         start_date, start_time, date_time_gmt = None, None, None
         if date_str:
             start_date, start_time, date_time_gmt = self._parse_crex_datetime(date_str)
-        
-        # Fallback: try to extract venue from text between time and temperature
+
+        # PRIMARY: extract venue from text between datetime and "Team Form" / "Head to Head"
+        # CREX page structure is always: [datetime] [venue name] Team Form (Last 5 matches)...
+        # This approach is format-agnostic: no keyword list, handles commas, handles "Reserve" etc.
+        if date_str:
+            date_pos = all_text.find(date_str)
+            if date_pos >= 0:
+                after_date = all_text[date_pos + len(date_str):]
+                boundary_match = re.search(r'(?:Team Form|Head to Head)', after_date, re.I)
+                if boundary_match:
+                    candidate = after_date[:boundary_match.start()].strip()
+                    candidate = re.sub(r'\s+', ' ', candidate).strip()
+                    # Strip trailing temperature artifacts (e.g., "26.1˚C", "23°C")
+                    candidate = re.sub(r'\s*\d+(?:\.\d+)?[˚°]\s*C?$', '', candidate).strip()
+                    # Strip trailing streaming/media partner names CREX appends to venue
+                    # e.g., "Phillip Oval, Canberra, Australia FANCODE" → "Phillip Oval, Canberra, Australia"
+                    candidate = re.sub(
+                        r'\s+(?:FANCODE|Star\s+Sports?|Hotstar|Disney\+?|Willow(?:\s+TV)?|Sky\s+Sports?|'
+                        r'BT\s+Sport|DAZN|ESPN\+?|Fox\s+Sports?|SuperSport|Kayo|Channel\s+\d+|'
+                        r'Ten\s+Sports?|PTV\s+Sports?|Geo\s+Super|Sony\s+(?:LIV|Six|Ten)|Cricbuzz)\s*$',
+                        '', candidate, flags=re.I
+                    ).strip()
+                    if candidate and len(candidate) < 120:
+                        venue_name = candidate
+                        logger.info(f"Extracted venue from CREX page (between-sections): '{venue_name}'")
+
+        # SECONDARY: regex-based fallback for pages with different structure
+        # (e.g., no "Team Form" section, or venue appears before the datetime)
+        if not venue_name:
+            venue_patterns = [
+                r'([A-Za-z\s\-\'\.]+(?:Stadium|Ground|Gardens|Oval|Arena|Park|Reserve|Centre|Center|Field|Academy|Club|Complex|International Cricket Ground)(?:,\s*[A-Za-z\s\-]+)?)\s*(?:Team Form|Head to Head|Match|\d+(?:\.\d+)?[˚°]|$)',
+                r'(The\s+[A-Za-z\s\-\'\.]+,\s*[A-Za-z]+)\s*(?:Team Form|Head to Head|Match|\d+(?:\.\d+)?[˚°]|$)',
+            ]
+            for pattern in venue_patterns:
+                venue_match = re.search(pattern, all_text)
+                if venue_match:
+                    venue_name = venue_match.group(1).strip()
+                    venue_name = re.sub(r'\s+$', '', venue_name)
+                    venue_name = self._clean_repeated_venue(venue_name)
+                    break
+
+        # TERTIARY: time → venue → temperature pattern
         # e.g., "8:00 AM Terdthai Cricket Ground, Bangkok 26.1˚C"
         if not venue_name and date_str:
             date_pos = all_text.find(date_str)
             if date_pos >= 0:
                 after_date = all_text[date_pos:]
-                # Look for pattern: time -> venue text -> temperature
                 fallback_match = re.search(
-                    r'(?:AM|PM)\s+(.+?(?:Stadium|Ground|Gardens|Oval|Arena|Park|Centre|Center|Field|Academy|Club|Complex)(?:,\s*[A-Za-z\s\-]+?)?)\s+(?:\d+(?:\.\d+)?[˚°]|\d+(?:\.\d+)?°C)',
+                    r'(?:AM|PM)\s+(.+?(?:Stadium|Ground|Gardens|Oval|Arena|Park|Reserve|Centre|Center|Field|Academy|Club|Complex)(?:,\s*[A-Za-z\s\-]+?)?)\s+(?:\d+(?:\.\d+)?[˚°]|\d+(?:\.\d+)?°C)',
                     after_date
                 )
                 if fallback_match:
                     venue_name = fallback_match.group(1).strip()
                     venue_name = self._clean_repeated_venue(venue_name)
-                    logger.info(f"Extracted venue from CREX page (fallback): '{venue_name}'")
+                    logger.info(f"Extracted venue from CREX page (time-temp fallback): '{venue_name}'")
         
         # Create venue object
         venue = None

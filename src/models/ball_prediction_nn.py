@@ -87,47 +87,77 @@ def create_ball_prediction_model(
 ) -> keras.Model:
     """
     Create the ball prediction neural network.
-    
-    Architecture follows the article:
-    - 2 dense layers with ReLU activation
-    - Batch normalization
-    - Dropout for regularization
-    - Softmax output for 7-class classification
+
+    Supports a variable number of hidden layers determined by the length of
+    hidden_units.  Each layer uses BatchNorm + ReLU + Dropout.
     """
-    model = keras.Sequential([
-        # Input layer
-        layers.Input(shape=(input_dim,)),
-        
-        # First hidden layer
-        layers.Dense(
-            hidden_units[0],
-            kernel_regularizer=regularizers.l2(l2_reg)
-        ),
-        layers.BatchNormalization(),
-        layers.ReLU(),
-        layers.Dropout(dropout_rate),
-        
-        # Second hidden layer
-        layers.Dense(
-            hidden_units[1],
-            kernel_regularizer=regularizers.l2(l2_reg)
-        ),
-        layers.BatchNormalization(),
-        layers.ReLU(),
-        layers.Dropout(dropout_rate),
-        
-        # Output layer
-        layers.Dense(num_classes, activation='softmax')
-    ])
-    
+    layer_list = [layers.Input(shape=(input_dim,))]
+
+    for units in hidden_units:
+        layer_list.append(
+            layers.Dense(units, kernel_regularizer=regularizers.l2(l2_reg))
+        )
+        layer_list.append(layers.BatchNormalization())
+        layer_list.append(layers.ReLU())
+        layer_list.append(layers.Dropout(dropout_rate))
+
+    layer_list.append(layers.Dense(num_classes, activation='softmax'))
+
+    model = keras.Sequential(layer_list)
+
     model.compile(
         optimizer=keras.optimizers.Adam(learning_rate=0.001),
         loss='sparse_categorical_crossentropy',
         metrics=['accuracy'],
-        jit_compile=False  # Disable XLA for Apple Silicon compatibility
+        jit_compile=False,
     )
-    
+
     return model
+
+
+def _load_best_hparams(format_type: str, gender: str) -> dict:
+    """Load tuned hyperparameters from Hyperband results if available.
+
+    Returns a dict with keys: hidden_units, dropout_rate, l2_reg, learning_rate.
+    Falls back to defaults if no tuned file exists.
+    """
+    import json
+    hparams_path = (
+        Path('data/processed') / f'best_hparams_{format_type.lower()}_{gender}.json'
+    )
+    if hparams_path.exists():
+        try:
+            with open(hparams_path) as f:
+                hp = json.load(f)
+            n_layers = hp.get('n_layers', 1)
+            units    = hp.get('units', 256)
+            hidden   = [units] * n_layers
+            result   = {
+                'hidden_units':  hidden,
+                'dropout_rate':  hp.get('dropout', 0.3),
+                'l2_reg':        hp.get('l2_reg', 1e-4),
+                'learning_rate': hp.get('learning_rate', 1e-3),
+            }
+            logger.info(
+                f"Loaded tuned hparams from {hparams_path.name}: "
+                f"layers={n_layers}, units={units}, "
+                f"dropout={result['dropout_rate']}, l2={result['l2_reg']}, "
+                f"lr={result['learning_rate']}"
+            )
+            return result
+        except Exception as e:
+            logger.warning(f"Could not parse {hparams_path}: {e}. Using defaults.")
+    else:
+        logger.info(
+            f"No tuned hparams file found for {format_type}/{gender} "
+            f"(run tune_ball_predictor.py to generate one). Using defaults."
+        )
+    return {
+        'hidden_units':  [256],
+        'dropout_rate':  0.3,
+        'l2_reg':        1e-4,
+        'learning_rate': 1e-3,
+    }
 
 
 def train_ball_prediction_model(
@@ -137,12 +167,15 @@ def train_ball_prediction_model(
     epochs: int = 50,
     batch_size: int = 256,
     validation_split: float = 0.2,
-    model_path: str = 'data/processed/ball_prediction_model.keras'
+    model_path: str = 'data/processed/ball_prediction_model.keras',
+    format_type: str = 'T20',
+    gender: str = 'male',
 ) -> Tuple[keras.Model, dict]:
     """
     Train the ball prediction neural network.
     
     Uses chronological split for validation (train on older matches, validate on newer).
+    Automatically loads best hyperparameters from a Hyperband tuning run if available.
     """
     # Chronological split
     # Sort by date and split
@@ -166,8 +199,23 @@ def train_ball_prediction_model(
     X_train_norm = (X_train - mean) / std
     X_val_norm = (X_val - mean) / std
     
+    # Load tuned hyperparameters (falls back to sensible defaults)
+    hp = _load_best_hparams(format_type, gender)
+
     # Create model
-    model = create_ball_prediction_model(input_dim=X.shape[1])
+    model = create_ball_prediction_model(
+        input_dim=X.shape[1],
+        hidden_units=hp['hidden_units'],
+        dropout_rate=hp['dropout_rate'],
+        l2_reg=hp['l2_reg'],
+    )
+    # Override Adam learning rate from tuned value
+    model.compile(
+        optimizer=keras.optimizers.Adam(learning_rate=hp['learning_rate']),
+        loss='sparse_categorical_crossentropy',
+        metrics=['accuracy'],
+        jit_compile=False,
+    )
     model.summary()
     
     # Callbacks
@@ -377,7 +425,9 @@ def main(format_type: str = 'T20', gender: str = 'male'):
         X, y, meta,
         epochs=50,
         batch_size=256,
-        model_path=model_path
+        model_path=model_path,
+        format_type=format_type,
+        gender=gender,
     )
     
     # Print results

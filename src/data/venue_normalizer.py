@@ -215,6 +215,8 @@ VENUE_ALIASES = {
     "w.a.c.a. ground": "WACA Ground",
     "waca ground": "WACA Ground",
     "waca": "WACA Ground",
+    "w a c a": "WACA Ground",                               # normalized form of "W.A.C.A. Ground"
+    "western australia cricket association": "WACA Ground", # normalized form of full DB name
     "optus stadium": "Perth Stadium",
     "optus": "Perth Stadium",
     "pm optus stadium": "Perth Stadium",
@@ -234,6 +236,8 @@ VENUE_ALIASES = {
     "junction oval": "Junction Oval",
     "karen rolton oval": "Karen Rolton Oval",
     "north sydney oval": "North Sydney Oval",
+    "cricket central": "Cricket Central",
+    "sydney olympic": "Cricket Central",   # "Sydney Olympic Park" normalizes to "sydney olympic"
     # India
     "eden gardens": "Eden Gardens",
     "wankhede stadium": "Wankhede Stadium",
