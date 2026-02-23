@@ -132,6 +132,44 @@ Visit `http://localhost:5001` in your browser.
 
 4. **Prediction**: Aggregate simulation results into win probabilities
 
+### Ball prediction: Hyperband tuning (note for next time)
+
+When re-tuning the ball outcome models, use `scripts/tune_ball_predictor.py`. Each of the four models (T20 male/female, ODI male/female) is tuned separately; best hyperparameters are saved and then loaded automatically during `full_retrain.py`.
+
+**Run (per format/gender or all):**
+```bash
+# Single combination
+python scripts/tune_ball_predictor.py --format T20 --gender male
+
+# All four (T20 M/F, ODI M/F)
+python scripts/tune_ball_predictor.py --all
+
+# Overwrite previous run and start fresh
+python scripts/tune_ball_predictor.py --format ODI --gender female --overwrite
+```
+
+**Outputs:** `data/processed/best_hparams_{format}_{gender}.json` and `data/processed/tuner_{format}_{gender}/` (Keras Tuner checkpoints).
+
+**Hyperband run parameters (defaults):**
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `max_epochs` | 30 | Max epochs per bracket |
+| `factor` | 3 | Successive halving factor |
+| `hyperband_iterations` | 1 | Number of full Hyperband brackets |
+| `batch_size` | 512 | Tuned for Apple Silicon Metal |
+| `val_fraction` | 0.2 | Chronological holdout for validation |
+
+**Search space (same for all four models):**
+| Hyperparameter | Type | Values / range |
+|----------------|------|----------------|
+| `n_layers` | Int | 1–4 (Dense blocks) |
+| `units` | Choice | 64, 128, 256 |
+| `dropout` | Float | 0.1–0.4, step 0.1 |
+| `l2_reg` | Choice | 1e-4, 1e-3, 1e-2 |
+| `learning_rate` | Choice | 1e-4, 5e-4, 1e-3, 5e-3 |
+
+Training (e.g. `full_retrain.py`) reads from `best_hparams_{format}_{gender}.json` when present; otherwise it uses built-in defaults in `src/models/ball_prediction_nn.py`.
+
 ## Tech Stack
 
 | Component | Technology |

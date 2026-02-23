@@ -74,3 +74,40 @@ The root cause is likely how `team1`/`team2` are determined during the CREX scra
 **Proposed fix:** After the Playwright migration, check whether team order is now stable. If not, add a post-scrape step that infers home/away from venue country vs. team nationality and reorders `team1`/`team2` accordingly.
 
 ---
+
+## Model / Ball prediction
+
+### 7. Ball outcome model: class imbalance (rare outcomes under-predicted)
+**File:** `src/models/ball_prediction_nn.py` (training, loss, `model.fit`)
+
+Evaluation on a chronological holdout (last 20%) shows the 7-way ball outcome models are moderately strong overall (44–55% accuracy vs ~14% random) but **heavily biased toward Dot and Single**. Per-outcome F1 is good for Dot (~0.53–0.70) and Single (~0.28–0.50), but **Two, Three, Four, Six, and Wicket** have F1 near zero — the model rarely predicts these. That’s standard class imbalance: rare classes get drowned out by the majority.
+
+**Impact on simulation:** Match-level run rates can still be plausible (dots/singles dominate), but wicket and boundary rates are under-predicted, so simulated games may be too smooth and chase curves slightly off where wickets matter.
+
+**Proposed fixes (pick one or combine):**
+
+- **Class weights in `model.fit()`**  
+  Compute inverse frequency (or sqrt inverse) per class from `y_train` and pass `class_weight` to `model.fit()`. Quick win; no architecture change. Keras supports `class_weight` dict mapping class index → weight.
+
+- **Weighted loss (e.g. `weighted_categorical_crossentropy`)**  
+  Same idea but inside a custom loss that multiplies per-sample loss by the class weight. Slightly more control (e.g. extra weight only on Wicket and boundaries).
+
+- **Focal loss**  
+  Down-weight easy examples (e.g. dots/singles the model already gets right) so the optimizer focuses more on hard/rare classes. Requires a custom loss and a tuning parameter (e.g. γ).
+
+- **Oversampling / undersampling**  
+  Oversample rare classes (Two, Three, Four, Six, Wicket) or undersample Dot/Single in the training data so the batch distribution is less skewed. Can be combined with class weights.
+
+- **Persist evaluation metrics after training**  
+  `full_retrain.py` currently saves `accuracy_metrics` only when a `ball_meta_*.csv` with an `f1-score` column exists (from a different pipeline). The ball model’s `evaluate_model()` returns accuracy, log loss, and a per-class classification report. After training (and optionally after any evaluation script), write these into the DB/JSON (e.g. `accuracy_metrics` in `model_versions`) so we can track improvement over time without re-running the analysis script.
+
+**Suggested order:** Implement class weights first; re-run training and `scripts/analyze_model_results.py` to compare F1 on rare outcomes. If still weak, add focal loss or sampling next.
+
+### 8. (Optional) Backtest: simulated vs actual match totals
+**File:** New script e.g. `scripts/backtest_ball_model.py`, or extend `scripts/backtest_predictions.py`
+
+We have ball-level evaluation but no automated check that **match-level** simulations (run rates, wicket rates, win probabilities) line up with historical outcomes.
+
+**Proposed feature:** A script that, for a held-out set of completed matches, runs the current ball model through the existing match simulator to produce simulated totals and win probabilities, then compares to actual results (e.g. margin of victory, total runs). Output: aggregate metrics (e.g. calibration of win prob, MAE of total runs). Helps validate that improving ball F1 (item 7) actually improves downstream simulation quality.
+
+---
