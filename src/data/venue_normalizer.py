@@ -265,6 +265,10 @@ VENUE_ALIASES = {
     # New Zealand
     "basin reserve": "Basin Reserve",
     "the basin reserve": "Basin Reserve",
+    # South Africa
+    "uplands college": "Uplands College, White River",
+    "uplands college white river": "Uplands College, White River",
+    "uplands college white river mpumalanga": "Uplands College, White River",
 }
 
 

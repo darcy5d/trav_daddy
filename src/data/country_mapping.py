@@ -492,6 +492,7 @@ CITY_TO_COUNTRY = {
     "Port Elizabeth": "South Africa",
     "Potchefstroom": "South Africa",
     "Pretoria": "South Africa",
+    "White River": "South Africa",
     
     # South Korea
     "Incheon": "South Korea",
@@ -679,6 +680,10 @@ VENUE_TO_LOCATION = {
     
     # Bhutan
     "Gelephu International Cricket Ground": ("Gelephu", "Bhutan"),
+    
+    # South Africa
+    "Uplands College, White River": ("White River", "South Africa"),
+    "Uplands College, White River, Mpumalanga": ("White River", "South Africa"),
 }
 
 

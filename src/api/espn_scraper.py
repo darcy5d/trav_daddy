@@ -27,7 +27,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 
 from src.data.database import get_connection
-from src.data.venue_normalizer import venue_similarity, normalize_venue_name
+from src.data.venue_normalizer import venue_similarity, normalize_venue_name, get_canonical_venue_name
 from src.features.name_matcher import PlayerNameMatcher
 
 logger = logging.getLogger(__name__)
@@ -651,9 +651,10 @@ class ESPNCricInfoScraper:
     # =========================================================================
     
     def match_venue_to_db(
-        self, 
-        venue: ESPNVenue, 
-        gender: str = 'male'
+        self,
+        venue: ESPNVenue,
+        gender: str = 'male',
+        format_type: str = 'T20'
     ) -> Optional[Tuple[int, str]]:
         """
         Match ESPN venue to database venue.
@@ -661,6 +662,7 @@ class ESPNCricInfoScraper:
         Args:
             venue: ESPN venue data
             gender: 'male' or 'female' for venue filtering
+            format_type: 'T20' or 'ODI' - include venues with matches in this format
             
         Returns:
             (venue_id, venue_name) or None
@@ -671,44 +673,69 @@ class ESPNCricInfoScraper:
         conn = get_connection()
         cursor = conn.cursor()
         
-        # Get all venues with enough matches, ordered by match count (prefer more popular venues)
+        # Get venues with enough matches (T20 or ODI), ordered by match count
         cursor.execute("""
             SELECT v.venue_id, v.name, v.city, v.country, COUNT(*) as match_count
             FROM venues v
             JOIN matches m ON m.venue_id = v.venue_id
-            WHERE m.match_type = 'T20' AND m.gender = ?
+            WHERE m.match_type IN ('T20', 'ODI') AND m.gender = ?
             GROUP BY v.venue_id
             HAVING COUNT(*) >= 3
             ORDER BY match_count DESC
         """, (gender,))
         
         db_venues = cursor.fetchall()
-        conn.close()
         
         best_match = None
         best_score = 0.0
         best_match_count = 0
         
         espn_venue_name = venue.name
+        names_to_try = [espn_venue_name, get_canonical_venue_name(espn_venue_name)]
+        if names_to_try[1] == names_to_try[0]:
+            names_to_try = [espn_venue_name]
         
-        for row in db_venues:
-            db_name = row['name']
-            match_count = row['match_count']
-            score = venue_similarity(espn_venue_name, db_name)
-            
-            # Boost score if city matches
-            if venue.town and row['city']:
-                if venue.town.lower() in row['city'].lower():
+        for try_name in names_to_try:
+            for row in db_venues:
+                db_name = row['name']
+                match_count = row['match_count']
+                score = max(
+                    venue_similarity(try_name, db_name),
+                    venue_similarity(try_name, get_canonical_venue_name(db_name) or db_name)
+                )
+                if venue.town and row['city'] and venue.town.lower() in (row['city'] or '').lower():
                     score += 0.1
-            
-            # Update if score is better, OR if score is equal but this venue has more matches
-            if score > best_score or (score == best_score and match_count > best_match_count):
-                best_score = score
-                best_match = (row['venue_id'], row['name'])
-                best_match_count = match_count
+                if score > best_score or (score == best_score and match_count > best_match_count):
+                    best_score = score
+                    best_match = (row['venue_id'], row['name'])
+                    best_match_count = match_count
         
         if best_match and best_score >= 0.7:
             logger.info(f"Matched venue '{espn_venue_name}' to '{best_match[1]}' (score: {best_score:.2f})")
+            return best_match
+        
+        # Fallback: match against all venues (e.g. Uplands College with 0 matches)
+        cursor.execute("SELECT venue_id, name, city FROM venues WHERE country IS NOT NULL")
+        all_venues = cursor.fetchall()
+        conn.close()
+        
+        db_ids = {r['venue_id'] for r in db_venues}
+        for try_name in names_to_try:
+            for row in all_venues:
+                if row['venue_id'] in db_ids:
+                    continue
+                score = max(
+                    venue_similarity(try_name, row['name']),
+                    venue_similarity(try_name, get_canonical_venue_name(row['name']) or row['name'])
+                )
+                if venue.town and row['city'] and venue.town.lower() in (row['city'] or '').lower():
+                    score += 0.1
+                if score > best_score:
+                    best_score = score
+                    best_match = (row['venue_id'], row['name'])
+        
+        if best_match and best_score >= 0.7:
+            logger.info(f"Matched venue '{espn_venue_name}' to '{best_match[1]}' (score: {best_score:.2f}, fallback)")
             return best_match
         
         logger.warning(f"No database match for venue: {espn_venue_name}")

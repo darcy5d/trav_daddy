@@ -1930,13 +1930,16 @@ class CREXScraper:
             'all_affiliations': affiliations  # For debugging mixed squads
         }
     
-    def match_venue_to_db(self, venue: CREXVenue, gender: str = 'male') -> Optional[Tuple[int, str]]:
+    def match_venue_to_db(
+        self, venue: CREXVenue, gender: str = 'male', format_type: str = 'T20'
+    ) -> Optional[Tuple[int, str]]:
         """
         Match CREX venue to database venue.
         
         Args:
             venue: CREX venue data
             gender: 'male' or 'female' for venue filtering
+            format_type: 'T20' or 'ODI' - include venues with matches in this format
             
         Returns:
             (venue_id, venue_name) or None
@@ -1947,19 +1950,18 @@ class CREXScraper:
         conn = get_connection()
         cursor = conn.cursor()
         
-        # Get all venues with enough matches, ordered by match count
+        # Get venues with enough matches (T20 or ODI), ordered by match count
         cursor.execute("""
             SELECT v.venue_id, v.name, v.city, v.country, COUNT(*) as match_count
             FROM venues v
             JOIN matches m ON m.venue_id = v.venue_id
-            WHERE m.match_type = 'T20' AND m.gender = ?
+            WHERE m.match_type IN ('T20', 'ODI') AND m.gender = ?
             GROUP BY v.venue_id
             HAVING COUNT(*) >= 3
             ORDER BY match_count DESC
         """, (gender,))
         
         db_venues = cursor.fetchall()
-        conn.close()
         
         # Clean venue name - strip common sponsor prefixes and suffixes
         def local_normalize_venue_name(name: str) -> str:
@@ -2018,7 +2020,38 @@ class CREXScraper:
                     best_match = (row['venue_id'], row['name'])
         
         if best_match and best_score >= 0.7:
+            conn.close()
             logger.info(f"Matched venue '{venue.name}' to '{best_match[1]}' (score: {best_score:.2f})")
+            return best_match
+        
+        # Fallback: match against all venues (including those with 0 matches, e.g. Uplands College)
+        cursor.execute("""
+            SELECT venue_id, name, city, country FROM venues
+            WHERE country IS NOT NULL
+            ORDER BY name
+        """)
+        all_venues = cursor.fetchall()
+        conn.close()
+        
+        for try_name in names_to_try:
+            for row in all_venues:
+                if row['venue_id'] in {r['venue_id'] for r in db_venues}:
+                    continue  # Already checked above
+                db_name = row['name']
+                db_name_clean = local_normalize_venue_name(db_name)
+                score1 = venue_similarity(try_name, db_name)
+                score2 = venue_similarity(try_name, db_name_clean)
+                db_canonical = get_canonical_venue_name(db_name)
+                score3 = venue_similarity(try_name, db_canonical) if db_canonical != db_name else 0
+                score = max(score1, score2, score3)
+                if venue.city and row['city'] and venue.city.lower() in (row['city'] or '').lower():
+                    score += 0.1
+                if score > best_score:
+                    best_score = score
+                    best_match = (row['venue_id'], row['name'])
+        
+        if best_match and best_score >= 0.7:
+            logger.info(f"Matched venue '{venue.name}' to '{best_match[1]}' (score: {best_score:.2f}, fallback)")
             return best_match
         
         logger.warning(f"No database match for venue: {venue.name}")

@@ -26,7 +26,7 @@ https://towardsdatascience.com/predicting-t20-cricket-matches-with-a-ball-simula
 import logging
 import os
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
-# Disable XLA compilation to avoid Apple Silicon Metal backend issues
+# Disable auto-JIT XLA compilation (Metal plugin handles its own acceleration)
 os.environ['TF_XLA_FLAGS'] = '--tf_xla_auto_jit=0'
 
 from typing import Dict, Tuple, Optional, List

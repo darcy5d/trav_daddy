@@ -11,10 +11,26 @@
         border-radius: 50%;
         margin-right: 8px;
     }
-    
+
     .status-green { background: var(--accent-primary); }
     .status-yellow { background: var(--accent-warning); }
     .status-red { background: #ef4444; }
+
+    /* Format / gender tags — consistent with bulk predict and predict pages */
+    .tag-gender, .tag-format {
+        display: inline-block;
+        padding: 0.15rem 0.45rem;
+        border-radius: 4px;
+        font-size: 0.7rem;
+        font-weight: 600;
+        letter-spacing: 0.3px;
+        text-transform: uppercase;
+        line-height: 1.4;
+    }
+    .tag-gender-male   { background: rgba(33,150,243,0.15); color: #2196f3; border: 1px solid rgba(33,150,243,0.3); }
+    .tag-gender-female { background: rgba(233,30,99,0.15);  color: #e91e63; border: 1px solid rgba(233,30,99,0.3); }
+    .tag-format-t20    { background: rgba(16,185,129,0.15); color: var(--accent-primary);  border: 1px solid rgba(16,185,129,0.3); }
+    .tag-format-odi    { background: rgba(245,158,11,0.15); color: var(--accent-warning); border: 1px solid rgba(245,158,11,0.3); }
     
     .metric-card {
         background: var(--bg-tertiary);
@@ -399,32 +415,49 @@
         <div class="log-output" id="tune-log-output"></div>
     </div>
 
-    <!-- Best Architectures Table -->
+    <!-- Best Architectures — transposed table, always shows all 4 combos -->
     <div style="margin-top: 1.5rem;">
         <h3 style="font-size: 1rem; margin-bottom: 0.75rem; color: var(--text-secondary);">Best Architectures Found</h3>
-        <div id="tune-results-loading" class="loading" style="display: none;">Loading…</div>
-        <div id="tune-results-empty" style="color: var(--text-secondary); font-style: italic;">
-            No tuning results yet. Run the tuner for at least one combination.
-        </div>
-        <div id="tune-results-table" class="hidden">
-            <table class="data-table" style="width: 100%;">
-                <thead>
-                    <tr>
-                        <th>Format</th>
-                        <th>Gender</th>
-                        <th>Layers</th>
-                        <th>Units</th>
-                        <th>Dropout</th>
-                        <th>L2 Reg</th>
-                        <th>Lr</th>
-                        <th>Val Loss</th>
-                        <th>Val Acc</th>
-                        <th>Tuned At</th>
-                    </tr>
-                </thead>
-                <tbody id="tune-results-body"></tbody>
-            </table>
-        </div>
+        <table class="table" id="tune-results-table">
+            <thead>
+                <tr>
+                    <th style="min-width: 120px;"></th>
+                    <th style="text-align: center;">
+                        <span class="tag-format tag-format-t20">T20</span>
+                        <span class="tag-gender tag-gender-male">Men</span>
+                    </th>
+                    <th style="text-align: center;">
+                        <span class="tag-format tag-format-t20">T20</span>
+                        <span class="tag-gender tag-gender-female">Women</span>
+                    </th>
+                    <th style="text-align: center;">
+                        <span class="tag-format tag-format-odi">ODI</span>
+                        <span class="tag-gender tag-gender-male">Men</span>
+                    </th>
+                    <th style="text-align: center;">
+                        <span class="tag-format tag-format-odi">ODI</span>
+                        <span class="tag-gender tag-gender-female">Women</span>
+                    </th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr><td>Layers</td>   <td style="text-align:center;" id="hp-t20_male-n_layers">—</td>  <td style="text-align:center;" id="hp-t20_female-n_layers">—</td>  <td style="text-align:center;" id="hp-odi_male-n_layers">—</td>  <td style="text-align:center;" id="hp-odi_female-n_layers">—</td></tr>
+                <tr><td>Units</td>    <td style="text-align:center;" id="hp-t20_male-units">—</td>     <td style="text-align:center;" id="hp-t20_female-units">—</td>     <td style="text-align:center;" id="hp-odi_male-units">—</td>     <td style="text-align:center;" id="hp-odi_female-units">—</td></tr>
+                <tr><td>Dropout</td>  <td style="text-align:center;" id="hp-t20_male-dropout">—</td>   <td style="text-align:center;" id="hp-t20_female-dropout">—</td>   <td style="text-align:center;" id="hp-odi_male-dropout">—</td>   <td style="text-align:center;" id="hp-odi_female-dropout">—</td></tr>
+                <tr><td>L2 Reg</td>   <td style="text-align:center;" id="hp-t20_male-l2_reg">—</td>    <td style="text-align:center;" id="hp-t20_female-l2_reg">—</td>    <td style="text-align:center;" id="hp-odi_male-l2_reg">—</td>    <td style="text-align:center;" id="hp-odi_female-l2_reg">—</td></tr>
+                <tr><td>Learning Rate</td> <td style="text-align:center;" id="hp-t20_male-lr">—</td>   <td style="text-align:center;" id="hp-t20_female-lr">—</td>        <td style="text-align:center;" id="hp-odi_male-lr">—</td>       <td style="text-align:center;" id="hp-odi_female-lr">—</td></tr>
+                <tr style="border-top: 2px solid var(--border-color);">
+                    <td>Val Loss</td>     <td style="text-align:center;" id="hp-t20_male-val_loss">—</td>  <td style="text-align:center;" id="hp-t20_female-val_loss">—</td>  <td style="text-align:center;" id="hp-odi_male-val_loss">—</td>  <td style="text-align:center;" id="hp-odi_female-val_loss">—</td>
+                </tr>
+                <tr><td>Val Accuracy</td> <td style="text-align:center;" id="hp-t20_male-val_acc">—</td>   <td style="text-align:center;" id="hp-t20_female-val_acc">—</td>   <td style="text-align:center;" id="hp-odi_male-val_acc">—</td>   <td style="text-align:center;" id="hp-odi_female-val_acc">—</td></tr>
+                <tr><td style="color: var(--text-secondary); font-size: 0.8rem;">Tuned At</td>
+                    <td style="text-align:center; color: var(--text-secondary); font-size: 0.8rem;" id="hp-t20_male-tuned_at">—</td>
+                    <td style="text-align:center; color: var(--text-secondary); font-size: 0.8rem;" id="hp-t20_female-tuned_at">—</td>
+                    <td style="text-align:center; color: var(--text-secondary); font-size: 0.8rem;" id="hp-odi_male-tuned_at">—</td>
+                    <td style="text-align:center; color: var(--text-secondary); font-size: 0.8rem;" id="hp-odi_female-tuned_at">—</td>
+                </tr>
+            </tbody>
+        </table>
     </div>
 </div>
 
@@ -1106,49 +1139,25 @@ async function loadTuneResults() {
         const data = await res.json();
         if (!data.success) return;
 
-        const results = data.results;  // { "t20_male": {...}, ... }
-        const keys = Object.keys(results);
+        const results = data.results;
 
-        const emptyEl = document.getElementById('tune-results-empty');
-        const tableEl = document.getElementById('tune-results-table');
-        const bodyEl  = document.getElementById('tune-results-body');
-
-        if (keys.length === 0) {
-            emptyEl.style.display = '';
-            tableEl.classList.add('hidden');
-            return;
-        }
-
-        emptyEl.style.display = 'none';
-        tableEl.classList.remove('hidden');
-        bodyEl.innerHTML = '';
-
-        keys.sort().forEach(key => {
+        // Fill each cell by ID — table structure is fixed in HTML
+        const combos = ['t20_male', 't20_female', 'odi_male', 'odi_female'];
+        combos.forEach(key => {
             const hp = results[key];
-            const tunedAt = hp.tuned_at
-                ? new Date(hp.tuned_at).toLocaleString()
-                : '—';
-            const valAcc = hp.val_accuracy != null
-                ? (hp.val_accuracy * 100).toFixed(1) + '%'
-                : '—';
-            const valLoss = hp.val_loss != null
-                ? hp.val_loss.toFixed(4)
-                : '—';
+            const el = id => document.getElementById(`hp-${key}-${id}`);
+            if (!hp) return;  // leave as "—" if not yet tuned
 
-            const row = document.createElement('tr');
-            row.innerHTML = `
-                <td>${(hp.format_type || key.split('_')[0]).toUpperCase()}</td>
-                <td style="text-transform: capitalize;">${hp.gender || key.split('_')[1] || ''}</td>
-                <td>${hp.n_layers ?? '—'}</td>
-                <td>${hp.units ?? '—'}</td>
-                <td>${hp.dropout ?? '—'}</td>
-                <td>${hp.l2_reg != null ? hp.l2_reg.toExponential(0) : '—'}</td>
-                <td>${hp.learning_rate ?? '—'}</td>
-                <td>${valLoss}</td>
-                <td>${valAcc}</td>
-                <td style="font-size: 0.8rem; color: var(--text-secondary);">${tunedAt}</td>
-            `;
-            bodyEl.appendChild(row);
+            if (el('n_layers'))  el('n_layers').textContent  = hp.n_layers ?? '—';
+            if (el('units'))     el('units').textContent      = hp.units ?? '—';
+            if (el('dropout'))   el('dropout').textContent    = hp.dropout != null ? hp.dropout.toFixed(1) : '—';
+            if (el('l2_reg'))    el('l2_reg').textContent     = hp.l2_reg != null ? hp.l2_reg.toExponential(0) : '—';
+            if (el('lr'))        el('lr').textContent         = hp.learning_rate ?? '—';
+            if (el('val_loss'))  el('val_loss').textContent   = hp.val_loss != null ? hp.val_loss.toFixed(4) : '—';
+            if (el('val_acc'))   el('val_acc').textContent    = hp.val_accuracy != null ? (hp.val_accuracy * 100).toFixed(1) + '%' : '—';
+            if (el('tuned_at'))  el('tuned_at').textContent   = hp.tuned_at
+                ? new Date(hp.tuned_at).toLocaleDateString('en-AU', { day:'2-digit', month:'short', hour:'2-digit', minute:'2-digit' })
+                : '—';
         });
     } catch (e) {
         // Silently ignore

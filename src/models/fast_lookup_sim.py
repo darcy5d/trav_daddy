@@ -220,7 +220,12 @@ class FastLookupSimulator:
         max_overs: int = 20,
         venue_id: Optional[int] = None,
         use_toss: bool = False,
-        toss_field_prob: float = 0.65
+        toss_field_prob: float = 0.65,
+        team1_id: Optional[int] = None,
+        team2_id: Optional[int] = None,
+        team1_default_elo: Optional[float] = None,
+        team2_default_elo: Optional[float] = None,
+        **kwargs
     ) -> Dict:
         """
         Simulate N matches in parallel using vectorized operations.

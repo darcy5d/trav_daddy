@@ -835,7 +835,8 @@ def waterfall_team_selection():
                         
                         # Match venue and teams to database
                         if match.venue:
-                            venue_match = scraper.match_venue_to_db(match.venue, match.gender)
+                            fmt = format_type_to_model_format(match.format_type) if getattr(match, 'format_type', None) else 'T20'
+                            venue_match = scraper.match_venue_to_db(match.venue, match.gender, format_type=fmt)
                         team_match = None
                         if team_data:
                             team_match = scraper.match_team_to_db(team_data, match.gender)
@@ -1302,11 +1303,14 @@ def simulate_match():
                 'error': f"No active model for {gender} {model_format}. Please train a model on the Training page."
             }), 503
 
-        # Get team IDs for ELO lookup (optional - will default to 1500 if not provided)
+        # Get team IDs for ELO lookup (optional - will default to 1500 or tier-based if provided)
         team1_id = data.get('team1_id')
         team2_id = data.get('team2_id')
         team1_name = data.get('team1_name', 'Team 1')
         team2_name = data.get('team2_name', 'Team 2')
+        team1_default_elo = data.get('team1_default_elo')
+        team2_default_elo = data.get('team2_default_elo')
+        series_name = data.get('series_name')
         if team1_id:
             try:
                 team1_id = int(team1_id)
@@ -1317,21 +1321,49 @@ def simulate_match():
                 team2_id = int(team2_id)
             except (ValueError, TypeError):
                 team2_id = None
-        
+        if team1_default_elo is not None:
+            try:
+                team1_default_elo = float(team1_default_elo)
+            except (ValueError, TypeError):
+                team1_default_elo = None
+        if team2_default_elo is not None:
+            try:
+                team2_default_elo = float(team2_default_elo)
+            except (ValueError, TypeError):
+                team2_default_elo = None
+
+        # Compute tier-based default ELO for unmatched teams when not provided
+        if not team1_id and team1_default_elo is None and (team2_id or series_name):
+            from src.utils.default_elo import infer_default_elo
+            team1_default_elo = infer_default_elo(
+                series_name=series_name,
+                matched_opponent_team_id=team2_id,
+                format_type=format_param or 'T20',
+            )
+        if not team2_id and team2_default_elo is None and (team1_id or series_name):
+            from src.utils.default_elo import infer_default_elo
+            team2_default_elo = infer_default_elo(
+                series_name=series_name,
+                matched_opponent_team_id=team1_id,
+                format_type=format_param or 'T20',
+            )
+
         # Track data quality warnings
         data_warnings = []
+        default1 = team1_default_elo if team1_default_elo is not None else 1500
+        default2 = team2_default_elo if team2_default_elo is not None else 1500
         if not team1_id:
             data_warnings.append(
-                f"'{team1_name}' has no database ID. Using default ELO (1500). "
+                f"'{team1_name}' has no database ID. Using default ELO ({int(default1)}). "
                 f"Prediction may be unreliable."
             )
-            logger.warning(f"[SIM WARNING] Team1 '{team1_name}' has no database ID -- using default ELO 1500")
+            logger.warning(f"[SIM WARNING] Team1 '{team1_name}' has no database ID -- using default ELO {default1}")
         if not team2_id:
             data_warnings.append(
-                f"'{team2_name}' has no database ID. Using default ELO (1500). "
+                f"'{team2_name}' has no database ID. Using default ELO ({int(default2)}). "
                 f"Prediction may be unreliable."
             )
-            logger.warning(f"[SIM WARNING] Team2 '{team2_name}' has no database ID -- using default ELO 1500")
+            logger.warning(f"[SIM WARNING] Team2 '{team2_name}' has no database ID -- using default ELO {default2}")
         
         # DEBUG: Log incoming player IDs to diagnose 50/50 results
         logger.info(f"[SIMULATION DEBUG] Team1 batters: {team1_batters_raw[:5]}... ({len(team1_batters_raw)} total)")
@@ -1430,7 +1462,9 @@ def simulate_match():
             use_toss=use_toss,
             toss_field_prob=toss_field_prob,
             team1_id=team1_id,
-            team2_id=team2_id
+            team2_id=team2_id,
+            team1_default_elo=team1_default_elo,
+            team2_default_elo=team2_default_elo
         )
         
         elapsed = time.time() - start
@@ -1481,7 +1515,9 @@ def simulate_match():
                     venue_id=venue_id,
                     team1_bats_first=True,  # For scorecard, show Team 1 batting first
                     team1_id=team1_id,
-                    team2_id=team2_id
+                    team2_id=team2_id,
+                    team1_default_elo=team1_default_elo,
+                    team2_default_elo=team2_default_elo
                 )
                 
                 # Add player names to scorecard entries
@@ -1551,11 +1587,24 @@ def simulate_match_stream():
             'error': f"No active model for {gender} {model_format}. Please train a model on the Training page."
         }), 503
 
-    # Get team IDs for ELO lookup (optional - will default to 1500 if not provided)
+    # Get team IDs for ELO lookup (optional - will default to 1500 or tier-based if provided)
     team1_id = data.get('team1_id')
     team2_id = data.get('team2_id')
     team1_name = data.get('team1_name', 'Team 1')
     team2_name = data.get('team2_name', 'Team 2')
+    team1_default_elo = data.get('team1_default_elo')
+    team2_default_elo = data.get('team2_default_elo')
+    series_name = data.get('series_name')
+    if team1_default_elo is not None:
+        try:
+            team1_default_elo = float(team1_default_elo)
+        except (ValueError, TypeError):
+            team1_default_elo = None
+    if team2_default_elo is not None:
+        try:
+            team2_default_elo = float(team2_default_elo)
+        except (ValueError, TypeError):
+            team2_default_elo = None
     if team1_id:
         try:
             team1_id = int(team1_id)
@@ -1567,20 +1616,38 @@ def simulate_match_stream():
         except (ValueError, TypeError):
             team2_id = None
     
+    # Compute tier-based default ELO for unmatched teams when not provided
+    if not team1_id and team1_default_elo is None and (team2_id or series_name):
+        from src.utils.default_elo import infer_default_elo
+        team1_default_elo = infer_default_elo(
+            series_name=series_name,
+            matched_opponent_team_id=team2_id,
+            format_type=format_param or 'T20',
+        )
+    if not team2_id and team2_default_elo is None and (team1_id or series_name):
+        from src.utils.default_elo import infer_default_elo
+        team2_default_elo = infer_default_elo(
+            series_name=series_name,
+            matched_opponent_team_id=team1_id,
+            format_type=format_param or 'T20',
+        )
+
     # Track data quality warnings
     stream_data_warnings = []
+    default1 = team1_default_elo if team1_default_elo is not None else 1500
+    default2 = team2_default_elo if team2_default_elo is not None else 1500
     if not team1_id:
         stream_data_warnings.append(
-            f"'{team1_name}' has no database ID. Using default ELO (1500). "
+            f"'{team1_name}' has no database ID. Using default ELO ({int(default1)}). "
             f"Prediction may be unreliable."
         )
-        logger.warning(f"[SIM_STREAM WARNING] Team1 '{team1_name}' has no database ID -- using default ELO 1500")
+        logger.warning(f"[SIM_STREAM WARNING] Team1 '{team1_name}' has no database ID -- using default ELO {default1}")
     if not team2_id:
         stream_data_warnings.append(
-            f"'{team2_name}' has no database ID. Using default ELO (1500). "
+            f"'{team2_name}' has no database ID. Using default ELO ({int(default2)}). "
             f"Prediction may be unreliable."
         )
-        logger.warning(f"[SIM_STREAM WARNING] Team2 '{team2_name}' has no database ID -- using default ELO 1500")
+        logger.warning(f"[SIM_STREAM WARNING] Team2 '{team2_name}' has no database ID -- using default ELO {default2}")
     
     # CRICKET XI LOGIC: Batting order = top-order batters + bowlers at tail
     # This ensures 11 UNIQUE players (no duplicates possible)
@@ -1735,7 +1802,9 @@ def simulate_match_stream():
                     use_toss=use_toss,
                     toss_field_prob=toss_field_prob,
                     team1_id=team1_id,
-                    team2_id=team2_id
+                    team2_id=team2_id,
+                    team1_default_elo=team1_default_elo,
+                    team2_default_elo=team2_default_elo
                 )
                 
                 # Accumulate results (keep as numpy, avoid .tolist())
@@ -1832,7 +1901,9 @@ def simulate_match_stream():
                         venue_id=venue_id,
                         team1_bats_first=True,
                         team1_id=team1_id,
-                        team2_id=team2_id
+                        team2_id=team2_id,
+                        team1_default_elo=team1_default_elo,
+                        team2_default_elo=team2_default_elo
                     )
                     for b in scorecard['team1_batting']:
                         pid = str(b['player_id'])
@@ -2931,7 +3002,8 @@ def get_crex_match():
         # Match venue to database
         venue_db = None
         if match.venue:
-            venue_match = scraper.match_venue_to_db(match.venue, match.gender)
+            fmt = format_type_to_model_format(match.format_type) if match.format_type else 'T20'
+            venue_match = scraper.match_venue_to_db(match.venue, match.gender, format_type=fmt)
             if venue_match:
                 venue_db = {'venue_id': venue_match[0], 'name': venue_match[1]}
         
@@ -3443,18 +3515,32 @@ def get_crex_match():
         match_warnings = list(scraper._warnings)
         scraper._warnings.clear()
         
-        # Add warnings for teams that still have no DB match
+        # Add warnings and compute tier-appropriate default ELO for unmatched teams
+        from src.utils.default_elo import infer_default_elo
+
+        default_elo_team1 = None
+        default_elo_team2 = None
         if not team1_db:
+            default_elo_team1 = infer_default_elo(
+                series_name=match.series_name,
+                matched_opponent_team_id=team2_db['team_id'] if team2_db else None,
+                format_type=match.format_type or 'T20',
+            )
             match_warnings.append(
                 f"Team '{match.team1_name}' could not be identified. "
-                f"Using default ELO (1500). Prediction will be unreliable."
+                f"Using default ELO ({int(default_elo_team1)}) based on competition tier. Prediction may be unreliable."
             )
         if not team2_db:
+            default_elo_team2 = infer_default_elo(
+                series_name=match.series_name,
+                matched_opponent_team_id=team1_db['team_id'] if team1_db else None,
+                format_type=match.format_type or 'T20',
+            )
             match_warnings.append(
                 f"Team '{match.team2_name}' could not be identified. "
-                f"Using default ELO (1500). Prediction will be unreliable."
+                f"Using default ELO ({int(default_elo_team2)}) based on competition tier. Prediction may be unreliable."
             )
-        
+
         result = {
             'success': True,
             'source': 'crex',
@@ -3485,6 +3571,8 @@ def get_crex_match():
                 'team2': team_to_dict(match.team2),
                 'team1_db': team1_db,
                 'team2_db': team2_db,
+                'default_elo_team1': default_elo_team1,
+                'default_elo_team2': default_elo_team2,
                 'toss_winner': match.toss_winner,
                 'toss_decision': match.toss_decision,
                 'team_swap_detected': team_swap_detected,
@@ -4251,4 +4339,5 @@ def server_error(e):
 # ============================================================================
 
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=5001, debug=True)
+    port = int(os.environ.get('PORT', os.environ.get('FLASK_PORT', 5001)))
+    app.run(host='0.0.0.0', port=port, debug=True)

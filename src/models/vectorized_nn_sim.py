@@ -367,7 +367,9 @@ class VectorizedNNSimulator:
         use_toss: bool = False,
         toss_field_prob: float = 0.65,
         team1_id: Optional[int] = None,
-        team2_id: Optional[int] = None
+        team2_id: Optional[int] = None,
+        team1_default_elo: Optional[float] = None,
+        team2_default_elo: Optional[float] = None
     ) -> Dict:
         """
         Simulate N matches in parallel using vectorized operations.
@@ -384,6 +386,8 @@ class VectorizedNNSimulator:
             toss_field_prob: Probability winner chooses to field (default 0.65 for T20)
             team1_id: Optional team ID for team 1 (for ELO lookup)
             team2_id: Optional team ID for team 2 (for ELO lookup)
+            team1_default_elo: ELO to use when team1_id is None (tier-based default)
+            team2_default_elo: ELO to use when team2_id is None (tier-based default)
         
         Returns:
             Dict with simulation results
@@ -440,8 +444,17 @@ class VectorizedNNSimulator:
         venue_features = self.get_venue_features(venue_id)
         
         # Get ELO features (for 34-feature model)
-        team1_elo = self.get_team_elo(team1_id)
-        team2_elo = self.get_team_elo(team2_id)
+        # Use tier-based default when team_id is None and default_elo is provided
+        team1_elo = (
+            self.get_team_elo(team1_id)
+            if team1_id
+            else (team1_default_elo if team1_default_elo is not None else 1500.0)
+        )
+        team2_elo = (
+            self.get_team_elo(team2_id)
+            if team2_id
+            else (team2_default_elo if team2_default_elo is not None else 1500.0)
+        )
         
         # Pre-compute player ELO arrays
         team1_bat_elos = np.array([self.get_player_batting_elo(pid) for pid in team1_batter_ids], dtype=np.float32)
@@ -851,19 +864,29 @@ class VectorizedNNSimulator:
         venue_id: Optional[int] = None,
         team1_bats_first: bool = True,
         team1_id: Optional[int] = None,
-        team2_id: Optional[int] = None
+        team2_id: Optional[int] = None,
+        team1_default_elo: Optional[float] = None,
+        team2_default_elo: Optional[float] = None
     ) -> Dict:
         """
         Simulate ONE match with full ball-by-ball tracking for scorecard display.
-        
+
         Returns detailed per-player batting and bowling stats.
         """
         max_balls = max_overs * 6
         venue_features = self.get_venue_features(venue_id)
-        
+
         # Get team ELOs for feature building
-        team1_elo = self.get_team_elo(team1_id) if team1_id else 1500.0
-        team2_elo = self.get_team_elo(team2_id) if team2_id else 1500.0
+        team1_elo = (
+            self.get_team_elo(team1_id)
+            if team1_id
+            else (team1_default_elo if team1_default_elo is not None else 1500.0)
+        )
+        team2_elo = (
+            self.get_team_elo(team2_id)
+            if team2_id
+            else (team2_default_elo if team2_default_elo is not None else 1500.0)
+        )
         
         # Get player ELOs
         team1_batter_elos = [self.get_player_batting_elo(pid) for pid in team1_batter_ids]
