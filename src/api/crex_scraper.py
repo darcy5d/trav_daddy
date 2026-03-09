@@ -2391,6 +2391,13 @@ class CREXScraper:
     def match_players_to_db(self, team: CREXTeam, db_team_name: str, gender: str = 'male') -> List[CREXPlayer]:
         """
         Match CREX players to database players.
+
+        For each player:
+        - Strategy 0: crex_id O(1) lookup (fastest, used after first encounter)
+        - Strategy 1-4: name fuzzy matching (team-scoped then global fallback)
+        - On successful match: persist crex_id to players row for future lookups
+        - On failed match: INSERT a stub player with team-calibrated ELO so the
+          player reaches the simulator rather than being silently dropped
         
         Args:
             team: CREX team with players
@@ -2398,7 +2405,7 @@ class CREXScraper:
             gender: 'male' or 'female'
             
         Returns:
-            Players with db_player_id populated where matched
+            Players with db_player_id populated where matched (or stub-registered)
         """
         if not team or not team.players:
             return []
@@ -2406,35 +2413,153 @@ class CREXScraper:
         if self._name_matcher is None:
             self._name_matcher = PlayerNameMatcher()
         
+        # Lazy-fetch team ELO once only if stub registration is needed
+        _team_elo: Optional[float] = None
+
+        def _resolve_team_elo() -> float:
+            nonlocal _team_elo
+            if _team_elo is not None:
+                return _team_elo
+            elo_col = f'elo_t20_{gender}'
+            try:
+                conn = get_connection()
+                cur = conn.cursor()
+                cur.execute(
+                    f"SELECT COALESCE(tce.{elo_col}, 1500) "
+                    f"FROM team_current_elo tce "
+                    f"JOIN teams t ON tce.team_id = t.team_id "
+                    f"WHERE t.name = ?",
+                    (db_team_name,)
+                )
+                row = cur.fetchone()
+                _team_elo = float(row[0]) if row else 1500.0
+                conn.close()
+            except Exception as exc:
+                logger.warning(f"[STUB] Could not fetch team ELO for '{db_team_name}': {exc}")
+                _team_elo = 1500.0
+            return _team_elo
+
         matched_players = []
-        
+        new_stubs = 0
+
         for player in team.players:
-            # Try matching with team filter first
+            # Pass crex_id so Strategy 0 fires when the player is already registered
             result = self._name_matcher.find_player(
                 player.name,
-                db_team_name
+                db_team_name,
+                crex_id=player.crex_id
             )
             
-            # If no match with team filter, try without (for franchise teams)
-            # Players may have played for other teams in our database
-            if not result and db_team_name:
+            # Global fallback (franchise / loan players): only when there is no crex_id.
+            # When crex_id IS available and team-scoped search failed, skip global fuzzy
+            # matching — the 0.7 threshold can produce cross-team false positives (e.g.
+            # "Sacha De Alwis" → "Saad Ali" at 0.73).  Stub registration is safer.
+            if not result and db_team_name and not player.crex_id:
                 result = self._name_matcher.find_player(
                     player.name,
-                    None  # Search all players
+                    None
                 )
                 if result:
-                    logger.debug(f"Matched '{player.name}' to '{result.db_name}' via global search (not found in {db_team_name})")
+                    logger.debug(
+                        f"Matched '{player.name}' to '{result.db_name}' "
+                        f"via global search (not found under {db_team_name})"
+                    )
             
             if result:
                 player.db_player_id = result.player_id
                 logger.debug(f"Matched '{player.name}' to '{result.db_name}' (ID: {result.player_id})")
+                
+                # Persist crex_id → player_id link so future scrapes skip fuzzy matching
+                if player.crex_id and result.method != 'crex_id':
+                    try:
+                        conn = get_connection()
+                        conn.execute(
+                            "UPDATE players SET crex_player_id = ?, updated_at = CURRENT_TIMESTAMP "
+                            "WHERE player_id = ? AND crex_player_id IS NULL",
+                            (player.crex_id, result.player_id)
+                        )
+                        conn.commit()
+                        conn.close()
+                        # Update in-memory cache so subsequent players in this session benefit
+                        cache_entry = self._name_matcher._player_cache.get(result.player_id, {})
+                        cache_entry['crex_player_id'] = player.crex_id
+                        self._name_matcher._crex_id_to_player[player.crex_id] = cache_entry
+                        logger.debug(
+                            f"[CREX_ID] Saved crex_id '{player.crex_id}' → player {result.player_id} "
+                            f"({result.db_name})"
+                        )
+                    except Exception as exc:
+                        logger.debug(f"[CREX_ID] Could not save crex_id for player {result.player_id}: {exc}")
+
             else:
-                logger.warning(f"Could not match player: {player.name} (team: {db_team_name})")
-            
+                # No name match — register a stub so this player reaches the simulator
+                if player.crex_id:
+                    try:
+                        team_elo = _resolve_team_elo()
+                        elo_bat  = f'batting_elo_t20_{gender}'
+                        elo_bowl = f'bowling_elo_t20_{gender}'
+                        elo_ovr  = f'overall_elo_t20_{gender}'
+
+                        conn = get_connection()
+                        cur = conn.cursor()
+
+                        cur.execute(
+                            "INSERT INTO players (name, country, crex_player_id, is_active) "
+                            "VALUES (?, ?, ?, 1)",
+                            (player.name, db_team_name, player.crex_id)
+                        )
+                        new_id = cur.lastrowid
+
+                        cur.execute(
+                            f"INSERT INTO player_current_elo "
+                            f"    (player_id, {elo_bat}, {elo_bowl}, {elo_ovr}) "
+                            f"VALUES (?, ?, ?, ?)",
+                            (new_id, team_elo, team_elo, team_elo)
+                        )
+
+                        conn.commit()
+                        conn.close()
+
+                        player.db_player_id = new_id
+                        new_stubs += 1
+                        logger.info(
+                            f"[STUB] Registered '{player.name}' (crex_id={player.crex_id}) "
+                            f"for {db_team_name} as player_id={new_id}, ELO={team_elo:.0f}"
+                        )
+
+                        # Populate in-memory caches immediately so same-session matches find it
+                        stub_entry = {
+                            'player_id': new_id,
+                            'name': player.name,
+                            'espn_player_id': None,
+                            'crex_player_id': player.crex_id,
+                            'team_name': db_team_name,
+                            'gender': gender,
+                        }
+                        self._name_matcher._player_cache[new_id] = stub_entry
+                        self._name_matcher._crex_id_to_player[player.crex_id] = stub_entry
+                        if db_team_name not in self._name_matcher._team_players:
+                            self._name_matcher._team_players[db_team_name] = []
+                        self._name_matcher._team_players[db_team_name].append(stub_entry)
+
+                    except Exception as exc:
+                        logger.warning(
+                            f"[STUB] Could not register stub for '{player.name}' "
+                            f"(crex_id={player.crex_id}): {exc}"
+                        )
+                else:
+                    logger.warning(
+                        f"Could not match player: '{player.name}' (team: {db_team_name}) "
+                        f"— no crex_id available, cannot register stub"
+                    )
+
             matched_players.append(player)
         
         matched_count = sum(1 for p in matched_players if p.db_player_id)
-        logger.info(f"Matched {matched_count}/{len(matched_players)} players for {db_team_name}")
+        logger.info(
+            f"Matched {matched_count}/{len(matched_players)} players for {db_team_name} "
+            f"({new_stubs} new stub(s) registered)"
+        )
         
         return matched_players
 

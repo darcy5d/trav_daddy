@@ -1259,6 +1259,10 @@ def pad_with_db_fillers(batting_order, team_id, team_elo, gender, format_type):
     Only fires when the batting order has fewer than 11 players AND a team_id
     is known. Falls through silently if the team has no extra DB players.
 
+    `team_elo` is used only as a fallback when the team's actual current ELO
+    cannot be found in team_current_elo.  For matched teams the caller passes
+    `None` (defaulting to 1500), which is wrong — always prefer the real ELO.
+
     Returns:
         (padded_order, filler_ids) — filler_ids is the list of IDs added.
     """
@@ -1268,10 +1272,22 @@ def pad_with_db_fillers(batting_order, team_id, team_elo, gender, format_type):
     n_needed = 11 - len(batting_order)
     already = set(batting_order)
     elo_col = f'batting_elo_{format_type.lower()}_{gender}'
+    team_elo_col = f'elo_{format_type.lower()}_{gender}'
 
     try:
         conn = get_connection()
         cursor = conn.cursor()
+
+        # Always resolve the team's actual current ELO from the DB when possible;
+        # the caller-supplied `team_elo` defaults to 1500 for matched teams which
+        # would select their historically *best* players rather than their average.
+        cursor.execute(
+            f"SELECT COALESCE({team_elo_col}, ?) FROM team_current_elo WHERE team_id = ?",
+            (team_elo, team_id)
+        )
+        row = cursor.fetchone()
+        resolved_elo = row[0] if row else team_elo
+
         cursor.execute(f"""
             SELECT DISTINCT pms.player_id,
                    COALESCE(pce.{elo_col}, 1500) as player_elo,
@@ -1284,7 +1300,7 @@ def pad_with_db_fillers(batting_order, team_id, team_elo, gender, format_type):
               AND m.gender = ?
             ORDER BY elo_diff ASC
             LIMIT ?
-        """, (team_elo, team_id, format_type.upper(), gender, n_needed + len(already)))
+        """, (resolved_elo, team_id, format_type.upper(), gender, n_needed + len(already)))
 
         fillers = []
         for row in cursor.fetchall():
@@ -1298,7 +1314,7 @@ def pad_with_db_fillers(batting_order, team_id, team_elo, gender, format_type):
 
     if fillers:
         logger.info(f"[PADDING] Added {len(fillers)} DB filler player(s) for team {team_id} "
-                    f"(ELO target {team_elo:.0f}): {fillers}")
+                    f"(ELO target {resolved_elo:.0f}, team ELO from DB): {fillers}")
 
     return batting_order + fillers, fillers
 
@@ -4422,6 +4438,49 @@ def server_error(e):
     if request.path.startswith('/api/'):
         return jsonify({'success': False, 'error': 'Internal server error'}), 500
     return render_template('500.html'), 500
+
+
+# ============================================================================
+# Startup Checks
+# ============================================================================
+
+def _check_playwright():
+    """
+    Verify the Playwright Chromium binary is installed and executable.
+
+    The Python package (playwright) can be present in the venv while the
+    browser binary is missing — this happens after a fresh pip install or
+    when the cache directory is wiped.  When the binary is absent, CREX squad
+    scraping silently falls back to static HTML only, which means some
+    matches get incomplete squads with no visible error in the browser UI.
+
+    Logs a prominent WARNING at startup so the problem is visible even when
+    the terminal is not being watched.
+    """
+    try:
+        from playwright.sync_api import sync_playwright
+        with sync_playwright() as p:
+            # Just check the executable path — don't launch a full browser
+            executable = p.chromium.executable_path
+            if not Path(executable).exists():
+                raise FileNotFoundError(executable)
+        logger.info("[STARTUP] Playwright Chromium binary OK: %s", executable)
+    except ImportError:
+        logger.warning(
+            "[STARTUP] ⚠  Playwright is NOT installed in this environment. "
+            "CREX squad scraping will fall back to static HTML only — squads may be "
+            "incomplete. Fix: pip install playwright && playwright install chromium"
+        )
+    except Exception as e:
+        logger.warning(
+            "[STARTUP] ⚠  Playwright Chromium binary is MISSING or broken (%s). "
+            "CREX squad scraping will fall back to static HTML only — squads may be "
+            "incomplete. Fix: playwright install chromium",
+            e,
+        )
+
+
+_check_playwright()
 
 
 # ============================================================================

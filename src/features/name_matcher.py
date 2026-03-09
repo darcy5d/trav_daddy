@@ -40,9 +40,11 @@ class PlayerNameMatcher:
     Matches player names from API to database player IDs.
     
     Uses multiple strategies:
+    0. CREX player ID match (fastest — for players registered via CREX scraping)
+    0.5. ESPN player ID match
     1. Exact match
-    2. Surname match (last word)
-    3. Initials + surname match
+    2. Initials + surname match (DB uses abbreviated names, e.g. "AF Ifill")
+    3. Surname match (last word, lower priority)
     4. Fuzzy match with threshold
     """
     
@@ -51,6 +53,7 @@ class PlayerNameMatcher:
     def __init__(self):
         self._player_cache: Dict[int, Dict] = {}
         self._team_players: Dict[str, List[Dict]] = {}
+        self._crex_id_to_player: Dict[str, Dict] = {}
         self._initialized = False
     
     def _initialize(self):
@@ -61,12 +64,14 @@ class PlayerNameMatcher:
         conn = get_connection()
         cursor = conn.cursor()
         
-        # Get all players with their teams (for both male and female)
+        # Load players with T20 match history AND CREX-registered stubs that have
+        # no match history yet (new associate players scraped from CREX).
         cursor.execute("""
             SELECT DISTINCT 
                 p.player_id, 
                 p.name,
                 p.espn_player_id,
+                p.crex_player_id,
                 t.name as team_name,
                 m.gender
             FROM players p
@@ -74,6 +79,19 @@ class PlayerNameMatcher:
             JOIN teams t ON pms.team_id = t.team_id
             JOIN matches m ON pms.match_id = m.match_id
             WHERE m.match_type = 'T20'
+
+            UNION
+
+            SELECT DISTINCT
+                p.player_id,
+                p.name,
+                p.espn_player_id,
+                p.crex_player_id,
+                p.country as team_name,
+                'male' as gender
+            FROM players p
+            WHERE p.crex_player_id IS NOT NULL
+              AND p.player_id NOT IN (SELECT DISTINCT player_id FROM player_match_stats)
         """)
         
         for row in cursor.fetchall():
@@ -81,11 +99,16 @@ class PlayerNameMatcher:
                 'player_id': row['player_id'],
                 'name': row['name'],
                 'espn_player_id': row['espn_player_id'],
+                'crex_player_id': row['crex_player_id'],
                 'team_name': row['team_name'],
                 'gender': row['gender']
             }
             
             self._player_cache[row['player_id']] = player
+            
+            # Fast crex_id lookup
+            if row['crex_player_id']:
+                self._crex_id_to_player[row['crex_player_id']] = player
             
             # Index by team
             team = row['team_name']
@@ -99,7 +122,11 @@ class PlayerNameMatcher:
         conn.close()
         self._initialized = True
         
-        logger.info(f"Loaded {len(self._player_cache)} players from {len(self._team_players)} teams")
+        stub_count = sum(1 for p in self._player_cache.values() if p.get('crex_player_id'))
+        logger.info(
+            f"Loaded {len(self._player_cache)} players from {len(self._team_players)} teams "
+            f"({stub_count} with CREX IDs)"
+        )
     
     def _normalize_name(self, name: str) -> str:
         """Normalize a name for comparison."""
@@ -166,7 +193,8 @@ class PlayerNameMatcher:
         api_name: str, 
         team_name: str = None,
         role: str = None,
-        espn_player_id: int = None
+        espn_player_id: int = None,
+        crex_id: str = None
     ) -> Optional[MatchResult]:
         """
         Find database player matching API name.
@@ -176,13 +204,26 @@ class PlayerNameMatcher:
             team_name: Optional team name to narrow search
             role: Optional role (Batsman, Bowler, etc.) for disambiguation
             espn_player_id: Optional ESPN player ID for exact matching
+            crex_id: Optional CREX player ID for instant lookup
             
         Returns:
             MatchResult if found, None otherwise
         """
         self._initialize()
         
-        # Strategy 0: ESPN ID match (most reliable)
+        # Strategy 0: CREX ID match — O(1), guaranteed correct for registered players
+        if crex_id and crex_id in self._crex_id_to_player:
+            player = self._crex_id_to_player[crex_id]
+            logger.debug(f"CREX ID match: {api_name} -> {player['name']} (crex_id: {crex_id})")
+            return MatchResult(
+                player_id=player['player_id'],
+                db_name=player['name'],
+                api_name=api_name,
+                score=1.0,
+                method='crex_id'
+            )
+        
+        # Strategy 0.5: ESPN ID match (most reliable for international players)
         if espn_player_id:
             for player in self._player_cache.values():
                 if player.get('espn_player_id') == espn_player_id:
