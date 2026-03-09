@@ -1251,6 +1251,58 @@ def get_available_prediction_models():
         return jsonify({'success': False, 'error': str(e), 'available': []}), 500
 
 
+def pad_with_db_fillers(batting_order, team_id, team_elo, gender, format_type):
+    """
+    Pad a short batting order to 11 using real DB players from the same team,
+    ordered by batting ELO closest to the team's current rating.
+
+    Only fires when the batting order has fewer than 11 players AND a team_id
+    is known. Falls through silently if the team has no extra DB players.
+
+    Returns:
+        (padded_order, filler_ids) — filler_ids is the list of IDs added.
+    """
+    if len(batting_order) >= 11 or not team_id:
+        return batting_order, []
+
+    n_needed = 11 - len(batting_order)
+    already = set(batting_order)
+    elo_col = f'batting_elo_{format_type.lower()}_{gender}'
+
+    try:
+        conn = get_connection()
+        cursor = conn.cursor()
+        cursor.execute(f"""
+            SELECT DISTINCT pms.player_id,
+                   COALESCE(pce.{elo_col}, 1500) as player_elo,
+                   ABS(COALESCE(pce.{elo_col}, 1500) - ?) as elo_diff
+            FROM player_match_stats pms
+            LEFT JOIN player_current_elo pce ON pms.player_id = pce.player_id
+            JOIN matches m ON pms.match_id = m.match_id
+            WHERE pms.team_id = ?
+              AND m.match_type = ?
+              AND m.gender = ?
+            ORDER BY elo_diff ASC
+            LIMIT ?
+        """, (team_elo, team_id, format_type.upper(), gender, n_needed + len(already)))
+
+        fillers = []
+        for row in cursor.fetchall():
+            if row['player_id'] not in already and len(fillers) < n_needed:
+                fillers.append(row['player_id'])
+                already.add(row['player_id'])
+        conn.close()
+    except Exception as e:
+        logger.warning(f"[PADDING] Could not fetch DB fillers for team {team_id}: {e}")
+        return batting_order, []
+
+    if fillers:
+        logger.info(f"[PADDING] Added {len(fillers)} DB filler player(s) for team {team_id} "
+                    f"(ELO target {team_elo:.0f}): {fillers}")
+
+    return batting_order + fillers, fillers
+
+
 @app.route('/api/simulate', methods=['POST'])
 def simulate_match():
     """
@@ -1410,7 +1462,26 @@ def simulate_match():
         
         team1_batters = build_batting_order(team1_batters_raw, team1_bowlers_raw)
         team2_batters = build_batting_order(team2_batters_raw, team2_bowlers_raw)
-        
+
+        # Pad short batting orders with real DB players from the same team,
+        # selected by ELO closest to the team's current rating.
+        t1_pad_elo = team1_default_elo if team1_default_elo is not None else 1500
+        t2_pad_elo = team2_default_elo if team2_default_elo is not None else 1500
+        team1_batters, t1_fillers = pad_with_db_fillers(
+            team1_batters, team1_id, t1_pad_elo, gender, model_format)
+        team2_batters, t2_fillers = pad_with_db_fillers(
+            team2_batters, team2_id, t2_pad_elo, gender, model_format)
+        if t1_fillers:
+            data_warnings.append(
+                f"{team1_name}: {len(t1_fillers)} squad slot(s) filled from DB by ELO calibration "
+                f"(squad had only {len(team1_batters) - len(t1_fillers)}/11 matched players)."
+            )
+        if t2_fillers:
+            data_warnings.append(
+                f"{team2_name}: {len(t2_fillers)} squad slot(s) filled from DB by ELO calibration "
+                f"(squad had only {len(team2_batters) - len(t2_fillers)}/11 matched players)."
+            )
+
         # Get unique bowlers (no duplicates allowed - each bowler can only bowl once)
         team1_bowlers = list(dict.fromkeys(team1_bowlers_raw[:5]))  # Dedupe, keep order
         team2_bowlers = list(dict.fromkeys(team2_bowlers_raw[:5]))
@@ -1429,8 +1500,8 @@ def simulate_match():
                         break
             return bowlers
         
-        team1_bowlers = fill_with_parttimers(team1_bowlers, team1_batters_raw)
-        team2_bowlers = fill_with_parttimers(team2_bowlers, team2_batters_raw)
+        team1_bowlers = fill_with_parttimers(team1_bowlers, team1_batters)
+        team2_bowlers = fill_with_parttimers(team2_bowlers, team2_batters)
         
         # Get toss field probability from historical data
         toss_field_prob = 0.65  # Default T20 field preference
@@ -1683,7 +1754,26 @@ def simulate_match_stream():
     # Build proper batting orders (11 unique players each)
     team1_batting_order = build_batting_order(team1_batters_raw, team1_bowlers_raw)
     team2_batting_order = build_batting_order(team2_batters_raw, team2_bowlers_raw)
-    
+
+    # Pad short batting orders with real DB players from the same team,
+    # selected by ELO closest to the team's current rating.
+    t1_pad_elo = team1_default_elo if team1_default_elo is not None else 1500
+    t2_pad_elo = team2_default_elo if team2_default_elo is not None else 1500
+    team1_batting_order, t1_fillers = pad_with_db_fillers(
+        team1_batting_order, team1_id, t1_pad_elo, gender, model_format)
+    team2_batting_order, t2_fillers = pad_with_db_fillers(
+        team2_batting_order, team2_id, t2_pad_elo, gender, model_format)
+    if t1_fillers:
+        stream_data_warnings.append(
+            f"{team1_name}: {len(t1_fillers)} squad slot(s) filled from DB by ELO calibration "
+            f"(squad had only {len(team1_batting_order) - len(t1_fillers)}/11 matched players)."
+        )
+    if t2_fillers:
+        stream_data_warnings.append(
+            f"{team2_name}: {len(t2_fillers)} squad slot(s) filled from DB by ELO calibration "
+            f"(squad had only {len(team2_batting_order) - len(t2_fillers)}/11 matched players)."
+        )
+
     # Get unique bowlers (no duplicates allowed - each bowler can only bowl once)
     team1_bowlers = list(dict.fromkeys(team1_bowlers_raw[:5]))  # Dedupe, keep order
     team2_bowlers = list(dict.fromkeys(team2_bowlers_raw[:5]))
@@ -1701,8 +1791,8 @@ def simulate_match_stream():
                     break
         return bowlers
     
-    team1_bowlers = fill_with_parttimers(team1_bowlers, team1_batters_raw)
-    team2_bowlers = fill_with_parttimers(team2_bowlers, team2_batters_raw)
+    team1_bowlers = fill_with_parttimers(team1_bowlers, team1_batting_order)
+    team2_bowlers = fill_with_parttimers(team2_bowlers, team2_batting_order)
     
     # ===== SIMULATION AUDIT LOG =====
     # Critical for debugging gender/model selection issues
