@@ -5,18 +5,19 @@ Scrapes T20 match schedules, venues, and squad data from crex.com.
 Replaces the ESPN Cricinfo scraper with a more reliable HTML-based approach.
 
 Key pages:
-- Schedule: https://crex.com/schedule
-- Match Info: https://crex.com/scoreboard/{match_id}/{series_id}/{match_type}/{team1_id}/{team2_id}/{slug}/info
-- Live Match: https://crex.com/scoreboard/.../live
+- Schedule: https://crex.com/schedule (fixtures are embedded in ``script#app-root-state``, not as ``/scoreboard/`` links)
+- Match Info (legacy): https://crex.com/scoreboard/{match_id}/{series_id}/{match_type}/{team1_id}/{team2_id}/{slug}/info
+- Match page (current): https://crex.com/cricket-live-score/{slug}-{matchKey} (no ``/info`` suffix — that path 404s)
 """
 
+import json
 import logging
 import re
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Optional, Tuple
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlparse
 
 import requests
 from bs4 import BeautifulSoup
@@ -144,6 +145,19 @@ KNOWN_LIST_A_SERIES_STRINGS = frozenset([
     'royal london one-day',
 ])
 
+# Exact strings from CrickAPI/CREX → conventional spelling in our UI (IDs unchanged).
+# Example: PSL 2026 franchise is widely written "Rawalpindiz"; CREX uses "RawalPindiZ".
+_CREX_TEAM_DISPLAY_NAME_FIXES = {
+    'RawalPindiZ': 'Rawalpindiz',
+}
+
+
+def normalize_crex_team_display_name(name: str) -> str:
+    """Normalize CREX/CrickAPI team labels for display. Does not alter ``crex_id`` lookups."""
+    if not name:
+        return name
+    return _CREX_TEAM_DISPLAY_NAME_FIXES.get(name, name)
+
 
 def _parse_explicit_format(text: str) -> Optional[str]:
     """
@@ -187,6 +201,8 @@ class CREXScraper:
     
     BASE_URL = "https://crex.com"
     SCHEDULE_URL = f"{BASE_URL}/schedule"
+    # Angular transfers fixture rows under this key inside script#app-root-state
+    _FIXTURE_STATE_KEY = "https://crickapi.com/fixture/getFixture"
     
     HEADERS = {
         'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
@@ -456,6 +472,219 @@ class CREXScraper:
         
         return None, None, None
 
+    def _decode_crex_app_root_state(self, raw: str) -> Optional[dict]:
+        """
+        Parse CREX ``script#app-root-state`` JSON. The site uses HTML-like entities
+        (`&q;` → ", `&s;` → ', ``\\&q;`` → escaped quote) instead of plain JSON.
+        """
+        if not raw or not raw.strip():
+            return None
+        try:
+            s = raw.replace('&s;', "'")
+            s = re.sub(r'\\&q;', r'\"', s)
+            s = s.replace('&q;', '"')
+            return json.loads(s)
+        except json.JSONDecodeError as e:
+            logger.warning(f"Could not decode CREX app-root-state JSON: {e}")
+            return None
+
+    def _normalize_crex_live_score_url(self, url_or_path: str) -> str:
+        """
+        Build a fetchable cricket-live-score URL.
+
+        Schedule links use ``...-match-updates-{key}``; the live page responds on
+        ``...-{key}``. Appending ``/info`` returns 404 for these routes.
+        """
+        href = url_or_path.strip()
+        if href.startswith('http'):
+            parsed = urlparse(href)
+            if parsed.netloc and 'crex.com' not in parsed.netloc:
+                return href
+            path = parsed.path or '/'
+        else:
+            path = href if href.startswith('/') else f'/{href}'
+        path = path.rstrip('/')
+        if path.endswith('/info'):
+            path = path[:-len('/info')]
+        path = re.sub(r'-match-updates-([A-Za-z0-9]+)$', r'-\1', path)
+        return urljoin(self.BASE_URL, path)
+
+    def _parse_schedule_from_embedded_state(
+        self, soup: BeautifulSoup, formats: Optional[List[str]]
+    ) -> List[CREXMatch]:
+        """Read fixtures from script#app-root-state (current CREX SSR)."""
+        script = soup.find('script', id='app-root-state')
+        if not script or not script.string:
+            return []
+        state = self._decode_crex_app_root_state(script.string)
+        if not state:
+            return []
+        rows = state.get(self._FIXTURE_STATE_KEY)
+        if not isinstance(rows, list):
+            return []
+        matches: List[CREXMatch] = []
+        seen_links: set = set()
+        for fx in rows:
+            if not isinstance(fx, dict):
+                continue
+            m = self._fixture_row_to_schedule_match(fx)
+            if not m:
+                continue
+            if m.match_url in seen_links:
+                continue
+            seen_links.add(m.match_url)
+            if formats:
+                model_fmt = format_type_to_model_format(m.format_type)
+                if m.format_type not in formats and model_fmt not in formats:
+                    continue
+            matches.append(m)
+        return matches
+
+    def _fixture_row_to_schedule_match(self, fx: dict) -> Optional[CREXMatch]:
+        """Map one ``getFixture`` row to :class:`CREXMatch`."""
+        link = (fx.get('link') or '').strip()
+        if not link or 'cricket-live-score' not in link:
+            return None
+        match_key = fx.get('mf') or fx.get('nf') or fx.get('matchFkey') or ''
+        if not match_key:
+            return None
+        series_id = str(fx.get('sf') or '')
+        team1_id = str(fx.get('t1f') or fx.get('team1fkey') or '')
+        team2_id = str(fx.get('t2f') or fx.get('team2fkey') or '')
+        team1_name = normalize_crex_team_display_name((fx.get('team1') or '').strip())
+        team2_name = normalize_crex_team_display_name((fx.get('team2') or '').strip())
+        series_name = (fx.get('n') or fx.get('seriesShortName') or '').strip()
+
+        fmt_raw = (fx.get('formats') or fx.get('fo') or 'T20')
+        if isinstance(fmt_raw, str):
+            fmt_l = fmt_raw.strip().lower()
+        else:
+            fmt_l = 't20'
+        if fmt_l in ('one day', 'list a', 'oda'):
+            format_type = 'ODI'
+        elif 'odi' in fmt_l:
+            format_type = 'ODI'
+        elif 'test' in fmt_l:
+            format_type = 'TEST'
+        elif 't10' in fmt_l:
+            format_type = 'T10'
+        elif '100' in fmt_l or 'hundred' in fmt_l:
+            format_type = 'HUNDRED'
+        else:
+            format_type = fmt_raw.strip().upper() if isinstance(fmt_raw, str) and fmt_raw.strip() else 'T20'
+
+        status_val = fx.get('status')
+        st_text = (fx.get('statusText') or '').lower()
+        if status_val == 1 or st_text == 'live':
+            status = 'live'
+        elif status_val == 2 or (fx.get('result') or '').strip():
+            status = 'completed'
+        else:
+            status = 'upcoming'
+
+        match_nums = (fx.get('matchNums') or '').strip()
+        mn = (fx.get('mn') or '').strip()
+        if match_nums:
+            match_type = f'{match_nums} Match'
+        elif mn:
+            match_type = f'{mn} Match'
+        else:
+            match_type = 'Match'
+
+        path_slug = link.split('?')[0].rstrip('/').rsplit('/', 1)[-1]
+        slug = re.sub(r'-match-updates-([A-Za-z0-9]+)$', r'-\1', path_slug)
+
+        start_date: Optional[str] = None
+        start_time: Optional[str] = None
+        date_time_gmt: Optional[str] = None
+        date_s = fx.get('date')
+        if isinstance(date_s, str) and date_s.strip():
+            try:
+                dt = datetime.strptime(date_s.strip(), '%m/%d/%Y')
+                start_date = dt.strftime('%Y-%m-%d')
+            except ValueError:
+                try:
+                    dt = datetime.strptime(date_s.strip(), '%d/%m/%Y')
+                    start_date = dt.strftime('%Y-%m-%d')
+                except ValueError:
+                    pass
+        start_time = (fx.get('startTimeText') or '').strip() or None
+        t_ms = fx.get('t')
+        if isinstance(t_ms, (int, float)):
+            dt_utc = datetime.fromtimestamp(t_ms / 1000.0, tz=timezone.utc)
+            date_time_gmt = dt_utc.strftime('%Y-%m-%dT%H:%M:%SZ')
+            if not start_date:
+                start_date = dt_utc.strftime('%Y-%m-%d')
+
+        g = fx.get('g')
+        if g == 0:
+            gender = 'female'
+        elif g == 1:
+            gender = 'male'
+        else:
+            gender = self._detect_gender(f'{team1_name} {team2_name} {series_name}')
+
+        title = f'{team1_name} vs {team2_name}' if team1_name and team2_name else slug.replace('-', ' ').title()
+
+        match_url = self._normalize_crex_live_score_url(link)
+
+        venue = None
+        vname = (fx.get('venue') or '').strip()
+        if vname:
+            venue = CREXVenue(name=vname, city=self._extract_city_from_venue(vname))
+
+        return CREXMatch(
+            crex_id=str(match_key),
+            series_id=series_id,
+            slug=slug,
+            title=title,
+            team1_name=team1_name,
+            team2_name=team2_name,
+            team1_id=team1_id,
+            team2_id=team2_id,
+            match_type=match_type,
+            series_name=series_name,
+            format_type=format_type,
+            status=status,
+            start_date=start_date,
+            start_time=start_time,
+            date_time_gmt=date_time_gmt,
+            match_url=match_url,
+            venue=venue,
+            gender=gender,
+        )
+
+    def _parse_schedule_from_dom(
+        self, soup: BeautifulSoup, formats: Optional[List[str]]
+    ) -> List[CREXMatch]:
+        """Legacy: walk DOM for ``/scoreboard/`` links (older CREX HTML)."""
+        from bs4 import NavigableString
+
+        matches: List[CREXMatch] = []
+        date_pattern = re.compile(
+            r'^(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun)[a-z]*,?\s+\d{1,2}\s+[A-Za-z]+(?:\s+\d{4})?$',
+            re.I,
+        )
+        current_date = None
+        match_hrefs_seen: set = set()
+        for element in soup.body.descendants if soup.body else []:
+            if isinstance(element, NavigableString):
+                text = str(element).strip()
+                if date_pattern.match(text):
+                    current_date = text
+            elif hasattr(element, 'name') and element.name == 'a':
+                href = element.get('href', '')
+                if '/scoreboard/' in href and href not in match_hrefs_seen:
+                    match_hrefs_seen.add(href)
+                    match = self._parse_schedule_entry(element, href, current_date)
+                    if match:
+                        if formats:
+                            model_fmt = format_type_to_model_format(match.format_type)
+                            if match.format_type not in formats and model_fmt not in formats:
+                                continue
+                        matches.append(match)
+        return matches
+
     # =========================================================================
     # Schedule Parsing
     # =========================================================================
@@ -470,43 +699,14 @@ class CREXScraper:
         Returns:
             List of CREXMatch objects with basic info
         """
-        from bs4 import NavigableString
-        
         html = self._fetch(self.SCHEDULE_URL)
         if not html:
             return []
         
         soup = BeautifulSoup(html, 'html.parser')
-        matches = []
-        
-        # Date pattern for headers like "Sat, 24 Jan 2026"
-        date_pattern = re.compile(r'^(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun)[a-z]*,?\s+\d{1,2}\s+[A-Za-z]+(?:\s+\d{4})?$', re.I)
-        
-        # Track current date as we traverse the DOM
-        current_date = None
-        match_hrefs_seen = set()
-        
-        # Traverse all elements in document order
-        for element in soup.body.descendants if soup.body else []:
-            if isinstance(element, NavigableString):
-                text = str(element).strip()
-                # Check if this is a date header
-                if date_pattern.match(text):
-                    current_date = text
-            elif hasattr(element, 'name') and element.name == 'a':
-                href = element.get('href', '')
-                if '/scoreboard/' in href and href not in match_hrefs_seen:
-                    match_hrefs_seen.add(href)
-                    
-                    # Parse match from the link with current date
-                    match = self._parse_schedule_entry(element, href, current_date)
-                    if match:
-                        # Filter by format if specified. T10/HUNDRED count as T20 for filtering.
-                        if formats:
-                            model_fmt = format_type_to_model_format(match.format_type)
-                            if match.format_type not in formats and model_fmt not in formats:
-                                continue
-                        matches.append(match)
+        matches = self._parse_schedule_from_embedded_state(soup, formats)
+        if not matches:
+            matches = self._parse_schedule_from_dom(soup, formats)
         
         logger.info(f"Found {len(matches)} matches from CREX schedule")
         return matches
@@ -661,6 +861,9 @@ class CREXScraper:
             # Detect gender
             gender = self._detect_gender(text + team1_name + team2_name + slug)
             
+            team1_name = normalize_crex_team_display_name(team1_name)
+            team2_name = normalize_crex_team_display_name(team2_name)
+            
             # Build match URL (always use /info page for details)
             match_url = urljoin(self.BASE_URL, href)
             if not match_url.endswith('/info'):
@@ -709,44 +912,86 @@ class CREXScraper:
         Returns:
             CREXMatch with full details or None
         """
-        # Ensure we're fetching the /info page
-        if not match_url.endswith('/info'):
-            match_url = re.sub(r'/(?:live|scorecard)$', '/info', match_url)
-            if not match_url.endswith('/info'):
-                match_url = match_url.rstrip('/') + '/info'
+        if 'cricket-live-score' in match_url:
+            fetch_url = self._normalize_crex_live_score_url(match_url)
+        else:
+            fetch_url = match_url
+            if not fetch_url.endswith('/info'):
+                fetch_url = re.sub(r'/(?:live|scorecard)$', '/info', fetch_url)
+                if not fetch_url.endswith('/info'):
+                    fetch_url = fetch_url.rstrip('/') + '/info'
         
-        html = self._fetch(match_url)
+        html = self._fetch(fetch_url)
         if not html:
             return None
         
         soup = BeautifulSoup(html, 'html.parser')
         
         try:
-            return self._parse_match_info_page(soup, match_url)
+            return self._parse_match_info_page(soup, fetch_url)
         except Exception as e:
-            logger.error(f"Error parsing match info from {match_url}: {e}")
+            logger.error(f"Error parsing match info from {fetch_url}: {e}")
             import traceback
             traceback.print_exc()
             return None
     
+    def _match_block_from_app_state(self, soup: BeautifulSoup, match_key: str) -> Optional[dict]:
+        """Read ``match-{key}`` blob from script#app-root-state (cricket-live-score pages)."""
+        if not match_key:
+            return None
+        script = soup.find('script', id='app-root-state')
+        if not script or not script.string:
+            return None
+        state = self._decode_crex_app_root_state(script.string)
+        if not state:
+            return None
+        blk = state.get(f'match-{match_key}')
+        return blk if isinstance(blk, dict) else None
+
     def _parse_match_info_page(self, soup: BeautifulSoup, match_url: str) -> CREXMatch:
         """Parse match info page HTML."""
         
         # Extract IDs from URL
-        # URL: https://crex.com/scoreboard/ZEE/2BL/4th-Match/2F/WP/slug/info
-        # After removing protocol and domain: scoreboard/ZEE/2BL/4th-Match/2F/WP/slug/info
+        # Legacy: scoreboard/ZEE/2BL/4th-Match/2F/WP/slug/info
+        # Current: cricket-live-score/{slug}-{matchKey}
         url_path = match_url.replace('https://crex.com/', '').replace('http://crex.com/', '')
         parts = url_path.strip('/').split('/')
         
-        # parts = ['scoreboard', 'ZEE', '2BL', '4th-Match', '2F', 'WP', 'slug', 'info']
-        match_id = parts[1] if len(parts) > 1 else ''
-        series_id = parts[2] if len(parts) > 2 else ''
-        match_type_raw = parts[3] if len(parts) > 3 else ''
-        team1_id = parts[4] if len(parts) > 4 else ''
-        team2_id = parts[5] if len(parts) > 5 else ''
-        slug = parts[6] if len(parts) > 6 else ''
+        match_id = ''
+        series_id = ''
+        match_type_raw = ''
+        team1_id = ''
+        team2_id = ''
+        slug = ''
+        live_blk: Optional[dict] = None
         
-        match_type = match_type_raw.replace('-', ' ').title()
+        if len(parts) >= 2 and parts[0] == 'cricket-live-score':
+            slug_seg = parts[1].split('?')[0]
+            slug = slug_seg
+            tail_m = re.search(r'-([A-Za-z0-9]{2,10})$', slug_seg)
+            if tail_m:
+                match_id = tail_m.group(1)
+            live_blk = self._match_block_from_app_state(soup, match_id)
+            if live_blk:
+                series_id = str(live_blk.get('sf') or '')
+                t1 = live_blk.get('team1') or {}
+                t2 = live_blk.get('team2') or {}
+                if isinstance(t1, dict):
+                    team1_id = str(t1.get('fkey') or '')
+                if isinstance(t2, dict):
+                    team2_id = str(t2.get('fkey') or '')
+            match_type_raw = ''
+        elif len(parts) > 1 and parts[0] == 'scoreboard':
+            match_id = parts[1] if len(parts) > 1 else ''
+            series_id = parts[2] if len(parts) > 2 else ''
+            match_type_raw = parts[3] if len(parts) > 3 else ''
+            team1_id = parts[4] if len(parts) > 4 else ''
+            team2_id = parts[5] if len(parts) > 5 else ''
+            slug = parts[6] if len(parts) > 6 else ''
+        else:
+            match_id = parts[-1] if parts else ''
+        
+        match_type = match_type_raw.replace('-', ' ').title() if match_type_raw else ''
         
         # Get page title/header for match info
         # Format: "BHU-W vs MAS-W, 4th T20, BHU-W Tri-Series 2026 info"
@@ -771,6 +1016,18 @@ class CREXScraper:
             if len(team_images) >= 2:
                 team1_name = team_images[0].get('alt', '')
                 team2_name = team_images[1].get('alt', '')
+        
+        if live_blk:
+            t1b = live_blk.get('team1') or {}
+            t2b = live_blk.get('team2') or {}
+            if isinstance(t1b, dict) and not team1_name:
+                team1_name = (t1b.get('name') or '').strip()
+            if isinstance(t2b, dict) and not team2_name:
+                team2_name = (t2b.get('name') or '').strip()
+            if not match_type:
+                mn_lb = (live_blk.get('mn') or '').strip()
+                if mn_lb:
+                    match_type = f'{mn_lb} Match'
         
         # Try to find full team names in page content (for franchise teams)
         # CREX pages have full names like "Paarl Royals   Sunrisers Eastern Cape  Match info"
@@ -920,6 +1177,9 @@ class CREXScraper:
         # Parse venue stats
         venue_stats = self._parse_venue_stats(soup)
         
+        team1_name = normalize_crex_team_display_name(team1_name)
+        team2_name = normalize_crex_team_display_name(team2_name)
+
         # Parse squads from static HTML first
         team1 = self._parse_squad(soup, team1_id, team1_name, is_first_team=True)
         team2 = self._parse_squad(soup, team2_id, team2_name, is_first_team=False)
@@ -1163,7 +1423,7 @@ class CREXScraper:
                 logger.info(f"CREX HTML contains {len(players)} players for {team_name}")
                 return CREXTeam(
                     crex_id=team_id,
-                    name=team_name,
+                    name=normalize_crex_team_display_name(team_name),
                     abbreviation=team_id,
                     players=players
                 )
@@ -1691,10 +1951,13 @@ class CREXScraper:
         Returns:
             CREXMatch with toss/playing XI info or None
         """
-        # Convert to live page URL
-        live_url = re.sub(r'/(?:info|scorecard)$', '/live', match_url)
-        if not live_url.endswith('/live'):
-            live_url = live_url.rstrip('/') + '/live'
+        # cricket-live-score uses a single page; /live and /info are not valid paths.
+        if 'cricket-live-score' in match_url:
+            live_url = self._normalize_crex_live_score_url(match_url)
+        else:
+            live_url = re.sub(r'/(?:info|scorecard)$', '/live', match_url)
+            if not live_url.endswith('/live'):
+                live_url = live_url.rstrip('/') + '/live'
         
         html = self._fetch(live_url, timeout=20)
         if not html:
@@ -2057,6 +2320,36 @@ class CREXScraper:
         logger.warning(f"No database match for venue: {venue.name}")
         return None
     
+    def _prune_conflicting_crex_alias_expansions(self, team: CREXTeam, names: List[str]) -> List[str]:
+        """
+        Drop abbreviation-table expansions that contradict the scraped full name.
+
+        CREX uses ``MS`` for **Multan Sultans**, but our BBL table maps ``ms`` → Melbourne
+        Stars. That added alias used to win an early exact match depending on SQL row order.
+        Similarly ``st`` → Sydney Thunder can clash with unrelated "Stars"/"Strikers" sides.
+        """
+        primary = (team.name or '').lower()
+        out: List[str] = []
+        seen: set = set()
+        for n in names:
+            if not n or not str(n).strip():
+                continue
+            key = n.strip().lower()
+            if key in seen:
+                continue
+            if key in ('melbourne stars', 'melbourne stars women'):
+                if 'multan' in primary:
+                    continue
+            if key in ('multan sultans', 'multan sultans women'):
+                if 'melbourne' in primary and 'multan' not in primary:
+                    continue
+            if key in ('sydney thunder', 'sydney thunder women'):
+                if ('stars' in primary or 'striker' in primary) and 'sydney' not in primary:
+                    continue
+            seen.add(key)
+            out.append(n)
+        return out
+
     def match_team_to_db(self, team: CREXTeam, gender: str = 'male') -> Optional[Tuple[int, str]]:
         """
         Match CREX team to database team.
@@ -2163,6 +2456,7 @@ class CREXScraper:
             'nsw': 'new south wales', 'vic': 'victoria', 'qld': 'queensland',
             'tas': 'tasmania', 'wa': 'western australia',
             'ss': 'sydney sixers', 'st': 'sydney thunder', 'ps': 'perth scorchers',
+            # BBL only: CREX also uses "MS" for Multan Sultans — prune/contradiction logic applies
             'ms': 'melbourne stars', 'mr': 'melbourne renegades', 'bh': 'brisbane heat',
             'hs': 'hobart hurricanes', 'as': 'adelaide strikers',
         }
@@ -2226,6 +2520,8 @@ class CREXScraper:
                         logger.debug(f"Expanded abbreviation '{variant}' to '{full_name}'")
                     break
         
+        team_names = self._prune_conflicting_crex_alias_expansions(team, team_names)
+        
         # Direction words that must match exactly
         directions = {'northern', 'southern', 'eastern', 'western', 'central'}
         
@@ -2240,6 +2536,33 @@ class CREXScraper:
         def _match_against_candidates(candidates, source_label):
             """Try to match team_names against a list of DB team candidates."""
             from difflib import SequenceMatcher
+            
+            # Exact match on full name + raw abbreviation ONLY first. Prevents alias pollution
+            # (e.g. MS→Melbourne Stars) from exact-matching before the real franchise name.
+            primary_raw: List[str] = []
+            if team.name and str(team.name).strip():
+                primary_raw.append(str(team.name).strip())
+            if team.abbreviation and str(team.abbreviation).strip():
+                ab = str(team.abbreviation).strip()
+                if ab.lower() not in {x.lower() for x in primary_raw}:
+                    primary_raw.append(ab)
+            
+            for row in candidates:
+                db_name = row['name']
+                db_norm = db_name.lower().strip()
+                db_direction = get_direction(db_name)
+                for raw in primary_raw:
+                    crex_norm = raw.lower().replace(' women', '').replace('-w', '').strip()
+                    crex_direction = get_direction(raw)
+                    if crex_direction and db_direction:
+                        if crex_direction != db_direction:
+                            continue
+                    if crex_norm == db_norm:
+                        logger.info(
+                            f"Matched team '{team.name}' to '{db_name}' (exact primary, {source_label})"
+                        )
+                        return (row['team_id'], row['name'])
+            
             best_match = None
             best_score = 0.0
             
