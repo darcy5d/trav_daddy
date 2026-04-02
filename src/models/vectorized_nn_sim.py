@@ -78,12 +78,10 @@ try:
 except Exception as e:
     logging.warning(f"[GPU] Could not configure Metal: {e}")
 
-# Only enable XLA JIT if GPU is available (can slow down CPU inference)
-if _GPU_AVAILABLE:
-    try:
-        tf.config.optimizer.set_jit(True)
-    except Exception:
-        pass
+# Do NOT enable global XLA JIT here.
+# This module already uses per-function JIT via tf.function(jit_compile=True)
+# for inference hot paths. Flipping global JIT can leak into unrelated code
+# paths (e.g. model training in the web app) and cause Metal/XLA crashes.
 
 from src.features.venue_stats import VenueStatsBuilder
 

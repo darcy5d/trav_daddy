@@ -52,6 +52,12 @@ except ImportError:
     from tensorflow.keras import layers, regularizers
     from tensorflow.keras.callbacks import EarlyStopping, ReduceLROnPlateau, ModelCheckpoint
 
+# Ensure training stays off global XLA even if another module toggled it on.
+try:
+    tf.config.optimizer.set_jit(False)
+except Exception:
+    pass
+
 # Sklearn for evaluation
 from sklearn.metrics import classification_report, confusion_matrix, log_loss
 from sklearn.model_selection import train_test_split
@@ -177,6 +183,13 @@ def train_ball_prediction_model(
     Uses chronological split for validation (train on older matches, validate on newer).
     Automatically loads best hyperparameters from a Hyperband tuning run if available.
     """
+    # Defensive: GUI code may have enabled global JIT in this process.
+    # Keep training on the stable non-XLA path for Apple Silicon/Metal.
+    try:
+        tf.config.optimizer.set_jit(False)
+    except Exception:
+        pass
+
     # Chronological split
     # Sort by date and split
     meta = meta.copy()
