@@ -21,6 +21,34 @@ CREATE TABLE IF NOT EXISTS teams (
 -- Create index for fast tier lookups
 CREATE INDEX IF NOT EXISTS idx_teams_tier ON teams(tier);
 
+-- CREX team variants table  
+-- Comprehensive mapping of CREX team fkeys to proper display names and parent teams
+-- Preserves distinctions (Hong Kong A vs Hong Kong) while using appropriate training data
+CREATE TABLE IF NOT EXISTS crex_team_variants (
+    fkey TEXT PRIMARY KEY,           -- CREX team fkey (e.g., "1FO", "Q", "1I") 
+    full_name TEXT NOT NULL,         -- Complete display name (e.g., "Hong Kong A", "Australia Women")
+    short_name TEXT,                 -- Short display name (e.g., "HK-A", "AUS-W")
+    parent_team TEXT NOT NULL,       -- Parent team name for database lookup (e.g., "Hong Kong", "Australia")
+    team_type TEXT NOT NULL CHECK(team_type IN ('main', 'a-team', 'women', 'u19', 'u19-women', 'special')),
+    gender TEXT NOT NULL DEFAULT 'male' CHECK(gender IN ('male', 'female')),
+    db_team_id INTEGER,              -- Matched database team ID (typically parent team)
+    db_team_name TEXT,               -- Database team name used for predictions  
+    match_confidence REAL,           -- Confidence in database match (1.0 for exact, lower for parent mapping)
+    source TEXT DEFAULT 'directory', -- How we learned this: 'directory', 'manual', 'inferred', 'tournament_learning'
+    is_tournament_team BOOLEAN DEFAULT FALSE,  -- TRUE for tournament-specific teams not in permanent directory
+    learned_from_match_id TEXT,      -- Match ID where this tournament team was learned
+    tournament_series TEXT,          -- Series/tournament context where this team appears
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    
+    FOREIGN KEY (db_team_id) REFERENCES teams(team_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_team_variants_parent ON crex_team_variants(parent_team);  
+CREATE INDEX IF NOT EXISTS idx_team_variants_type ON crex_team_variants(team_type);
+CREATE INDEX IF NOT EXISTS idx_team_variants_gender ON crex_team_variants(gender);
+CREATE INDEX IF NOT EXISTS idx_team_variants_tournament ON crex_team_variants(is_tournament_team);
+
 -- Players table
 CREATE TABLE IF NOT EXISTS players (
     player_id INTEGER PRIMARY KEY AUTOINCREMENT,

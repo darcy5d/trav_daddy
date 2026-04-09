@@ -5,7 +5,7 @@ Scrapes T20 match schedules, venues, and squad data from crex.com.
 Replaces the ESPN Cricinfo scraper with a more reliable HTML-based approach.
 
 Key pages:
-- Schedule: https://crex.com/schedule (fixtures are embedded in ``script#app-root-state``, not as ``/scoreboard/`` links)
+- Schedule: https://crex.com/schedule — fixtures load via ``POST https://crickapi.com/fixture/getFixture`` (SSR may still embed legacy ``script#app-root-state`` data)
 - Match Info (legacy): https://crex.com/scoreboard/{match_id}/{series_id}/{match_type}/{team1_id}/{team2_id}/{slug}/info
 - Match page (current): https://crex.com/cricket-live-score/{slug}-{matchKey} (no ``/info`` suffix — that path 404s)
 """
@@ -127,7 +127,7 @@ def format_type_to_model_format(format_type: str) -> str:
         return 'T20'
     if u == 'ODI':
         return 'ODI'
-    if u == 'TEST':
+    if u in ('TEST', 'MATCH'):
         return 'TEST'
     return 'T20'
 
@@ -143,6 +143,26 @@ KNOWN_LIST_A_SERIES_STRINGS = frozenset([
     'marsh one-day',
     'royal london cup',
     'royal london one-day',
+])
+
+KNOWN_FIRST_CLASS_SERIES_STRINGS = frozenset([
+    'county championship',
+    'sheffield shield',
+    'ranji trophy',
+    'plunket shield',
+    'first class',
+    'first-class',
+    '4 day',
+    '4-day',
+    'four day',
+    'four-day',
+    'test series',
+    'test match',
+    'duleep trophy',
+    'irani cup',
+    'currie cup',
+    'quaid-e-azam trophy',
+    'logan cup',
 ])
 
 # Exact strings from CrickAPI/CREX → conventional spelling in our UI (IDs unchanged).
@@ -201,13 +221,21 @@ class CREXScraper:
     
     BASE_URL = "https://crex.com"
     SCHEDULE_URL = f"{BASE_URL}/schedule"
-    # Angular transfers fixture rows under this key inside script#app-root-state
+    # SPA date-wise schedule uses this endpoint (see FixtureService in CREX bundles).
+    CRICKAPI_GET_FIXTURE_URL = "https://crickapi.com/fixture/getFixture"
+    # Angular TransferState used to embed rows under this key inside script#app-root-state
     _FIXTURE_STATE_KEY = "https://crickapi.com/fixture/getFixture"
     
     HEADERS = {
         'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
         'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
         'Accept-Language': 'en-US,en;q=0.9',
+    }
+    JSON_HEADERS = {
+        'User-Agent': HEADERS['User-Agent'],
+        'Accept': 'application/json, text/plain, */*',
+        'Accept-Language': HEADERS['Accept-Language'],
+        'Content-Type': 'application/json',
     }
     
     # Keywords to detect women's cricket
@@ -286,7 +314,143 @@ class CREXScraper:
         except requests.RequestException as e:
             logger.error(f"Failed to fetch {url}: {e}")
             return None
-    
+
+    def _post_json(self, url: str, payload: dict, timeout: int = 25):
+        """
+        POST JSON with rate limiting. Returns parsed JSON or None on failure.
+        """
+        self._rate_limit()
+        try:
+            response = requests.post(url, headers=self.JSON_HEADERS, json=payload, timeout=timeout)
+            response.raise_for_status()
+            return response.json()
+        except requests.RequestException as e:
+            logger.error(f"Failed to POST {url}: {e}")
+        except json.JSONDecodeError as e:
+            logger.error(f"Invalid JSON from {url}: {e}")
+        return None
+
+    @staticmethod
+    def _flatten_get_fixture_response(data) -> List[dict]:
+        """Normalize crickapi.com (list) or oc.crickapi.com (date-keyed dict) responses."""
+        if isinstance(data, list):
+            out = []
+            for item in data:
+                if isinstance(item, dict):
+                    out.append(item)
+            return out
+        if isinstance(data, dict):
+            if 'httpStatus' in data or 'errcode' in data:
+                return []
+            out: List[dict] = []
+            for v in data.values():
+                if isinstance(v, list):
+                    for item in v:
+                        if isinstance(item, dict):
+                            out.append(item)
+                elif isinstance(v, dict):
+                    out.append(v)
+            return out
+        return []
+
+    def _fetch_schedule_fixture_rows(self, max_pages: int = 12) -> List[dict]:
+        """
+        Pull date-wise fixtures from CrickAPI (same contract as CREX web app, wise='1').
+        Paginates until an empty page or only duplicates vs prior pages.
+        """
+        # Future: batch team/series name resolution (map/check endpoints) when upstream
+        # stops sending team1/team2 on rows; v1 uses team fkeys in titles when names absent.
+        accumulated: List[dict] = []
+        seen_ids: set = set()
+        for page in range(max_pages):
+            payload = {
+                'tl': [0, 0, 0],
+                'type': '',
+                'page': page,
+                'wise': '1',
+                'lang': 'en',
+                'formatType': '',
+            }
+            data = self._post_json(self.CRICKAPI_GET_FIXTURE_URL, payload)
+            if data is None:
+                break
+            flat = self._flatten_get_fixture_response(data)
+            if not flat:
+                break
+            new_rows = 0
+            for fx in flat:
+                row_id = fx.get('mf') or fx.get('nf') or fx.get('id')
+                if row_id is None:
+                    continue
+                key = str(row_id)
+                if key in seen_ids:
+                    continue
+                seen_ids.add(key)
+                accumulated.append(fx)
+                new_rows += 1
+            if new_rows == 0:
+                break
+        return accumulated
+
+    def _resolve_crickapi_format_type(self, fx: dict) -> str:
+        """Derive T20 / ODI / … from ``fo``/``formats`` strings, then CrickAPI ``ft`` enum."""
+        fmt_raw = fx.get('formats') or fx.get('fo')
+        if isinstance(fmt_raw, str):
+            fmt_l = fmt_raw.strip().lower()
+            if fmt_l in ('', 'null'):
+                fmt_l = ''
+        else:
+            fmt_l = ''
+        if fmt_l:
+            if fmt_l in ('one day', 'list a', 'oda'):
+                return 'ODI'
+            if 'test' in fmt_l:
+                return 'TEST'
+            if 't10' in fmt_l:
+                return 'T10'
+            if '100' in fmt_l or 'hundred' in fmt_l:
+                return 'HUNDRED'
+            if 't20' in fmt_l:
+                return 'T20'
+            if 'odi' in fmt_l:
+                return 'ODI'
+            # CrickAPI uses fo="Match" for first-class / multi-day fixtures
+            if fmt_l == 'match':
+                ft = fx.get('ft')
+                if ft == 3:
+                    return 'TEST'
+                series_name = (fx.get('n') or fx.get('seriesShortName') or '').lower()
+                if any(kw in series_name for kw in KNOWN_FIRST_CLASS_SERIES_STRINGS):
+                    return 'TEST'
+                return 'TEST'  # "Match" with no other context defaults to first-class
+            if isinstance(fmt_raw, str) and fmt_raw.strip():
+                return fmt_raw.strip().upper()
+            return 'T20'
+        ft = fx.get('ft')
+        if isinstance(ft, int):
+            if ft == 1:
+                return 'ODI'
+            if ft == 2:
+                return 'T20'
+            if ft == 3:
+                return 'TEST'
+        return 'T20'
+
+    def _crickapi_row_status(self, fx: dict) -> str:
+        """Map CrickAPI ``status`` / ``result`` to upcoming | live | completed."""
+        st = fx.get('status')
+        if st == 1:
+            return 'live'
+        result = fx.get('result')
+        if isinstance(result, str) and result.strip():
+            return 'completed'
+        st_text = (fx.get('statusText') or '').lower()
+        if st_text == 'live':
+            return 'live'
+        if st == 2:
+            return 'completed'
+        return 'upcoming'
+
     def _detect_gender(self, text: str) -> str:
         """Detect gender from team/series names."""
         text_lower = text.lower()
@@ -522,32 +686,19 @@ class CREXScraper:
         rows = state.get(self._FIXTURE_STATE_KEY)
         if not isinstance(rows, list):
             return []
-        matches: List[CREXMatch] = []
-        seen_links: set = set()
-        for fx in rows:
-            if not isinstance(fx, dict):
-                continue
-            m = self._fixture_row_to_schedule_match(fx)
-            if not m:
-                continue
-            if m.match_url in seen_links:
-                continue
-            seen_links.add(m.match_url)
-            if formats:
-                model_fmt = format_type_to_model_format(m.format_type)
-                if m.format_type not in formats and model_fmt not in formats:
-                    continue
-            matches.append(m)
-        return matches
+        return self._rows_to_schedule_matches(rows, formats)
 
     def _fixture_row_to_schedule_match(self, fx: dict) -> Optional[CREXMatch]:
-        """Map one ``getFixture`` row to :class:`CREXMatch`."""
-        link = (fx.get('link') or '').strip()
-        if not link or 'cricket-live-score' not in link:
-            return None
+        """Map one ``getFixture`` row (SSR or CrickAPI JSON) to :class:`CREXMatch`."""
         match_key = fx.get('mf') or fx.get('nf') or fx.get('matchFkey') or ''
         if not match_key:
             return None
+        match_key = str(match_key).strip()
+
+        link = (fx.get('link') or '').strip()
+        if not link or 'cricket-live-score' not in link:
+            link = f'/cricket-live-score/match-updates-{match_key}'
+
         series_id = str(fx.get('sf') or '')
         team1_id = str(fx.get('t1f') or fx.get('team1fkey') or '')
         team2_id = str(fx.get('t2f') or fx.get('team2fkey') or '')
@@ -555,32 +706,52 @@ class CREXScraper:
         team2_name = normalize_crex_team_display_name((fx.get('team2') or '').strip())
         series_name = (fx.get('n') or fx.get('seriesShortName') or '').strip()
 
-        fmt_raw = (fx.get('formats') or fx.get('fo') or 'T20')
-        if isinstance(fmt_raw, str):
-            fmt_l = fmt_raw.strip().lower()
-        else:
-            fmt_l = 't20'
-        if fmt_l in ('one day', 'list a', 'oda'):
-            format_type = 'ODI'
-        elif 'odi' in fmt_l:
-            format_type = 'ODI'
-        elif 'test' in fmt_l:
-            format_type = 'TEST'
-        elif 't10' in fmt_l:
-            format_type = 'T10'
-        elif '100' in fmt_l or 'hundred' in fmt_l:
-            format_type = 'HUNDRED'
-        else:
-            format_type = fmt_raw.strip().upper() if isinstance(fmt_raw, str) and fmt_raw.strip() else 'T20'
+        gn = fx.get('global_num')
+        if isinstance(gn, dict) and gn.get('fr'):
+            fri = (gn.get('fri') or '').lstrip('^')
+            fr_name = normalize_crex_team_display_name(str(gn.get('fr')).strip())
+            if fri and team2_id and fri == team2_id:
+                team2_name = fr_name
+            elif fri and team1_id and fri == team1_id:
+                team1_name = fr_name
 
-        status_val = fx.get('status')
-        st_text = (fx.get('statusText') or '').lower()
-        if status_val == 1 or st_text == 'live':
-            status = 'live'
-        elif status_val == 2 or (fx.get('result') or '').strip():
-            status = 'completed'
-        else:
-            status = 'upcoming'
+        # Try team variant resolver for missing names (preserves distinctions like A-teams)
+        if (not team1_name and team1_id) or (not team2_name and team2_id):
+            try:
+                from src.data.team_variant_resolver import CREXTeamVariantResolver
+                resolver = CREXTeamVariantResolver()
+                
+                # Determine gender for variant lookup
+                g = fx.get('g')
+                gender = 'female' if g == 0 else 'male'
+                
+                if not team1_name and team1_id:
+                    variant = resolver.resolve_team(team1_id, gender)
+                    if variant:
+                        team1_name = variant.full_name  # Use full variant name (e.g., "Hong Kong A")
+                
+                if not team2_name and team2_id:
+                    variant = resolver.resolve_team(team2_id, gender)
+                    if variant:
+                        team2_name = variant.full_name  # Use full variant name (e.g., "Malaysia A")
+                    
+            except ImportError:
+                logger.debug("Team variant resolver not available")
+            except Exception as e:
+                logger.debug(f"Team variant lookup failed: {e}")
+
+        # Final fallback to fkeys (preserves existing behavior)
+        if not team1_name and team1_id:
+            team1_name = team1_id
+        if not team2_name and team2_id:
+            team2_name = team2_id
+
+        format_type = self._resolve_crickapi_format_type(fx)
+        explicit = _parse_explicit_format(f'{team1_name} {team2_name} {series_name}')
+        if explicit:
+            format_type = explicit
+
+        status = self._crickapi_row_status(fx)
 
         match_nums = (fx.get('matchNums') or '').strip()
         mn = (fx.get('mn') or '').strip()
@@ -689,26 +860,271 @@ class CREXScraper:
     # Schedule Parsing
     # =========================================================================
     
-    def get_schedule(self, formats: List[str] = None) -> List[CREXMatch]:
+    def get_schedule(self, formats: List[str] = None, hours_ahead: int = 36, hours_behind: int = 3) -> List[CREXMatch]:
         """
-        Get upcoming matches from CREX schedule page.
+        Get upcoming matches from CREX schedule page with time window filtering.
         
         Args:
             formats: List of formats to include, e.g., ['T20', 'ODI']. None = all.
+            hours_ahead: Only include matches starting within this many hours (default 36)
+            hours_behind: Also include matches from this many hours ago (for in-progress, default 3)
             
         Returns:
-            List of CREXMatch objects with basic info
+            List of CREXMatch objects with basic info, filtered by time window
         """
+        # Get all matches first
+        matches = self._get_all_schedule_matches(formats)
+        
+        # Apply time window filtering  
+        matches = self._filter_by_time_window(matches, hours_ahead, hours_behind)
+        
+        # Enhance team names with optimized performance
+        matches = self.enhance_team_names_optimized(matches)
+        
+        logger.info(f"Found {len(matches)} matches from CREX schedule (window: -{hours_behind}h to +{hours_ahead}h)")
+        return matches
+    
+    def _get_all_schedule_matches(self, formats: List[str] = None) -> List[CREXMatch]:
+        """Get all matches from schedule without time filtering (internal method)."""
         html = self._fetch(self.SCHEDULE_URL)
-        if not html:
-            return []
-        
-        soup = BeautifulSoup(html, 'html.parser')
-        matches = self._parse_schedule_from_embedded_state(soup, formats)
+        soup = BeautifulSoup(html, 'html.parser') if html else None
+
+        matches: List[CREXMatch] = []
+        if soup:
+            matches = self._parse_schedule_from_embedded_state(soup, formats)
+
         if not matches:
+            api_rows = self._fetch_schedule_fixture_rows()
+            matches = self._rows_to_schedule_matches(api_rows, formats)
+
+        if not matches and soup:
             matches = self._parse_schedule_from_dom(soup, formats)
+
+        # Enrich matches with series names from CREX series directory
+        self._enrich_series_names(matches)
+
+        return matches
+
+    def _fetch_series_name_map(self) -> Dict[str, str]:
+        """
+        Fetch series fkey → name mappings from the CREX series page embedded JSON.
+        Uses the same app-root-state approach that works for teams.
+        """
+        series_map: Dict[str, str] = {}
         
-        logger.info(f"Found {len(matches)} matches from CREX schedule")
+        try:
+            html = self._fetch(f"{self.BASE_URL}/series")
+            if not html:
+                return series_map
+            
+            soup = BeautifulSoup(html, 'html.parser')
+            script = soup.find('script', id='app-root-state')
+            if not script or not script.string:
+                return series_map
+            
+            state = self._decode_crex_app_root_state(script.string)
+            if not state:
+                return series_map
+            
+            # Extract from fixture entries on series page (has 'n' field with series name)
+            fixture_data = state.get('https://crickapi.com/fixture/getFixture', {})
+            if isinstance(fixture_data, dict):
+                for month_key, fixtures in fixture_data.items():
+                    if isinstance(fixtures, list):
+                        for fx in fixtures:
+                            if isinstance(fx, dict):
+                                sf = fx.get('sf', '')
+                                n = fx.get('n', '')
+                                if sf and n:
+                                    series_map[sf] = n
+            
+            # Extract from mapping data (higher quality names)
+            for map_key in [
+                'https://oc.crickapi.com/mapping/getHomeMapDataserieswise',
+                'https://oc.crickapi.com/mapping/getHomeMapDatahomeSeries'
+            ]:
+                map_data = state.get(map_key, {})
+                if isinstance(map_data, dict):
+                    for s in map_data.get('s', []):
+                        if isinstance(s, dict):
+                            sf = s.get('f_key', '')
+                            name = s.get('n', '') or s.get('sn', '')
+                            if sf and name:
+                                series_map[sf] = name
+            
+            logger.info(f"Fetched {len(series_map)} series name mappings from CREX")
+            
+        except Exception as e:
+            logger.debug(f"Failed to fetch series names: {e}")
+        
+        return series_map
+
+    def _enrich_series_names(self, matches: List[CREXMatch]):
+        """Fill in missing series names from CREX series directory."""
+        # Check if any matches are missing series names
+        missing_count = sum(1 for m in matches if not m.series_name and m.series_id)
+        if missing_count == 0:
+            return  # All have names already
+        
+        logger.info(f"Enriching {missing_count} matches with missing series names")
+        
+        # Fetch series name mappings
+        series_map = self._fetch_series_name_map()
+        if not series_map:
+            return
+        
+        # Apply series names
+        enriched = 0
+        for match in matches:
+            if not match.series_name and match.series_id:
+                name = series_map.get(match.series_id)
+                if name:
+                    match.series_name = name
+                    enriched += 1
+        
+        logger.info(f"Enriched {enriched}/{missing_count} matches with series names")
+    
+    def _filter_by_time_window(self, matches: List[CREXMatch], hours_ahead: int, hours_behind: int) -> List[CREXMatch]:
+        """Filter matches by time window (similar to ESPN scraper approach)."""
+        if not matches:
+            return matches
+        
+        now = datetime.now(timezone.utc)
+        earliest = now - timedelta(hours=hours_behind)
+        latest = now + timedelta(hours=hours_ahead)
+        
+        filtered_matches = []
+        
+        for match in matches:
+            # Skip matches without proper datetime
+            if not match.date_time_gmt:
+                logger.debug(f"Skipping match without datetime: {match.title}")
+                continue
+            
+            try:
+                # Parse ISO datetime
+                dt = datetime.fromisoformat(match.date_time_gmt.replace('Z', '+00:00'))
+                
+                # Check if match is within time window
+                if dt < earliest or dt > latest:
+                    logger.debug(f"Skipping match outside time window: {match.title} at {match.date_time_gmt}")
+                    continue
+                
+                filtered_matches.append(match)
+                
+            except ValueError:
+                logger.debug(f"Skipping match with unparseable date: {match.title} - {match.date_time_gmt}")
+                continue
+        
+        logger.info(f"Time filtered: {len(filtered_matches)}/{len(matches)} matches in window ({hours_behind}h behind to {hours_ahead}h ahead)")
+        return filtered_matches
+
+    def _rows_to_schedule_matches(
+        self, rows: List[dict], formats: Optional[List[str]]
+    ) -> List[CREXMatch]:
+        """Convert raw CrickAPI/SSR fixture dicts to CREXMatch with optional format filter."""
+        matches: List[CREXMatch] = []
+        seen_links: set = set()
+        for fx in rows:
+            if not isinstance(fx, dict):
+                continue
+            m = self._fixture_row_to_schedule_match(fx)
+            if not m:
+                continue
+            if m.match_url in seen_links:
+                continue
+            seen_links.add(m.match_url)
+            if formats:
+                model_fmt = format_type_to_model_format(m.format_type)
+                if m.format_type not in formats and model_fmt not in formats:
+                    continue
+            matches.append(m)
+        return matches
+    
+    def enhance_team_names_optimized(self, matches: List[CREXMatch]) -> List[CREXMatch]:
+        """
+        Optimized team name resolution with performance considerations.
+        
+        Uses cached comprehensive team data for fast resolution, with minimal
+        tournament learning to avoid slowing down schedule requests.
+        """
+        if not matches:
+            return matches
+            
+        try:
+            from src.data.team_variant_resolver import CREXTeamVariantResolver
+            from src.data.tournament_team_learner import TournamentTeamLearner
+            
+            resolver = CREXTeamVariantResolver()
+            
+            # Step 1: Fast batch resolve from comprehensive database (most teams covered)
+            fkeys_to_lookup = []
+            for match in matches:
+                if match.team1_id and (not match.team1_name or match.team1_name == match.team1_id):
+                    fkeys_to_lookup.append(match.team1_id)
+                if match.team2_id and (not match.team2_name or match.team2_name == match.team2_id):
+                    fkeys_to_lookup.append(match.team2_id)
+            
+            if fkeys_to_lookup:
+                # Use mixed gender approach for better coverage
+                resolved_variants = {}
+                
+                # Try both male and female variants for comprehensive coverage
+                for gender in ['male', 'female']:
+                    gender_variants = resolver.bulk_resolve_teams(fkeys_to_lookup, gender)
+                    for fkey, variant in gender_variants.items():
+                        if fkey not in resolved_variants:  # First match wins
+                            resolved_variants[fkey] = variant
+                
+                # Apply resolved variants
+                enhanced_count = 0
+                for match in matches:
+                    if match.team1_id in resolved_variants:
+                        variant = resolved_variants[match.team1_id]
+                        if not match.team1_name or match.team1_name == match.team1_id:
+                            match.team1_name = variant.full_name
+                            enhanced_count += 1
+                    
+                    if match.team2_id in resolved_variants:
+                        variant = resolved_variants[match.team2_id]  
+                        if not match.team2_name or match.team2_name == match.team2_id:
+                            match.team2_name = variant.full_name
+                            enhanced_count += 1
+                
+                logger.debug(f"Enhanced {enhanced_count} team names from comprehensive database")
+            
+            # Step 2: Limited tournament learning for truly new codes (performance optimized)
+            unresolved = []
+            for match in matches:
+                if match.team1_name == match.team1_id:
+                    unresolved.append(match.team1_id)
+                if match.team2_name == match.team2_id:
+                    unresolved.append(match.team2_id)
+            
+            # Only learn if we have few unresolved codes (avoid performance hit)
+            if unresolved and len(unresolved) <= 5:  # Performance threshold
+                learner = TournamentTeamLearner(max_learn_per_session=2)  # Reduced for performance
+                learned_mappings = learner.learn_tournament_teams(unresolved, matches, self)
+                
+                # Apply learned names
+                for match in matches:
+                    if match.team1_id in learned_mappings:
+                        match.team1_name = learned_mappings[match.team1_id]
+                    if match.team2_id in learned_mappings:
+                        match.team2_name = learned_mappings[match.team2_id]
+            elif len(unresolved) > 5:
+                logger.info(f"Skipping tournament learning for {len(unresolved)} codes (performance optimization)")
+            
+            # Update all match titles
+            for match in matches:
+                if match.team1_name and match.team2_name:
+                    match.title = f"{match.team1_name} vs {match.team2_name}"
+            
+        except ImportError:
+            logger.debug("Team learning system not available")  
+        except Exception as e:
+            logger.debug(f"Team learning enhancement failed: {e}")
+            
         return matches
     
     def _parse_schedule_entry(self, link_element, href: str, date_str: str = None) -> Optional[CREXMatch]:
@@ -1011,11 +1427,16 @@ class CREXScraper:
             team2_name = ''
             series_name = ''
             
-            # Look for team images
+            # Look for team images (filter out generic placeholder alt text)
             team_images = soup.select('img[src*="Teams"]')
             if len(team_images) >= 2:
-                team1_name = team_images[0].get('alt', '')
-                team2_name = team_images[1].get('alt', '')
+                alt1 = team_images[0].get('alt', '').strip()
+                alt2 = team_images[1].get('alt', '').strip()
+                generic_alts = {'team image', 'team important image', 'image', 'team', 'logo', ''}
+                if alt1.lower() not in generic_alts:
+                    team1_name = alt1
+                if alt2.lower() not in generic_alts:
+                    team2_name = alt2
         
         if live_blk:
             t1b = live_blk.get('team1') or {}
@@ -1202,7 +1623,8 @@ class CREXScraper:
         # Build title
         title = f"{team1_name} vs {team2_name}" if team1_name and team2_name else slug.replace('-', ' ').title()
         
-        return CREXMatch(
+        # Create match object first so we can populate cache
+        match = CREXMatch(
             crex_id=match_id,
             series_id=series_id,
             slug=slug,
@@ -1226,6 +1648,11 @@ class CREXScraper:
             team2=team2,
             has_squads=has_squads
         )
+        
+        # Note: Team variant population from match details is handled separately
+        # via the comprehensive directory scraping rather than per-match learning
+        
+        return match
     
     def _parse_venue_stats(self, soup: BeautifulSoup) -> Optional[CREXVenueStats]:
         """Parse venue statistics from match info page."""

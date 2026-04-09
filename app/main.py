@@ -3014,10 +3014,12 @@ def get_crex_scraper():
 @app.route('/api/crex/upcoming', methods=['GET'])
 def get_crex_upcoming():
     """
-    Get upcoming matches from CREX.
+    Get upcoming matches from CREX with time window filtering.
     
     Query params:
         format: 'T20', 'ODI', or omit / 'all' to include all formats (default: all).
+        hours_ahead: Only include matches starting within this many hours (default: 36).
+        hours_behind: Also include matches from this many hours ago (default: 3).
         
     Returns:
         List of upcoming matches with basic info, grouped by series
@@ -3027,9 +3029,13 @@ def get_crex_upcoming():
         if format_param and format_param.lower() == 'all':
             format_param = None
         formats = [format_param] if format_param else None
+        
+        # Time window parameters (restored usability)
+        hours_ahead = int(request.args.get('hours_ahead', 36))  # Default 36h as requested
+        hours_behind = int(request.args.get('hours_behind', 3))
 
         scraper = get_crex_scraper()
-        matches = scraper.get_schedule(formats=formats)
+        matches = scraper.get_schedule(formats=formats, hours_ahead=hours_ahead, hours_behind=hours_behind)
 
         # Group by series
         series_dict = {}

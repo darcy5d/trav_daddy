@@ -542,7 +542,7 @@
     <p>Select an upcoming match or manually configure teams to simulate</p>
 </div>
 
-<!-- Upcoming Matches (Next 24 Hours) -->
+<!-- Upcoming Matches (Next 36 Hours) -->
 <div id="upcoming-matches" class="card" style="margin-bottom: 1.5rem; border: 2px solid var(--accent-primary);">
     <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 1rem;">
         <h2 class="card-title" style="margin: 0; display: flex; align-items: center; gap: 0.5rem;">
@@ -602,7 +602,7 @@
     </div>
     
     <div id="matches-empty" style="display: none; text-align: center; padding: 2rem; color: var(--text-secondary);">
-        <p>No matches scheduled in the next 24 hours.</p>
+        <p>No matches scheduled in the next 36 hours.</p>
         <p style="font-size: 0.875rem; margin-top: 0.5rem;">You can still manually select teams below.</p>
     </div>
     
@@ -1986,7 +1986,7 @@
             if (upcomingMatchesRaw && upcomingMatchesRaw.matches_by_series && upcomingMatchesRaw.matches_by_series.length > 0) {
                 emptyEl.innerHTML = '<p>No matches match the current filters.</p><p style="font-size: 0.875rem; margin-top: 0.5rem;">Try changing Gender or Format above.</p>';
             } else {
-                emptyEl.innerHTML = '<p>No matches scheduled in the next 24 hours.</p><p style="font-size: 0.875rem; margin-top: 0.5rem;">You can still manually select teams below.</p>';
+                emptyEl.innerHTML = '<p>No matches scheduled in the next 36 hours.</p><p style="font-size: 0.875rem; margin-top: 0.5rem;">You can still manually select teams below.</p>';
             }
             return;
         }
@@ -2071,9 +2071,9 @@
         try {
             // Choose endpoint based on data source
             let endpoint = currentDataSource === 'crex'
-                ? '/api/crex/upcoming'
+                ? '/api/crex/upcoming?hours_ahead=36'  // Updated to 36h for consistency
                 : currentDataSource === 'espn' 
-                    ? '/api/espn/upcoming?hours_ahead=72'
+                    ? '/api/espn/upcoming?hours_ahead=36'  // Made consistent with CREX
                     : '/api/t20/upcoming';
             
             console.log(`[loadUpcomingMatches] Fetching from: ${endpoint}`);
@@ -2098,7 +2098,7 @@
                 if (bulkSelectMode) applyBulkSelectToCards();
             } else {
                 upcomingMatchesRaw = null;
-                emptyEl.innerHTML = '<p>No matches scheduled in the next 24 hours.</p><p style="font-size: 0.875rem; margin-top: 0.5rem;">You can still manually select teams below.</p>';
+                emptyEl.innerHTML = '<p>No matches scheduled in the next 36 hours.</p><p style="font-size: 0.875rem; margin-top: 0.5rem;">You can still manually select teams below.</p>';
                 emptyEl.style.display = 'block';
             }
         } catch (error) {
