@@ -40,6 +40,20 @@ A running notepad of bugs, inefficiencies, and improvement ideas to address in t
 - **Done (Sprint 4):** Background prefetch restored for CREX upcoming cards with TTL cache reuse across single-select and bulk-predict flows.
 - **Done (Sprint 5):** Final stabilization/docs pass completed (config-driven Flask secret handling, `.env.example` template with deferred market-integration placeholders, README env setup notes).
 
+### In Wave 2 (current implementation scope)
+- 7. Bulk predict: polish live Monte Carlo running-state UI
+- 8. Polymarket integration (read-path only: model prob vs market implied)
+- 9. Betfair integration (read-path only: best-odds comparison foundations) — **parked for now; Polymarket-first execution**
+
+### Wave 2 Progress Snapshot
+- **Done (Sprint 0):** Credentials/config readiness scaffold added for market integrations (`config.py` + `.env.example`) with explicit read-path defaults.
+- **Done (Sprint 0):** Added integration credential status endpoint (`/api/integrations/credentials-status`) returning masked previews + missing-field diagnostics.
+- **Done (Sprint 0):** README updated with Wave 2 market env vars and readiness API documentation.
+- **Done (Sprint 1):** Added Polymarket API client + read endpoints (`health`, `markets`, `orderbook`) so read-path wiring can proceed without trading enablement.
+- **Done (Sprint 1):** Added Betfair session bootstrap/keep-alive/status endpoints with masked token handling and configurable login paths.
+- **Done (Sprint 1.1):** Switched readiness gating to Polymarket-first so Wave 2 can proceed without Betfair credentials; Betfair remains optional diagnostics/scaffolding.
+- **Deferred (later wave):** Actual order placement/execution credentials and write-path flows remain intentionally out of scope for this read-only wave.
+
 ### Wave 1 Sprint Sequence (execution order)
 - **Sprint 0 (Baseline):** scope lock, completed-vs-deferred status check, Australia A disaggregation audit, baseline latency snapshots.
 - **Sprint 1 (CREX reliability):** Playwright-only squads + team-order stabilization + regression checks.

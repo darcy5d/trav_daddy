@@ -117,6 +117,37 @@ cp .env.example .env
 Notes:
 - `.env` is ignored by git (`.gitignore`), so local API keys/secrets are not committed.
 - Keep real exchange/market credentials only in local `.env` or a secret manager.
+- Wave 2 integration readiness endpoint: `GET /api/integrations/credentials-status` (returns masked credential status only).
+
+### Market Integration Environment Variables (Wave 2)
+
+Polymarket is the active Wave 2 focus and supports read-path usage without keys. Betfair is optional/parked for now (credentials can be added later without code changes).
+
+```bash
+# Polymarket
+POLYMARKET_ENABLED=false
+POLYMARKET_API_BASE_URL=https://gamma-api.polymarket.com
+POLYMARKET_CLOB_BASE_URL=https://clob.polymarket.com
+POLYMARKET_CHAIN_ID=137
+POLYMARKET_API_KEY=
+POLYMARKET_API_SECRET=
+POLYMARKET_PASSPHRASE=
+POLYMARKET_PRIVATE_KEY=
+
+# Betfair
+BETFAIR_ENABLED=false
+BETFAIR_APP_KEY=
+BETFAIR_USERNAME=
+BETFAIR_PASSWORD=
+BETFAIR_SESSION_TOKEN=
+BETFAIR_CERT_FILE=
+BETFAIR_KEY_FILE=
+BETFAIR_SSO_BASE_URL=https://identitysso.betfair.com
+BETFAIR_LOGIN_PATH=/api/login
+BETFAIR_CERT_LOGIN_PATH=/api/certlogin
+BETFAIR_KEEP_ALIVE_PATH=/api/keepAlive
+BETFAIR_BETTING_API_BASE_URL=https://api.betfair.com/exchange/betting
+```
 
 ## How It Works
 
@@ -272,6 +303,17 @@ Training (e.g. `full_retrain.py`) reads from `best_hparams_{format}_{gender}.jso
 |----------|--------|-------------|
 | `/api/espn/upcoming` | GET | Upcoming T20 matches (3h ago to 24h ahead) |
 | `/api/espn/match/<match_id>` | GET | Match details with squads, venue, and DB mappings |
+
+### Integrations (Wave 2 Readiness)
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/api/integrations/credentials-status` | GET | Safe credential readiness status (Polymarket-first readiness + optional Betfair diagnostics, masked values only) |
+| `/api/integrations/polymarket/health` | GET | Polymarket CLOB health probe |
+| `/api/integrations/polymarket/markets` | GET | Polymarket public market list (`?limit=20&active=true&closed=false`) |
+| `/api/integrations/polymarket/orderbook` | GET | Polymarket CLOB orderbook by token (`?token_id=...`) |
+| `/api/integrations/betfair/session/status` | GET | Betfair session status (masked token preview only) |
+| `/api/integrations/betfair/session/bootstrap` | POST | Bootstrap Betfair session via configured login path |
+| `/api/integrations/betfair/session/keep-alive` | POST | Refresh an existing Betfair session token |
 
 ### Simulation
 | Endpoint | Method | Description |

@@ -48,6 +48,9 @@ from config import DATABASE_PATH, CRICSHEET_MATCHES_URL, FlaskConfig
 from src.data.database import get_connection
 from src.features.toss_stats import TossSimulator
 from src.api.crex_scraper import format_type_to_model_format
+from src.integrations.credentials import get_market_credentials_status
+from src.integrations.polymarket import PolymarketClient
+from src.integrations.betfair import BetfairSessionManager
 
 # Initialize Flask app
 app = Flask(__name__)
@@ -73,6 +76,8 @@ _toss_simulator = None
 _source_status_cache = None
 _source_status_cache_expires = None
 SOURCE_STATUS_CACHE_TTL_SECONDS = 20 * 60
+_polymarket_client = None
+_betfair_session_manager = None
 
 
 def get_fast_simulator(gender: str = 'male'):
@@ -103,6 +108,24 @@ def get_toss_simulator():
         _toss_simulator = TossSimulator()
         logger.info("Toss simulator initialized")
     return _toss_simulator
+
+
+def get_polymarket_client() -> PolymarketClient:
+    """Get or initialize Polymarket client."""
+    global _polymarket_client
+    if _polymarket_client is None:
+        _polymarket_client = PolymarketClient()
+        logger.info("Polymarket client initialized")
+    return _polymarket_client
+
+
+def get_betfair_session_manager() -> BetfairSessionManager:
+    """Get or initialize Betfair session manager."""
+    global _betfair_session_manager
+    if _betfair_session_manager is None:
+        _betfair_session_manager = BetfairSessionManager()
+        logger.info("Betfair session manager initialized")
+    return _betfair_session_manager
 
 
 def has_active_model(gender: str, format_type: str) -> bool:
@@ -3951,6 +3974,109 @@ def get_crex_live_match():
         logger.error(f"Error fetching CREX live match: {e}")
         import traceback
         traceback.print_exc()
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+# ============================================================================
+# Integrations API Routes
+# ============================================================================
+
+@app.route('/api/integrations/credentials-status', methods=['GET'])
+def get_integrations_credential_status():
+    """
+    Get safe credential readiness for external market integrations.
+
+    Returns:
+        JSON with provider readiness and masked previews only.
+    """
+    try:
+        return jsonify(get_market_credentials_status())
+    except Exception as e:
+        logger.error(f"Error getting integration credential status: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/integrations/polymarket/health', methods=['GET'])
+def polymarket_health():
+    """Polymarket CLOB health check."""
+    try:
+        client = get_polymarket_client()
+        payload = client.health_check()
+        return jsonify(payload)
+    except Exception as e:
+        logger.error(f"Error in Polymarket health check: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/integrations/polymarket/markets', methods=['GET'])
+def polymarket_markets():
+    """Fetch Polymarket markets from public Gamma API."""
+    try:
+        client = get_polymarket_client()
+        limit = int(request.args.get('limit', 20))
+        active = request.args.get('active', 'true').lower() == 'true'
+        closed = request.args.get('closed', 'false').lower() == 'true'
+        markets = client.get_markets(limit=limit, active=active, closed=closed)
+        return jsonify({
+            'success': True,
+            'count': len(markets) if isinstance(markets, list) else None,
+            'markets': markets,
+        })
+    except Exception as e:
+        logger.error(f"Error fetching Polymarket markets: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/integrations/polymarket/orderbook', methods=['GET'])
+def polymarket_orderbook():
+    """Fetch Polymarket CLOB order book for a token."""
+    try:
+        token_id = request.args.get('token_id')
+        if not token_id:
+            return jsonify({'success': False, 'error': 'token_id parameter required'}), 400
+        client = get_polymarket_client()
+        book = client.get_clob_order_book(token_id)
+        return jsonify({'success': True, 'orderbook': book})
+    except Exception as e:
+        logger.error(f"Error fetching Polymarket orderbook: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/integrations/betfair/session/status', methods=['GET'])
+def betfair_session_status():
+    """Get Betfair session status (masked)."""
+    try:
+        manager = get_betfair_session_manager()
+        return jsonify(manager.status())
+    except Exception as e:
+        logger.error(f"Error getting Betfair session status: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/integrations/betfair/session/bootstrap', methods=['POST'])
+def betfair_session_bootstrap():
+    """Bootstrap Betfair session token using configured auth path."""
+    try:
+        payload = request.get_json(silent=True) or {}
+        force_refresh = bool(payload.get('force_refresh', False))
+        prefer_cert_login = bool(payload.get('prefer_cert_login', False))
+
+        manager = get_betfair_session_manager()
+        result = manager.bootstrap(force_refresh=force_refresh, prefer_cert_login=prefer_cert_login)
+        return jsonify(result)
+    except Exception as e:
+        logger.error(f"Error bootstrapping Betfair session: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/integrations/betfair/session/keep-alive', methods=['POST'])
+def betfair_session_keep_alive():
+    """Keep Betfair session alive."""
+    try:
+        manager = get_betfair_session_manager()
+        return jsonify(manager.keep_alive())
+    except Exception as e:
+        logger.error(f"Error keeping Betfair session alive: {e}")
         return jsonify({'success': False, 'error': str(e)}), 500
 
 

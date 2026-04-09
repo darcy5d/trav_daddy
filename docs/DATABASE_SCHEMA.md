@@ -10,6 +10,10 @@ This document describes the SQLite database schema used to store cricket match d
 - **Gender:** Both men's and women's cricket
 - **Source:** Cricsheet JSON data files
 
+**Wave 2 Note (Market Integrations):**
+- Current Wave 2 credential readiness + read-path market comparison plumbing is stateless and does not add DB tables yet.
+- Bet/order persistence remains deferred to the later ledger/execution waves.
+
 ---
 
 ## Table of Contents

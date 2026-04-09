@@ -41,6 +41,35 @@ SUPPORTED_FORMATS = ["T20", "ODI"]
 CRICKET_DATA_API_KEY = os.getenv("CRICKET_DATA_API_KEY")
 CRICKET_DATA_BASE_URL = "https://api.cricapi.com/v1"
 
+# Market integrations (Wave 2: read-path readiness)
+POLYMARKET_CONFIG = {
+    "enabled": os.getenv("POLYMARKET_ENABLED", "false").lower() == "true",
+    "api_base_url": os.getenv("POLYMARKET_API_BASE_URL", "https://gamma-api.polymarket.com"),
+    "clob_base_url": os.getenv("POLYMARKET_CLOB_BASE_URL", "https://clob.polymarket.com"),
+    "chain_id": int(os.getenv("POLYMARKET_CHAIN_ID", "137")),
+    # Optional for read-only; required only for authenticated/trading paths.
+    "api_key": os.getenv("POLYMARKET_API_KEY"),
+    "api_secret": os.getenv("POLYMARKET_API_SECRET"),
+    "passphrase": os.getenv("POLYMARKET_PASSPHRASE"),
+    "private_key": os.getenv("POLYMARKET_PRIVATE_KEY"),
+}
+
+BETFAIR_CONFIG = {
+    "enabled": os.getenv("BETFAIR_ENABLED", "false").lower() == "true",
+    "app_key": os.getenv("BETFAIR_APP_KEY"),
+    "username": os.getenv("BETFAIR_USERNAME"),
+    "password": os.getenv("BETFAIR_PASSWORD"),
+    "session_token": os.getenv("BETFAIR_SESSION_TOKEN"),
+    # Optional for non-interactive login; not required for interactive/session-token mode.
+    "cert_file": os.getenv("BETFAIR_CERT_FILE"),
+    "key_file": os.getenv("BETFAIR_KEY_FILE"),
+    "sso_base_url": os.getenv("BETFAIR_SSO_BASE_URL", "https://identitysso.betfair.com"),
+    "login_path": os.getenv("BETFAIR_LOGIN_PATH", "/api/login"),
+    "cert_login_path": os.getenv("BETFAIR_CERT_LOGIN_PATH", "/api/certlogin"),
+    "keep_alive_path": os.getenv("BETFAIR_KEEP_ALIVE_PATH", "/api/keepAlive"),
+    "betting_api_base_url": os.getenv("BETFAIR_BETTING_API_BASE_URL", "https://api.betfair.com/exchange/betting"),
+}
+
 # ELO Configuration
 ELO_CONFIG = {
     "initial_rating": 1500,
