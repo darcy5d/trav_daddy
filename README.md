@@ -106,6 +106,18 @@ python app/main.py
 
 Visit `http://localhost:5001` in your browser.
 
+### Environment Variables
+
+Copy the template and fill local secrets before running:
+
+```bash
+cp .env.example .env
+```
+
+Notes:
+- `.env` is ignored by git (`.gitignore`), so local API keys/secrets are not committed.
+- Keep real exchange/market credentials only in local `.env` or a secret manager.
+
 ## How It Works
 
 1. **Data**: Ball-by-ball JSON data from [Cricsheet.org](https://cricsheet.org/)
@@ -342,6 +354,8 @@ print(tf.config.list_physical_devices('GPU'))
 
 ### Recent Improvements
 - **CREX Integration**: Primary match discovery with Playwright-powered squad extraction from dynamic tabs
+- **Playwright-First Squad Path**: Match-detail squad loading now uses a direct Playwright path (no static-first squad fallback)
+- **Team Order Stabilization**: Added deterministic team1/team2 normalization using venue-country and domestic venue hints (reduces swapped home/away presentation)
 - **Player Affiliation Verification**: Authoritative team identity using database player history (fixes squad mislabeling)
 - **Team Abbreviation Matching**: Smart matching of tab labels (IRE, ITA, PRS) to team names with fallback resolution
 - **ELO Feature Integration**: 34-feature model with 5 ELO features (team ELO, player ELO, differentials)
@@ -350,6 +364,9 @@ print(tf.config.list_physical_devices('GPU'))
 - **Tiered ELO System (V3)**: Complete 5-tier classification with cross-pool normalization and automatic promotion review
 - **Realistic Rankings**: India (1929) >> Somerset (1407) now reflects actual team strength hierarchy
 - **Venue Alias System**: Canonical venue matching (e.g., "Optus Stadium" -> "Perth Stadium")
+- **Venue Quality Tooling (Foundation)**: Expanded alias coverage and added duplicate-candidate reporting script (`scripts/report_venue_duplicates.py`)
+- **Venue Data Explorer Tab**: Added an in-app venue quality view with `Country -> State -> Ground` hierarchy, fuzzy duplicate candidates, and alias-gap inspection panels
+- **CREX Prefetch Cache Flow**: Upcoming match cards now prefetch CREX match detail payloads and reuse cached data on single-select and bulk-predict handoff
 - **Conflict Resolution**: Handles edge cases where CREX mislabels both squads as the same team
 - **Validation Framework**: Automated sanity checks and validation reports for ELO system integrity
 

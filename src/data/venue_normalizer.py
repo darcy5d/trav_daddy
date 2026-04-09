@@ -209,6 +209,61 @@ def extract_city_from_venue(venue_name: str) -> Optional[str]:
     return None
 
 
+def extract_state_from_venue(venue_name: str, city: Optional[str] = None, country: Optional[str] = None) -> Optional[str]:
+    """
+    Infer state/province from venue string and location hints.
+
+    This is intentionally conservative: return a value only when confidence is high.
+    """
+    if not venue_name:
+        return None
+
+    text = venue_name.lower().strip()
+    city_lower = (city or '').lower().strip()
+    country_lower = (country or '').lower().strip()
+
+    # Explicit state names in venue text (mostly Australia where this is common).
+    explicit_state_hints = {
+        'new south wales': 'New South Wales',
+        'western australia': 'Western Australia',
+        'south australia': 'South Australia',
+        'queensland': 'Queensland',
+        'victoria': 'Victoria',
+        'tasmania': 'Tasmania',
+        'australian capital territory': 'Australian Capital Territory',
+    }
+    for hint, state in explicit_state_hints.items():
+        if hint in text:
+            return state
+
+    # City-to-state mappings for common cricket locations.
+    city_to_state = {
+        'sydney': 'New South Wales',
+        'newcastle': 'New South Wales',
+        'perth': 'Western Australia',
+        'adelaide': 'South Australia',
+        'brisbane': 'Queensland',
+        'gold coast': 'Queensland',
+        'melbourne': 'Victoria',
+        'geelong': 'Victoria',
+        'hobart': 'Tasmania',
+        'launceston': 'Tasmania',
+        'canberra': 'Australian Capital Territory',
+    }
+    if city_lower in city_to_state:
+        return city_to_state[city_lower]
+
+    # If country is unknown, avoid over-guessing from generic city names.
+    if country_lower and country_lower != 'australia':
+        return None
+
+    for city_hint, state in city_to_state.items():
+        if city_hint in text:
+            return state
+
+    return None
+
+
 # Known venue aliases - maps variations to canonical names
 VENUE_ALIASES = {
     # Australia
@@ -269,6 +324,36 @@ VENUE_ALIASES = {
     "uplands college": "Uplands College, White River",
     "uplands college white river": "Uplands College, White River",
     "uplands college white river mpumalanga": "Uplands College, White River",
+    # Pakistan
+    "gaddafi stadium": "Gaddafi Stadium",
+    "national stadium karachi": "National Stadium, Karachi",
+    "rawalpindi cricket stadium": "Rawalpindi Cricket Stadium",
+    # Sri Lanka
+    "r premadasa stadium": "R. Premadasa Stadium",
+    "premadasa stadium": "R. Premadasa Stadium",
+    "pallekele international cricket stadium": "Pallekele International Cricket Stadium",
+    # Bangladesh
+    "sher e bangla national stadium": "Shere Bangla National Stadium",
+    "shere bangla national stadium": "Shere Bangla National Stadium",
+    "zahur ahmed chowdhury stadium": "Zahur Ahmed Chowdhury Stadium",
+    # UAE
+    "dubai international stadium": "Dubai International Cricket Stadium",
+    "abu dhabi cricket stadium": "Sheikh Zayed Stadium",
+    "sheikh zayed stadium": "Sheikh Zayed Stadium",
+    "sharjah cricket stadium": "Sharjah Cricket Stadium",
+    # West Indies / Caribbean
+    "kensington oval": "Kensington Oval",
+    "queen's park oval": "Queen's Park Oval",
+    "daren sammy national cricket stadium": "Daren Sammy National Cricket Stadium",
+    "sir vivian richards stadium": "Sir Vivian Richards Stadium",
+    "sabina park": "Sabina Park",
+    "providence stadium": "Providence Stadium",
+    "warner park": "Warner Park",
+    # Zimbabwe
+    "harare sports club": "Harare Sports Club",
+    "queens sports club": "Queens Sports Club",
+    # Afghanistan neutral home
+    "kabul international cricket stadium": "Kabul International Cricket Stadium",
 }
 
 

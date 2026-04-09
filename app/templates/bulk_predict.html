@@ -315,6 +315,9 @@
     let currentAbortController = null;
     let venuesCache = null; // Cache venue list so we only fetch once
     let availablePredictionModels = []; // { gender, format }[] from GET /api/prediction/available-models
+    const PREFETCH_CACHE_KEY = 'crexPrefetchCacheV1';
+    const PREFETCH_CACHE_TTL_MS = 20 * 60 * 1000;
+    let prefetchedCrexMatches = new Map();
 
     function hasModelFor(gender, format) {
         const fmt = (format || 'T20').toUpperCase();
@@ -325,6 +328,31 @@
         const f = (format || 'T20').toUpperCase();
         if (f === 'T10' || f === '100') return 'T20';
         return f;
+    }
+
+    function loadPrefetchCacheFromSession() {
+        try {
+            const raw = sessionStorage.getItem(PREFETCH_CACHE_KEY);
+            if (!raw) return;
+            const parsed = JSON.parse(raw);
+            const now = Date.now();
+            prefetchedCrexMatches.clear();
+            Object.entries(parsed).forEach(([url, entry]) => {
+                if (!entry || !entry.ts || !entry.data) return;
+                if ((now - entry.ts) > PREFETCH_CACHE_TTL_MS) return;
+                prefetchedCrexMatches.set(url, entry);
+            });
+        } catch (e) {
+            console.warn('Failed to load prefetch cache from session:', e);
+        }
+    }
+
+    function getPrefetchedMatch(url) {
+        if (!url) return null;
+        const entry = prefetchedCrexMatches.get(url);
+        if (!entry) return null;
+        if ((Date.now() - entry.ts) > PREFETCH_CACHE_TTL_MS) return null;
+        return entry.data;
     }
     
     // ============================================================
@@ -871,8 +899,11 @@
             fillEl.style.width = `${((i) / matches.length) * 100}%`;
             
             try {
-                const response = await fetch(`/api/crex/match?url=${encodeURIComponent(m.url)}`);
-                const data = await response.json();
+                let data = getPrefetchedMatch(m.url);
+                if (!data) {
+                    const response = await fetch(`/api/crex/match?url=${encodeURIComponent(m.url)}`);
+                    data = await response.json();
+                }
                 
                 if (data.success && data.match) {
                     const storedGender = m.gender || data.match.gender || 'male';
@@ -1402,6 +1433,7 @@
     // INIT
     // ============================================================
     document.addEventListener('DOMContentLoaded', async () => {
+        loadPrefetchCacheFromSession();
         try {
             const r = await fetch('/api/prediction/available-models');
             const data = await r.json();

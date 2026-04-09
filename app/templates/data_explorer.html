@@ -1,0 +1,285 @@
+{% extends "base.html" %}
+
+{% block title %}Venue Data Explorer - Cricket Predictor{% endblock %}
+
+{% block content %}
+<style>
+    .explorer-controls {
+        display: grid;
+        grid-template-columns: repeat(4, minmax(0, 1fr));
+        gap: 1rem;
+        align-items: end;
+    }
+    .summary-grid {
+        display: grid;
+        grid-template-columns: repeat(5, minmax(0, 1fr));
+        gap: 1rem;
+    }
+    .summary-stat {
+        background: var(--bg-tertiary);
+        border: 1px solid var(--border-color);
+        border-radius: 10px;
+        padding: 0.9rem;
+    }
+    .summary-stat .value {
+        font-size: 1.5rem;
+        font-family: 'JetBrains Mono', monospace;
+        color: var(--accent-primary);
+        font-weight: 700;
+    }
+    .summary-stat .label {
+        font-size: 0.8rem;
+        color: var(--text-secondary);
+        margin-top: 0.35rem;
+    }
+    .panel-title-row {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        margin-bottom: 0.75rem;
+    }
+    .muted {
+        color: var(--text-secondary);
+        font-size: 0.85rem;
+    }
+    .scroll-panel {
+        max-height: 460px;
+        overflow: auto;
+        border: 1px solid var(--border-color);
+        border-radius: 10px;
+    }
+    .country-block {
+        border-bottom: 1px solid var(--border-color);
+        padding: 0.75rem;
+    }
+    .country-header {
+        font-weight: 600;
+        margin-bottom: 0.4rem;
+    }
+    .state-block {
+        margin-left: 0.5rem;
+        padding: 0.35rem 0;
+    }
+    .state-title {
+        color: var(--accent-secondary);
+        font-size: 0.9rem;
+        margin-bottom: 0.3rem;
+    }
+    .ground-row {
+        display: flex;
+        justify-content: space-between;
+        gap: 1rem;
+        font-size: 0.85rem;
+        color: var(--text-secondary);
+        padding: 0.2rem 0;
+    }
+    .ground-name {
+        color: var(--text-primary);
+    }
+    @media (max-width: 1100px) {
+        .explorer-controls { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+        .summary-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    }
+</style>
+
+<div class="hero" style="padding: 1.5rem 0 2rem 0;">
+    <h1>Venue Data Explorer</h1>
+    <p>Inspect venue coverage quality, fuzzy duplicate candidates, and alias mapping gaps.</p>
+</div>
+
+<div class="card">
+    <div class="explorer-controls">
+        <div class="form-group">
+            <label for="gender">Gender</label>
+            <select id="gender">
+                <option value="male" selected>Men's</option>
+                <option value="female">Women's</option>
+            </select>
+        </div>
+        <div class="form-group">
+            <label for="min-matches">Min Matches</label>
+            <select id="min-matches">
+                <option value="1" selected>1+</option>
+                <option value="3">3+</option>
+                <option value="5">5+</option>
+                <option value="10">10+</option>
+            </select>
+        </div>
+        <div class="form-group">
+            <label for="similarity">Duplicate Similarity</label>
+            <select id="similarity">
+                <option value="0.88">0.88</option>
+                <option value="0.90" selected>0.90</option>
+                <option value="0.92">0.92</option>
+                <option value="0.95">0.95</option>
+            </select>
+        </div>
+        <div class="form-group">
+            <button class="btn btn-primary" onclick="loadExplorerData()">Refresh</button>
+        </div>
+    </div>
+</div>
+
+<div class="card">
+    <div class="summary-grid" id="summary-grid">
+        <div class="loading"><div class="spinner"></div></div>
+    </div>
+</div>
+
+<div class="grid grid-2">
+    <div class="card">
+        <div class="panel-title-row">
+            <h2 class="card-title">Country → State → Ground</h2>
+            <span class="muted" id="hierarchy-count"></span>
+        </div>
+        <div class="scroll-panel" id="hierarchy-panel">
+            <div class="loading"><div class="spinner"></div></div>
+        </div>
+    </div>
+    <div class="card">
+        <div class="panel-title-row">
+            <h2 class="card-title">Fuzzy Duplicate Candidates</h2>
+            <span class="muted" id="duplicate-count"></span>
+        </div>
+        <div class="scroll-panel">
+            <table class="table" id="duplicates-table">
+                <thead>
+                    <tr>
+                        <th>Score</th>
+                        <th>Venue A</th>
+                        <th>Venue B</th>
+                        <th>Location</th>
+                    </tr>
+                </thead>
+                <tbody></tbody>
+            </table>
+        </div>
+    </div>
+</div>
+
+<div class="card">
+    <div class="panel-title-row">
+        <h2 class="card-title">Alias Coverage Gaps</h2>
+        <span class="muted" id="alias-count"></span>
+    </div>
+    <div class="scroll-panel">
+        <table class="table" id="alias-table">
+            <thead>
+                <tr>
+                    <th>Venue</th>
+                    <th>Canonical</th>
+                    <th>City</th>
+                    <th>State</th>
+                    <th>Country</th>
+                    <th>Matches</th>
+                </tr>
+            </thead>
+            <tbody></tbody>
+        </table>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+    function renderSummary(summary) {
+        const stats = [
+            ['Venues', summary.total_venues],
+            ['Countries', summary.countries],
+            ['States', summary.states],
+            ['Duplicate Candidates', summary.duplicate_candidates],
+            ['Alias Gaps', summary.alias_gaps],
+        ];
+        const root = document.getElementById('summary-grid');
+        root.innerHTML = stats.map(([label, value]) => `
+            <div class="summary-stat">
+                <div class="value">${formatNumber(value)}</div>
+                <div class="label">${label}</div>
+            </div>
+        `).join('');
+    }
+
+    function renderHierarchy(hierarchy) {
+        const root = document.getElementById('hierarchy-panel');
+        document.getElementById('hierarchy-count').textContent = `${hierarchy.length} countries`;
+        if (!hierarchy.length) {
+            root.innerHTML = '<p class="muted" style="padding:1rem;">No venues for current filters.</p>';
+            return;
+        }
+        root.innerHTML = hierarchy.map(country => `
+            <div class="country-block">
+                <div class="country-header">${country.name}</div>
+                ${country.states.map(state => `
+                    <div class="state-block">
+                        <div class="state-title">${state.name}</div>
+                        ${state.grounds.map(g => `
+                            <div class="ground-row">
+                                <span class="ground-name">${g.name} <span class="muted">(${g.city})</span></span>
+                                <span>${formatNumber(g.match_count)} matches</span>
+                            </div>
+                        `).join('')}
+                    </div>
+                `).join('')}
+            </div>
+        `).join('');
+    }
+
+    function renderDuplicates(rows) {
+        document.getElementById('duplicate-count').textContent = `${rows.length} shown`;
+        const tbody = document.querySelector('#duplicates-table tbody');
+        if (!rows.length) {
+            tbody.innerHTML = '<tr><td colspan="4" class="muted">No duplicate candidates above threshold.</td></tr>';
+            return;
+        }
+        tbody.innerHTML = rows.map(r => `
+            <tr>
+                <td>${r.score}</td>
+                <td>${r.name_1} <span class="muted">(${formatNumber(r.match_count_1)})</span></td>
+                <td>${r.name_2} <span class="muted">(${formatNumber(r.match_count_2)})</span></td>
+                <td>${r.country} / ${r.state || 'Unknown'}</td>
+            </tr>
+        `).join('');
+    }
+
+    function renderAliasGaps(rows) {
+        document.getElementById('alias-count').textContent = `${rows.length} shown`;
+        const tbody = document.querySelector('#alias-table tbody');
+        if (!rows.length) {
+            tbody.innerHTML = '<tr><td colspan="6" class="muted">No alias gaps for current filters.</td></tr>';
+            return;
+        }
+        tbody.innerHTML = rows.map(r => `
+            <tr>
+                <td>${r.name}</td>
+                <td>${r.canonical_name || '-'}</td>
+                <td>${r.city || '-'}</td>
+                <td>${r.state || '-'}</td>
+                <td>${r.country || '-'}</td>
+                <td>${formatNumber(r.match_count)}</td>
+            </tr>
+        `).join('');
+    }
+
+    async function loadExplorerData() {
+        const gender = document.getElementById('gender').value;
+        const minMatches = document.getElementById('min-matches').value;
+        const similarity = document.getElementById('similarity').value;
+        const params = new URLSearchParams({
+            gender,
+            min_matches: minMatches,
+            similarity,
+        });
+        const data = await fetchAPI(`/api/data-explorer/venues?${params.toString()}`);
+        if (!data.success) {
+            console.error('Failed loading venue explorer data:', data.error);
+            return;
+        }
+        renderSummary(data.summary);
+        renderHierarchy(data.hierarchy || []);
+        renderDuplicates(data.duplicate_candidates || []);
+        renderAliasGaps(data.alias_gaps || []);
+    }
+
+    document.addEventListener('DOMContentLoaded', loadExplorerData);
+</script>
+{% endblock %}

@@ -348,6 +348,7 @@
         <ul class="nav-links">
             <li><a href="/" class="{% if request.path == '/' %}active{% endif %}">Home</a></li>
             <li><a href="/training" class="{% if request.path == '/training' %}active{% endif %}">Data & Training</a></li>
+            <li><a href="/data-explorer" class="{% if request.path == '/data-explorer' %}active{% endif %}">Data Explorer</a></li>
             <li class="nav-dropdown">
                 <a class="{% if request.path in ['/predict', '/bulk-predict'] %}active{% endif %}">Predict ▾</a>
                 <div class="nav-dropdown-menu">

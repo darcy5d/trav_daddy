@@ -74,6 +74,7 @@ CREATE TABLE IF NOT EXISTS venues (
     name TEXT NOT NULL,
     city TEXT,
     country TEXT,
+    state TEXT,  -- Subdivision (state/province) for hierarchical grouping
     canonical_name TEXT,  -- Standardized name for display (e.g., "Adelaide Oval" not "Adelaide Oval, Adelaide")
     region TEXT,  -- Supra-national grouping (e.g., "West Indies" for Caribbean venues)
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,

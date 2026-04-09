@@ -244,6 +244,95 @@ class CREXScraper:
     WOMEN_KEYWORDS = ['women', 'wbbl', 'wpl', "women's", 'wpsl', 'wt20', 'female', 'womens']
     # Suffix patterns for team names (e.g., "Australia-W", "IND-W")
     WOMEN_SUFFIXES = ['-w', ' w$', 'w$']  # -w or ending with W after space
+    # Minimal country/region hints used for deterministic team1/team2 normalization.
+    TEAM_COUNTRY_HINTS = {
+        'india': 'india',
+        'ind': 'india',
+        'australia': 'australia',
+        'aus': 'australia',
+        'england': 'england',
+        'eng': 'england',
+        'pakistan': 'pakistan',
+        'pak': 'pakistan',
+        'new zealand': 'new zealand',
+        'nz': 'new zealand',
+        'south africa': 'south africa',
+        'sa': 'south africa',
+        'west indies': 'west indies',
+        'wi': 'west indies',
+        'sri lanka': 'sri lanka',
+        'sl': 'sri lanka',
+        'bangladesh': 'bangladesh',
+        'ban': 'bangladesh',
+        'afghanistan': 'afghanistan',
+        'afg': 'afghanistan',
+        'ireland': 'ireland',
+        'ire': 'ireland',
+        'nepal': 'nepal',
+        'nep': 'nepal',
+        'oman': 'oman',
+        'oma': 'oman',
+        'uae': 'united arab emirates',
+        'united arab emirates': 'united arab emirates',
+        'hong kong': 'hong kong',
+        'hk': 'hong kong',
+        'malaysia': 'malaysia',
+        'mas': 'malaysia',
+        'victoria': 'australia',
+        'western australia': 'australia',
+        'new south wales': 'australia',
+        'queensland': 'australia',
+        'tasmania': 'australia',
+        'south australia': 'australia',
+        'perth scorchers': 'australia',
+        'adelaide strikers': 'australia',
+        'melbourne stars': 'australia',
+        'melbourne renegades': 'australia',
+        'sydney thunder': 'australia',
+        'sydney sixers': 'australia',
+        'brisbane heat': 'australia',
+        'hobart hurricanes': 'australia',
+    }
+    VENUE_LOCATION_HINTS = {
+        'adelaide': 'australia',
+        'perth': 'australia',
+        'waca': 'australia',
+        'melbourne': 'australia',
+        'sydney': 'australia',
+        'brisbane': 'australia',
+        'hobart': 'australia',
+        'canberra': 'australia',
+        'auckland': 'new zealand',
+        'wellington': 'new zealand',
+        'christchurch': 'new zealand',
+        'lahore': 'pakistan',
+        'karachi': 'pakistan',
+        'rawalpindi': 'pakistan',
+        'mumbai': 'india',
+        'delhi': 'india',
+        'kolkata': 'india',
+        'chennai': 'india',
+        'bangalore': 'india',
+        'hyderabad': 'india',
+        'dubai': 'united arab emirates',
+        'abu dhabi': 'united arab emirates',
+        'sharjah': 'united arab emirates',
+        'london': 'england',
+        'manchester': 'england',
+        'birmingham': 'england',
+        'johannesburg': 'south africa',
+        'cape town': 'south africa',
+        'durban': 'south africa',
+    }
+    VENUE_HOME_TEAM_HINTS = {
+        'waca': ['western australia', 'perth scorchers', 'wa'],
+        'perth': ['western australia', 'perth scorchers', 'wa'],
+        'adelaide': ['south australia', 'adelaide strikers', 'australia'],
+        'melbourne': ['victoria', 'melbourne stars', 'melbourne renegades'],
+        'sydney': ['new south wales', 'sydney thunder', 'sydney sixers'],
+        'brisbane': ['queensland', 'brisbane heat'],
+        'hobart': ['tasmania', 'hobart hurricanes'],
+    }
     
     def __init__(self, request_delay: float = 1.0):
         """
@@ -479,6 +568,96 @@ class CREXScraper:
         if ',' in venue_name:
             return venue_name.split(',')[-1].strip()
         return ''
+
+    def _canonical_team_country(self, team_name: str, team_id: str) -> Optional[str]:
+        """Infer a team's country from known labels/abbreviations."""
+        parts = [
+            (team_name or '').lower().strip(),
+            (team_id or '').lower().strip(),
+        ]
+        cleaned_parts = []
+        for value in parts:
+            if not value:
+                continue
+            cleaned = value
+            cleaned = re.sub(r'\s+a\s+women$', '', cleaned)
+            cleaned = re.sub(r'\s+women$', '', cleaned)
+            cleaned = re.sub(r'\s+a$', '', cleaned)
+            cleaned = re.sub(r'-a$', '', cleaned)
+            cleaned = re.sub(r'-w$', '', cleaned)
+            cleaned_parts.append(cleaned)
+        for value in cleaned_parts:
+            if value in self.TEAM_COUNTRY_HINTS:
+                return self.TEAM_COUNTRY_HINTS[value]
+            for hint, country in self.TEAM_COUNTRY_HINTS.items():
+                if hint in value:
+                    return country
+        return None
+
+    def _canonical_venue_country(self, venue_name: Optional[str], venue_city: Optional[str] = None) -> Optional[str]:
+        """Infer venue country from venue text/city hints."""
+        haystack = ' '.join(
+            x.lower().strip() for x in [venue_name or '', venue_city or ''] if x and x.strip()
+        )
+        if not haystack:
+            return None
+        for hint, country in self.VENUE_LOCATION_HINTS.items():
+            if hint in haystack:
+                return country
+        return None
+
+    def _normalize_team_order(
+        self,
+        team1_name: str,
+        team2_name: str,
+        team1_id: str,
+        team2_id: str,
+        venue_name: Optional[str],
+        venue_city: Optional[str] = None,
+    ) -> Tuple[str, str, str, str]:
+        """
+        Keep team ordering deterministic using venue-country inference.
+        If exactly one team matches venue country, place that team as team1.
+        """
+        venue_country = self._canonical_venue_country(venue_name, venue_city)
+        if not venue_country:
+            return team1_name, team2_name, team1_id, team2_id
+
+        team1_country = self._canonical_team_country(team1_name, team1_id)
+        team2_country = self._canonical_team_country(team2_name, team2_id)
+
+        if team1_country == venue_country and team2_country != venue_country:
+            return team1_name, team2_name, team1_id, team2_id
+        if team2_country == venue_country and team1_country != venue_country:
+            logger.info(
+                "Reordered teams by venue-country inference: "
+                f"{team1_name} vs {team2_name} -> {team2_name} vs {team1_name} "
+                f"(venue_country={venue_country})"
+            )
+            return team2_name, team1_name, team2_id, team1_id
+
+        # If both teams map to the same country, use venue-to-team hints for domestic fixtures.
+        if team1_country and team1_country == team2_country:
+            haystack = ' '.join(
+                x.lower().strip() for x in [venue_name or '', venue_city or ''] if x and x.strip()
+            )
+            t1 = (team1_name or '').lower()
+            t2 = (team2_name or '').lower()
+            for venue_hint, home_tokens in self.VENUE_HOME_TEAM_HINTS.items():
+                if venue_hint not in haystack:
+                    continue
+                t1_hit = any(tok in t1 for tok in home_tokens)
+                t2_hit = any(tok in t2 for tok in home_tokens)
+                if t2_hit and not t1_hit:
+                    logger.info(
+                        "Reordered teams by venue domestic hint: "
+                        f"{team1_name} vs {team2_name} -> {team2_name} vs {team1_name} "
+                        f"(venue_hint={venue_hint})"
+                    )
+                    return team2_name, team1_name, team2_id, team1_id
+                if t1_hit and not t2_hit:
+                    return team1_name, team2_name, team1_id, team2_id
+        return team1_name, team2_name, team1_id, team2_id
     
     def _clean_repeated_venue(self, venue_name: str) -> str:
         """
@@ -795,14 +974,23 @@ class CREXScraper:
         else:
             gender = self._detect_gender(f'{team1_name} {team2_name} {series_name}')
 
-        title = f'{team1_name} vs {team2_name}' if team1_name and team2_name else slug.replace('-', ' ').title()
-
-        match_url = self._normalize_crex_live_score_url(link)
-
         venue = None
         vname = (fx.get('venue') or '').strip()
         if vname:
             venue = CREXVenue(name=vname, city=self._extract_city_from_venue(vname))
+
+        team1_name, team2_name, team1_id, team2_id = self._normalize_team_order(
+            team1_name,
+            team2_name,
+            team1_id,
+            team2_id,
+            venue.name if venue else None,
+            venue.city if venue else None,
+        )
+
+        title = f'{team1_name} vs {team2_name}' if team1_name and team2_name else slug.replace('-', ' ').title()
+
+        match_url = self._normalize_crex_live_score_url(link)
 
         return CREXMatch(
             crex_id=str(match_key),
@@ -1601,22 +1789,20 @@ class CREXScraper:
         team1_name = normalize_crex_team_display_name(team1_name)
         team2_name = normalize_crex_team_display_name(team2_name)
 
-        # Parse squads from static HTML first
-        team1 = self._parse_squad(soup, team1_id, team1_name, is_first_team=True)
-        team2 = self._parse_squad(soup, team2_id, team2_name, is_first_team=False)
-        
-        # If one team is missing, try Playwright to get both squads
-        if (not team1 or not team1.players) or (not team2 or not team2.players):
-            logger.info("Static HTML missing squad data for one team, trying Playwright...")
-            pw_team1, pw_team2 = self.fetch_squads_with_playwright(
-                match_url, team1_name, team2_name, team1_id, team2_id
-            )
-            
-            # Use Playwright results if we got them
-            if pw_team1 and pw_team1.players:
-                team1 = pw_team1
-            if pw_team2 and pw_team2.players:
-                team2 = pw_team2
+        team1_name, team2_name, team1_id, team2_id = self._normalize_team_order(
+            team1_name,
+            team2_name,
+            team1_id,
+            team2_id,
+            venue.name if venue else None,
+            venue.city if venue else None,
+        )
+
+        # CREX squad tabs are JS-driven; use Playwright directly for squad extraction.
+        logger.info("Fetching squads using Playwright-first path")
+        team1, team2 = self.fetch_squads_with_playwright(
+            match_url, team1_name, team2_name, team1_id, team2_id
+        )
         
         has_squads = bool((team1 and team1.players) or (team2 and team2.players))
         

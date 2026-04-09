@@ -76,6 +76,7 @@ Stores match venues/grounds with hierarchical location data.
 | `name` | TEXT | Venue name (e.g., "Melbourne Cricket Ground") |
 | `city` | TEXT | City location |
 | `country` | TEXT | Country (auto-populated from city mapping) |
+| `state` | TEXT | State/province subdivision (e.g., "Western Australia", "New South Wales") |
 | `canonical_name` | TEXT | Standardized name for display (removes city suffix) |
 | `region` | TEXT | Supra-national grouping (e.g., "West Indies" for Caribbean venues) |
 | `created_at` | TIMESTAMP | Record creation time |
@@ -84,6 +85,7 @@ Stores match venues/grounds with hierarchical location data.
 - 600+ venues across 75+ countries
 - Fuzzy matching during ingestion prevents duplicates
 - West Indies venues grouped under region with country subdivisions
+- State/province can be used for `Country -> State -> Ground` UI grouping
 - Country auto-populated using `src/data/country_mapping.py`
 
 ---

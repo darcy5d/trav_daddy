@@ -65,6 +65,52 @@ class CrickapiFixtureRowTests(unittest.TestCase):
         self.assertEqual(m.status, 'live')
         self.assertEqual(m.team2_name, 'Hong Kong A')
 
+    def test_reorders_by_venue_country_when_clear(self):
+        row = {
+            'mf': '11AA',
+            't1f': 'IND',
+            't2f': 'AUS',
+            'team1': 'India Women',
+            'team2': 'Australia Women',
+            'sf': '1ZZ',
+            'mn': '3',
+            'ft': 2,
+            'fo': 'T20I',
+            'date': '4/8/2026',
+            't': 1775617200000,
+            'status': 0,
+            'g': 0,
+            'venue': 'Adelaide Oval, Adelaide',
+        }
+        m = self.scraper._fixture_row_to_schedule_match(row)
+        self.assertEqual(m.team1_name, 'Australia Women')
+        self.assertEqual(m.team2_name, 'India Women')
+        self.assertEqual(m.team1_id, 'AUS')
+        self.assertEqual(m.team2_id, 'IND')
+
+    def test_reorders_australia_domestic_by_venue_hint(self):
+        row = {
+            'mf': '11AB',
+            't1f': 'VIC',
+            't2f': 'WA',
+            'team1': 'Victoria',
+            'team2': 'Western Australia',
+            'sf': '1ZZ',
+            'mn': '4',
+            'ft': 2,
+            'fo': 'T20',
+            'date': '4/8/2026',
+            't': 1775617200000,
+            'status': 0,
+            'g': 1,
+            'venue': 'WACA Ground, Perth',
+        }
+        m = self.scraper._fixture_row_to_schedule_match(row)
+        self.assertEqual(m.team1_name, 'Western Australia')
+        self.assertEqual(m.team2_name, 'Victoria')
+        self.assertEqual(m.team1_id, 'WA')
+        self.assertEqual(m.team2_id, 'VIC')
+
     def test_flatten_dict_response(self):
         data = {
             '2026/5/9': [

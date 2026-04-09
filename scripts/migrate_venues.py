@@ -23,6 +23,7 @@ from src.data.country_mapping import (
     get_region_for_country,
     get_location_for_venue
 )
+from src.data.venue_normalizer import extract_state_from_venue
 
 logging.basicConfig(
     level=logging.INFO,
@@ -32,7 +33,7 @@ logger = logging.getLogger(__name__)
 
 
 def add_columns_if_missing(conn):
-    """Add canonical_name and region columns if they don't exist."""
+    """Add canonical_name, region, and state columns if they don't exist."""
     cursor = conn.cursor()
     
     # Check existing columns
@@ -46,6 +47,10 @@ def add_columns_if_missing(conn):
     if 'region' not in columns:
         logger.info("Adding region column to venues table")
         cursor.execute("ALTER TABLE venues ADD COLUMN region TEXT")
+
+    if 'state' not in columns:
+        logger.info("Adding state column to venues table")
+        cursor.execute("ALTER TABLE venues ADD COLUMN state TEXT")
     
     conn.commit()
 
@@ -103,6 +108,31 @@ def populate_region_data(conn):
     
     conn.commit()
     logger.info(f"Set region for {updated} West Indies venues")
+
+
+def populate_state_data(conn):
+    """Populate state/province data for venues where we can infer it reliably."""
+    cursor = conn.cursor()
+
+    cursor.execute("""
+        SELECT venue_id, name, city, country
+        FROM venues
+        WHERE state IS NULL OR state = ''
+    """)
+    venues = cursor.fetchall()
+
+    updated = 0
+    for venue in venues:
+        state = extract_state_from_venue(venue['name'], venue['city'], venue['country'])
+        if state:
+            cursor.execute(
+                "UPDATE venues SET state = ? WHERE venue_id = ?",
+                (state, venue['venue_id'])
+            )
+            updated += 1
+
+    conn.commit()
+    logger.info(f"Set state/province for {updated} venues")
 
 
 def populate_canonical_names(conn):
@@ -164,8 +194,12 @@ def print_summary(conn):
     
     cursor.execute("SELECT COUNT(*) FROM venues WHERE country IS NULL OR country = ''")
     no_country = cursor.fetchone()[0]
+
+    cursor.execute("SELECT COUNT(*) FROM venues WHERE state IS NOT NULL AND state != ''")
+    with_state = cursor.fetchone()[0]
     
     print(f"\nVenues with region (West Indies): {with_region}")
+    print(f"Venues with state/province: {with_state}")
     print(f"Venues still without country: {no_country}")
     print("=" * 50)
 
@@ -188,7 +222,10 @@ def main():
         # Step 3: Populate region data
         populate_region_data(conn)
         
-        # Step 4: Create canonical names
+        # Step 4: Populate state/province data
+        populate_state_data(conn)
+
+        # Step 5: Create canonical names
         populate_canonical_names(conn)
         
         # Print summary

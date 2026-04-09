@@ -23,7 +23,7 @@ import logging
 import sys
 from pathlib import Path
 from datetime import datetime, timedelta
-from typing import Optional
+from typing import Optional, Dict, List, Any
 
 # Configure TensorFlow early (before any imports that might use it)
 import tensorflow as tf
@@ -44,14 +44,14 @@ from flask_cors import CORS
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from config import DATABASE_PATH, CRICSHEET_MATCHES_URL
+from config import DATABASE_PATH, CRICSHEET_MATCHES_URL, FlaskConfig
 from src.data.database import get_connection
 from src.features.toss_stats import TossSimulator
 from src.api.crex_scraper import format_type_to_model_format
 
 # Initialize Flask app
 app = Flask(__name__)
-app.secret_key = 'cricket-predictor-secret-key'
+app.secret_key = FlaskConfig.SECRET_KEY
 app.config['TEMPLATES_AUTO_RELOAD'] = True
 app.config['SEND_FILE_MAX_AGE_DEFAULT'] = 0
 CORS(app)
@@ -190,9 +190,212 @@ def rankings_page():
     return render_template('rankings.html')
 
 
+@app.route('/data-explorer')
+def data_explorer_page():
+    """Venue data explorer page."""
+    return render_template('data_explorer.html')
+
+
 # ============================================================================
 # API Routes
 # ============================================================================
+
+
+def _fetch_venue_quality_rows(gender: str = 'male', min_matches: int = 0) -> List[Dict[str, Any]]:
+    """
+    Fetch venue rows with match counts for quality analysis.
+    Uses LEFT JOIN to retain venues with zero matches when needed.
+    """
+    conn = get_connection()
+    cursor = conn.cursor()
+
+    cursor.execute("PRAGMA table_info(venues)")
+    venue_columns = {row["name"] for row in cursor.fetchall()}
+    has_state_column = "state" in venue_columns
+
+    state_select = "v.state AS state," if has_state_column else "'' AS state,"
+    state_group = ", v.state" if has_state_column else ""
+    state_order = ", v.state" if has_state_column else ""
+
+    cursor.execute(
+        f"""
+        SELECT
+            v.venue_id,
+            v.name,
+            v.city,
+            v.country,
+            {state_select}
+            v.canonical_name,
+            v.region,
+            COUNT(m.match_id) AS match_count
+        FROM venues v
+        LEFT JOIN matches m
+            ON m.venue_id = v.venue_id
+           AND m.match_type = 'T20'
+           AND m.gender = ?
+        GROUP BY v.venue_id, v.name, v.city, v.country{state_group}, v.canonical_name, v.region
+        HAVING COUNT(m.match_id) >= ?
+        ORDER BY match_count DESC, v.country{state_order}, v.city, v.name
+        """,
+        (gender, max(0, min_matches)),
+    )
+
+    rows = [dict(r) for r in cursor.fetchall()]
+    conn.close()
+    return rows
+
+
+def _build_venue_hierarchy(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Build Country -> State -> Ground hierarchy for explorer UI."""
+    hierarchy: Dict[str, Dict[str, Any]] = {}
+
+    for row in rows:
+        country = row.get("country") or "Unknown"
+        state = row.get("state") or "Unknown"
+        city = row.get("city") or "Unknown"
+
+        if country not in hierarchy:
+            hierarchy[country] = {"name": country, "states": {}}
+        if state not in hierarchy[country]["states"]:
+            hierarchy[country]["states"][state] = {"name": state, "grounds": []}
+
+        hierarchy[country]["states"][state]["grounds"].append(
+            {
+                "venue_id": row["venue_id"],
+                "name": row["canonical_name"] or row["name"],
+                "original_name": row["name"],
+                "city": city,
+                "match_count": row["match_count"],
+            }
+        )
+
+    result = []
+    for country_name in sorted(hierarchy.keys()):
+        states = hierarchy[country_name]["states"]
+        state_list = []
+        for state_name in sorted(states.keys()):
+            grounds = sorted(states[state_name]["grounds"], key=lambda g: (-g["match_count"], g["name"]))
+            state_list.append({"name": state_name, "grounds": grounds})
+        result.append({"name": country_name, "states": state_list})
+
+    return result
+
+
+def _find_venue_duplicates(
+    rows: List[Dict[str, Any]], similarity_threshold: float = 0.9
+) -> List[Dict[str, Any]]:
+    """Find fuzzy duplicate candidates within country/state buckets."""
+    from src.data.venue_normalizer import venue_similarity
+
+    by_bucket: Dict[tuple, List[Dict[str, Any]]] = {}
+    for row in rows:
+        key = (
+            (row.get("country") or "").strip().lower(),
+            (row.get("state") or "").strip().lower(),
+        )
+        by_bucket.setdefault(key, []).append(row)
+
+    pairs: List[Dict[str, Any]] = []
+    for bucket_rows in by_bucket.values():
+        n = len(bucket_rows)
+        for i in range(n):
+            for j in range(i + 1, n):
+                a = bucket_rows[i]
+                b = bucket_rows[j]
+                score = venue_similarity(a["name"], b["name"])
+                if score >= similarity_threshold:
+                    pairs.append(
+                        {
+                            "score": round(score, 3),
+                            "venue_id_1": a["venue_id"],
+                            "name_1": a["name"],
+                            "match_count_1": a["match_count"],
+                            "venue_id_2": b["venue_id"],
+                            "name_2": b["name"],
+                            "match_count_2": b["match_count"],
+                            "city_1": a.get("city"),
+                            "city_2": b.get("city"),
+                            "country": a.get("country") or b.get("country") or "Unknown",
+                            "state": a.get("state") or b.get("state") or "Unknown",
+                        }
+                    )
+
+    pairs.sort(
+        key=lambda p: (
+            -p["score"],
+            -(p["match_count_1"] + p["match_count_2"]),
+            p["name_1"].lower(),
+            p["name_2"].lower(),
+        )
+    )
+    return pairs
+
+
+def _find_alias_gaps(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """
+    Return venues not directly covered by the alias map.
+    This highlights likely mapping candidates, not guaranteed bugs.
+    """
+    from src.data.venue_normalizer import normalize_venue_name, VENUE_ALIASES
+
+    gaps: List[Dict[str, Any]] = []
+    for row in rows:
+        normalized = normalize_venue_name(row["name"])
+        canonical = normalize_venue_name(row.get("canonical_name") or row["name"])
+        if normalized in VENUE_ALIASES or canonical in VENUE_ALIASES:
+            continue
+        gaps.append(
+            {
+                "venue_id": row["venue_id"],
+                "name": row["name"],
+                "canonical_name": row.get("canonical_name"),
+                "normalized": normalized,
+                "city": row.get("city"),
+                "state": row.get("state"),
+                "country": row.get("country"),
+                "match_count": row.get("match_count", 0),
+            }
+        )
+
+    gaps.sort(key=lambda x: (-x["match_count"], (x["country"] or ""), (x["name"] or "").lower()))
+    return gaps
+
+
+@app.route('/api/data-explorer/venues', methods=['GET'])
+def data_explorer_venues():
+    """Venue quality dataset for explorer UI."""
+    try:
+        gender = request.args.get('gender', 'male')
+        min_matches = int(request.args.get('min_matches', 1))
+        similarity = float(request.args.get('similarity', 0.9))
+        similarity = max(0.7, min(0.99, similarity))
+
+        rows = _fetch_venue_quality_rows(gender=gender, min_matches=min_matches)
+        hierarchy = _build_venue_hierarchy(rows)
+        duplicates = _find_venue_duplicates(rows, similarity_threshold=similarity)
+        alias_gaps = _find_alias_gaps(rows)
+
+        return jsonify(
+            {
+                "success": True,
+                "gender": gender,
+                "min_matches": min_matches,
+                "similarity_threshold": similarity,
+                "summary": {
+                    "total_venues": len(rows),
+                    "countries": len({(r.get("country") or "Unknown") for r in rows}),
+                    "states": len({(r.get("state") or "Unknown") for r in rows}),
+                    "duplicate_candidates": len(duplicates),
+                    "alias_gaps": len(alias_gaps),
+                },
+                "hierarchy": hierarchy,
+                "duplicate_candidates": duplicates[:200],
+                "alias_gaps": alias_gaps[:300],
+            }
+        )
+    except Exception as e:
+        logger.error(f"Error building venue explorer payload: {e}")
+        return jsonify({"success": False, "error": str(e)}), 500
 
 @app.route('/api/teams', methods=['GET'])
 def get_teams():
@@ -4495,4 +4698,4 @@ _check_playwright()
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', os.environ.get('FLASK_PORT', 5001)))
-    app.run(host='0.0.0.0', port=port, debug=True)
+    app.run(host=FlaskConfig.HOST, port=port, debug=FlaskConfig.DEBUG)

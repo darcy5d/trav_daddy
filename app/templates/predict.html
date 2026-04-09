@@ -1131,6 +1131,12 @@
     let upcomingGenderFilter = 'all'; // 'all' | 'male' | 'female'
     let upcomingFormatFilter = 'all'; // 'all' | 't20' | 'odi' | 'test'
     
+    // Client-side prefetch cache for CREX match detail payloads.
+    const PREFETCH_CACHE_KEY = 'crexPrefetchCacheV1';
+    const PREFETCH_CACHE_TTL_MS = 20 * 60 * 1000;
+    const PREFETCH_MAX_MATCHES = 8;
+    let prefetchedCrexMatches = new Map(); // url -> { ts, data }
+    
     // Team filter state (for manual selection)
     const teamFilters = {
         1: { gender: 'male', type: 'all' },
@@ -1142,6 +1148,56 @@
         1: { available: [], selected: [], teamName: '', teamDbId: null, matchUrl: null },
         2: { available: [], selected: [], teamName: '', teamDbId: null, matchUrl: null }
     };
+
+    function loadPrefetchCacheFromSession() {
+        try {
+            const raw = sessionStorage.getItem(PREFETCH_CACHE_KEY);
+            if (!raw) return;
+            const parsed = JSON.parse(raw);
+            const now = Date.now();
+            prefetchedCrexMatches.clear();
+            Object.entries(parsed).forEach(([url, entry]) => {
+                if (!entry || !entry.ts || !entry.data) return;
+                if ((now - entry.ts) > PREFETCH_CACHE_TTL_MS) return;
+                prefetchedCrexMatches.set(url, entry);
+            });
+        } catch (e) {
+            console.warn('Failed to load prefetch cache from session:', e);
+        }
+    }
+
+    function persistPrefetchCacheToSession() {
+        try {
+            const now = Date.now();
+            const serializable = {};
+            prefetchedCrexMatches.forEach((entry, url) => {
+                if (!entry || !entry.ts || !entry.data) return;
+                if ((now - entry.ts) > PREFETCH_CACHE_TTL_MS) return;
+                serializable[url] = entry;
+            });
+            sessionStorage.setItem(PREFETCH_CACHE_KEY, JSON.stringify(serializable));
+        } catch (e) {
+            console.warn('Failed to persist prefetch cache:', e);
+        }
+    }
+
+    function setPrefetchedMatch(url, data) {
+        if (!url || !data) return;
+        prefetchedCrexMatches.set(url, { ts: Date.now(), data });
+        persistPrefetchCacheToSession();
+    }
+
+    function getPrefetchedMatch(url) {
+        if (!url) return null;
+        const entry = prefetchedCrexMatches.get(url);
+        if (!entry) return null;
+        if ((Date.now() - entry.ts) > PREFETCH_CACHE_TTL_MS) {
+            prefetchedCrexMatches.delete(url);
+            persistPrefetchCacheToSession();
+            return null;
+        }
+        return entry.data;
+    }
     
     // ========================================
     // Player Panel Functions
@@ -1738,6 +1794,8 @@
     
     // Initialize on page load
     document.addEventListener('DOMContentLoaded', async () => {
+        loadPrefetchCacheFromSession();
+
         // Set timezone dropdown to saved value
         const tzSelect = document.getElementById('timezone-select');
         if (tzSelect) {
@@ -2094,6 +2152,9 @@
                 renderUpcomingMatchesList(filteredSeries);
                 console.log(`Loaded ${data.total_matches} upcoming matches`);
                 startCountdownUpdater();
+                if (currentDataSource === 'crex') {
+                    prefetchUpcomingCrexMatches(filteredSeries, PREFETCH_MAX_MATCHES);
+                }
                 updatePrefetchStatusDisplay();
                 if (bulkSelectMode) applyBulkSelectToCards();
             } else {
@@ -2110,14 +2171,53 @@
         }
     }
 
-    // Update match cards with status indicators (no prefetch needed - data fetched fresh)
+    async function prefetchUpcomingCrexMatches(seriesList, limit = 8) {
+        try {
+            const urls = [];
+            for (const series of (seriesList || [])) {
+                for (const m of (series.matches || [])) {
+                    if (m && m.match_url) urls.push(m.match_url);
+                    if (urls.length >= limit) break;
+                }
+                if (urls.length >= limit) break;
+            }
+            if (urls.length === 0) return;
+
+            for (const url of urls) {
+                if (getPrefetchedMatch(url)) continue;
+                try {
+                    const response = await fetch(`/api/crex/match?url=${encodeURIComponent(url)}`);
+                    const data = await response.json();
+                    if (data && data.success) setPrefetchedMatch(url, data);
+                } catch (e) {
+                    console.debug('Prefetch failed for', url, e);
+                }
+            }
+        } finally {
+            updatePrefetchStatusDisplay();
+        }
+    }
+
+    // Update match cards with status indicators.
     function updateMatchCardsWithPrefetchStatus() {
-        // No-op - status indicators removed since we fetch fresh on selection
+        const cards = document.querySelectorAll('[data-match-url]');
+        cards.forEach(card => {
+            const statusEl = card.querySelector('.prefetch-status');
+            if (!statusEl) return;
+            const url = card.getAttribute('data-match-url');
+            if (!url) {
+                statusEl.textContent = '';
+                return;
+            }
+            const hit = !!getPrefetchedMatch(url);
+            statusEl.textContent = hit ? '• prefetched' : '• fetching on select';
+            statusEl.style.color = hit ? 'var(--accent-primary)' : 'var(--text-muted)';
+        });
     }
     
-    // Update status display after loading matches (no prefetch needed)
+    // Update status display after loading matches.
     function updatePrefetchStatusDisplay() {
-        // No-op - prefetch removed
+        updateMatchCardsWithPrefetchStatus();
     }
     
     // Countdown timer updater
@@ -2230,8 +2330,14 @@
         document.getElementById('t20-match-info').style.display = 'none';
         
         try {
-            const response = await fetch(`/api/crex/match?url=${encodeURIComponent(matchUrl)}`);
-            const data = await response.json();
+            let data = getPrefetchedMatch(matchUrl);
+            if (!data) {
+                const response = await fetch(`/api/crex/match?url=${encodeURIComponent(matchUrl)}`);
+                data = await response.json();
+                if (data && data.success) {
+                    setPrefetchedMatch(matchUrl, data);
+                }
+            }
             
             document.getElementById('t20-loading').style.display = 'none';
             

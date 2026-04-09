@@ -248,7 +248,8 @@ class DatabaseManager:
             normalize_venue_name,
             extract_canonical_name,
             venue_similarity,
-            extract_city_from_venue
+            extract_city_from_venue,
+            extract_state_from_venue,
         )
         from src.data.country_mapping import (
             get_country_for_venue,
@@ -304,12 +305,24 @@ class DatabaseManager:
         country = get_country_for_venue(name, city)
         region = get_region_for_country(country) if country != "Unknown" else None
         canonical = extract_canonical_name(name, city)
+        state = extract_state_from_venue(name, city, country if country != "Unknown" else None)
+
+        cursor.execute("PRAGMA table_info(venues)")
+        venue_columns = {row[1] for row in cursor.fetchall()}
+        has_state_column = 'state' in venue_columns
         
-        cursor.execute(
-            """INSERT INTO venues (name, city, country, canonical_name, region) 
-               VALUES (?, ?, ?, ?, ?)""",
-            (name, city, country if country != "Unknown" else None, canonical, region)
-        )
+        if has_state_column:
+            cursor.execute(
+                """INSERT INTO venues (name, city, country, state, canonical_name, region) 
+                   VALUES (?, ?, ?, ?, ?, ?)""",
+                (name, city, country if country != "Unknown" else None, state, canonical, region)
+            )
+        else:
+            cursor.execute(
+                """INSERT INTO venues (name, city, country, canonical_name, region) 
+                   VALUES (?, ?, ?, ?, ?)""",
+                (name, city, country if country != "Unknown" else None, canonical, region)
+            )
         return cursor.lastrowid
     
     def match_exists(self, conn: sqlite3.Connection, cricsheet_id: str) -> bool:

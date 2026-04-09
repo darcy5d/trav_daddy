@@ -1,6 +1,56 @@
 # Next Overhaul — Backlog
 
-A running notepad of bugs, inefficiencies, and improvement ideas to address in the next major refactor. Nothing here is implemented yet. Add freely; clean up when work begins.
+A running notepad of bugs, inefficiencies, and improvement ideas to address in the next major refactor. Some areas are already complete, some are in the current wave, and the rest are deferred. Keep statuses updated as work lands.
+
+## Wave Tracking (branch: `major-rework`)
+
+### Already Completed (pre-Wave 1)
+- Team variant display + parent-team training mapping pipeline is in place (A-teams and women variants included where available).
+- CREX variant resolution/mapping coverage work has been applied (this is no longer a primary implementation item for this wave).
+
+### In Wave 1 (current implementation scope)
+- 1. CREX scraper: Playwright-only squad fetch path
+- 2. Venue aliases expansion + duplicate review workflow
+- 3. Venue hierarchy: add `state`/`province` support
+- 4. Data exploration tab (venue quality tooling)
+- 5. Background prefetch for single -> bulk prediction flow
+- 6. Team 1 / Team 2 order stabilization (home/away consistency)
+
+### Explicitly Not In Wave 1 (deferred to next waves)
+- 7. Live Monte Carlo running-state UI polish
+- 8. Polymarket integration (live odds + GUI bet actions)
+- 9. Betfair integration + best-odds comparison
+- 10. Autonomous runner (discover -> simulate -> bet)
+- 11. Bet ledger / audit trail
+- 12. Cross-venue true-arb pathway
+- 13. Liquidity depth research + sizing analytics
+- 14. `cricketdata` R ingest pathway
+- 15. Ball outcome class-imbalance model work
+- 16. Match-level backtest (simulated vs actual outcomes)
+
+### Targeted Validation Note (Wave 1)
+- Confirm whether separate data is present and properly disaggregated for variants like Australia A / Australia A Women in existing team + ball-by-ball records. If gaps exist, capture as follow-up tasks under next waves.
+
+### Wave 1 Progress Snapshot
+- **Done (Sprint 0):** Australia A / variant data audit on current DB completed. Result: no dedicated `Australia A` team rows currently exist; women separation is tracked via `matches.gender` rather than team-name variants.
+- **Done (Sprint 1):** CREX squad fetch path updated to Playwright-first for match-detail squad extraction; static-first squad parse path removed from the main flow.
+- **Done (Sprint 1):** Team order normalization added using venue-country and venue-domestic hints (including regression coverage for Adelaide and WACA-style swap cases).
+- **Done (Sprint 2):** Venue alias coverage expanded and state/province extraction/migration scaffolding added.
+- **Done (Sprint 3):** Data explorer tab added with backend payload + UI panels for hierarchy, fuzzy duplicate candidates, and alias-gap review.
+- **Done (Sprint 4):** Background prefetch restored for CREX upcoming cards with TTL cache reuse across single-select and bulk-predict flows.
+- **Done (Sprint 5):** Final stabilization/docs pass completed (config-driven Flask secret handling, `.env.example` template with deferred market-integration placeholders, README env setup notes).
+
+### Wave 1 Sprint Sequence (execution order)
+- **Sprint 0 (Baseline):** scope lock, completed-vs-deferred status check, Australia A disaggregation audit, baseline latency snapshots.
+- **Sprint 1 (CREX reliability):** Playwright-only squads + team-order stabilization + regression checks.
+- **Sprint 2 (Venue foundations):** alias expansion, duplicate report, `venues.state` migration, normalizer/schema updates.
+- **Sprint 3 (Data explorer UI):** venue quality tab with counts, duplicate candidates, alias-gap panels, grouped by country/state/ground.
+- **Sprint 4 (Prefetch performance):** background prefetch endpoint, warm-cache usage from single -> bulk flow, TTL/invalidation.
+- **Sprint 5 (Stabilize/docs):** cross-feature smoke checks, README updates, final status pass in this backlog doc.
+
+**Dependency notes:**
+- Sprint 3 depends on Sprint 2 outputs (`state` and venue quality data feeds).
+- Sprint 4 can run partly in parallel with Sprint 3 once Sprint 1 is stable.
 
 ---
 
