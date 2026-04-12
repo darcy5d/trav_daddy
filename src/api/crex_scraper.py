@@ -11,6 +11,7 @@ Key pages:
 """
 
 import json
+import html
 import logging
 import re
 import time
@@ -831,6 +832,133 @@ class CREXScraper:
             logger.warning(f"Could not decode CREX app-root-state JSON: {e}")
             return None
 
+    @staticmethod
+    def _clean_commentary_markup(raw: str) -> str:
+        """Convert CREX pseudo-HTML markup into plain text."""
+        if not raw:
+            return ''
+        text = raw.replace('&l;', '<').replace('&g;', '>')
+        text = html.unescape(text)
+        text = re.sub(r'<[^>]+>', ' ', text)
+        text = re.sub(r'\s+', ' ', text).strip()
+        return text
+
+    def _players_from_squad_text(self, players_csv: str) -> List[CREXPlayer]:
+        """Build player rows from a comma-separated squad list."""
+        players: List[CREXPlayer] = []
+        if not players_csv:
+            return players
+        for idx, raw in enumerate(players_csv.split(','), start=1):
+            token = raw.strip()
+            if not token:
+                continue
+            is_captain = '(c)' in token.lower()
+            is_wicketkeeper = '(wk)' in token.lower()
+            clean_name = re.sub(r'\((?:c|wk)\)', '', token, flags=re.I).strip()
+            clean_name = re.sub(r'\s+', ' ', clean_name)
+            if not clean_name:
+                continue
+            players.append(
+                CREXPlayer(
+                    crex_id=f'state-{idx}',
+                    name=clean_name,
+                    short_name=clean_name.split()[0],
+                    role='WK' if is_wicketkeeper else 'Batter',
+                    is_captain=is_captain,
+                    is_wicketkeeper=is_wicketkeeper,
+                )
+            )
+        return players
+
+    def _extract_squads_from_embedded_state(
+        self,
+        soup: BeautifulSoup,
+        team1_name: str,
+        team2_name: str,
+        team1_id: str,
+        team2_id: str,
+    ) -> Tuple[Optional[CREXTeam], Optional[CREXTeam]]:
+        """
+        Fallback squad extraction from embedded app state commentary.
+
+        Some live CREX pages omit player profile links in the initial DOM.
+        """
+        script = soup.find('script', id='app-root-state')
+        if not script or not script.string:
+            return None, None
+        state = self._decode_crex_app_root_state(script.string)
+        if not isinstance(state, dict):
+            return None, None
+
+        squad_text_by_team: Dict[str, str] = {}
+
+        def collect_from_text(raw_text: Optional[str]) -> None:
+            if not isinstance(raw_text, str) or 'squad' not in raw_text.lower():
+                return
+            text = self._clean_commentary_markup(raw_text)
+            m = re.search(r'([A-Za-z][A-Za-z\s\-]+?)\s+Squad\s*:\s*(.+)$', text, re.I)
+            if not m:
+                return
+            label = normalize_crex_team_display_name(m.group(1).strip())
+            players_csv = m.group(2).strip()
+            if players_csv:
+                squad_text_by_team[label] = players_csv
+
+        for value in state.values():
+            if isinstance(value, list):
+                for item in value:
+                    if not isinstance(item, dict):
+                        continue
+                    collect_from_text(item.get('c'))
+                    commentary = item.get('commentary')
+                    if isinstance(commentary, dict):
+                        collect_from_text(commentary.get('c'))
+            elif isinstance(value, dict):
+                collect_from_text(value.get('c'))
+                data = value.get('data')
+                if isinstance(data, dict):
+                    collect_from_text(data.get('c'))
+                commentary = value.get('commentary')
+                if isinstance(commentary, dict):
+                    collect_from_text(commentary.get('c'))
+                firebase_data = value.get('firebaseData')
+                if isinstance(firebase_data, list):
+                    for entry in firebase_data:
+                        if not isinstance(entry, dict):
+                            continue
+                        c = entry.get('commentary')
+                        if isinstance(c, dict):
+                            collect_from_text(c.get('c'))
+
+        if not squad_text_by_team:
+            return None, None
+
+        def choose_players(target_team: str) -> Optional[List[CREXPlayer]]:
+            target_norm = normalize_venue_global(target_team).lower()
+            best_label = None
+            best_score = 0.0
+            for label, players_csv in squad_text_by_team.items():
+                score = venue_similarity(target_norm, normalize_venue_global(label).lower())
+                if score > best_score:
+                    best_score = score
+                    best_label = label
+            if not best_label or best_score < 0.45:
+                return None
+            return self._players_from_squad_text(squad_text_by_team[best_label])
+
+        team1_players = choose_players(team1_name)
+        team2_players = choose_players(team2_name)
+
+        team1 = (
+            CREXTeam(crex_id=team1_id, name=normalize_crex_team_display_name(team1_name), abbreviation=team1_id, players=team1_players)
+            if team1_players else None
+        )
+        team2 = (
+            CREXTeam(crex_id=team2_id, name=normalize_crex_team_display_name(team2_name), abbreviation=team2_id, players=team2_players)
+            if team2_players else None
+        )
+        return team1, team2
+
     def _normalize_crex_live_score_url(self, url_or_path: str) -> str:
         """
         Build a fetchable cricket-live-score URL.
@@ -973,6 +1101,12 @@ class CREXScraper:
             gender = 'male'
         else:
             gender = self._detect_gender(f'{team1_name} {team2_name} {series_name}')
+
+        # Guard against occasional upstream gender flag mistakes on women's fixtures.
+        # If teams/series explicitly indicate women's cricket, force female.
+        inferred_gender = self._detect_gender(f'{team1_name} {team2_name} {series_name}')
+        if inferred_gender == 'female':
+            gender = 'female'
 
         venue = None
         vname = (fx.get('venue') or '').strip()
@@ -1152,7 +1286,9 @@ class CREXScraper:
         # Check if any matches are missing series names
         missing_count = sum(1 for m in matches if not m.series_name and m.series_id)
         if missing_count == 0:
-            return  # All have names already
+            # Still need to recheck gender for all matches in case series was present
+            self._recheck_gender_from_series(matches)
+            return
         
         logger.info(f"Enriching {missing_count} matches with missing series names")
         
@@ -1171,6 +1307,33 @@ class CREXScraper:
                     enriched += 1
         
         logger.info(f"Enriched {enriched}/{missing_count} matches with series names")
+        
+        # Recheck gender now that series names are available
+        self._recheck_gender_from_series(matches)
+
+    def _recheck_gender_from_series(self, matches: List[CREXMatch]):
+        """
+        Recheck and correct gender classification after series names are enriched.
+        
+        This catches cases where the upstream g flag was wrong (e.g., g=1 for male)
+        but the series name clearly indicates women's cricket (e.g., "Metrobank Women One Day Cup").
+        """
+        corrected = 0
+        for match in matches:
+            if match.gender == 'female':
+                continue  # Already correctly identified as female
+            
+            # Build text to check for women's keywords
+            text_to_check = f'{match.team1_name} {match.team2_name} {match.series_name}'
+            inferred = self._detect_gender(text_to_check)
+            
+            if inferred == 'female' and match.gender != 'female':
+                match.gender = 'female'
+                corrected += 1
+                logger.debug(f"Corrected gender to female for: {match.title} (series: {match.series_name})")
+        
+        if corrected > 0:
+            logger.info(f"Corrected gender to female for {corrected} matches based on series/team names")
     
     def _filter_by_time_window(self, matches: List[CREXMatch], hours_ahead: int, hours_behind: int) -> List[CREXMatch]:
         """Filter matches by time window (similar to ESPN scraper approach)."""
@@ -1692,8 +1855,8 @@ class CREXScraper:
         if format_type is None:
             format_type = 'T20'
 
-        # Detect gender
-        gender = self._detect_gender(title_text + team1_name + team2_name)
+        # Detect gender - include series name which often has explicit "Women" label
+        gender = self._detect_gender(f'{title_text} {team1_name} {team2_name} {series_name}')
         
         # Parse date/time and venue
         # Look for text like "Saturday, 24 January, 10:00 AM" and venue below it
@@ -1712,6 +1875,15 @@ class CREXScraper:
         start_date, start_time, date_time_gmt = None, None, None
         if date_str:
             start_date, start_time, date_time_gmt = self._parse_crex_datetime(date_str)
+        elif live_blk and isinstance(live_blk.get('t'), str):
+            # Live routes often skip human-formatted date text, but include ISO timestamp in app state.
+            try:
+                dt_utc = datetime.fromisoformat(live_blk.get('t').replace('Z', '+00:00'))
+                start_date = dt_utc.strftime('%Y-%m-%d')
+                start_time = dt_utc.strftime('%I:%M %p').lstrip('0')
+                date_time_gmt = dt_utc.astimezone(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
+            except Exception:
+                pass
 
         # PRIMARY: extract venue from text between datetime and "Team Form" / "Head to Head"
         # CREX page structure is always: [datetime] [venue name] Team Form (Last 5 matches)...
@@ -1729,17 +1901,25 @@ class CREXScraper:
                     # Strip trailing streaming/media partner names CREX appends to venue
                     # e.g., "Phillip Oval, Canberra, Australia FANCODE" → "Phillip Oval, Canberra, Australia"
                     candidate = re.sub(
-                        r'\s+(?:FANCODE|Star\s+Sports?|Hotstar|Disney\+?|Willow(?:\s+TV)?|Sky\s+Sports?|'
-                        r'BT\s+Sport|DAZN|ESPN\+?|Fox\s+Sports?|SuperSport|Kayo|Channel\s+\d+|'
-                        r'Ten\s+Sports?|PTV\s+Sports?|Geo\s+Super|Sony\s+(?:LIV|Six|Ten)|Cricbuzz)\s*$',
-                        '', candidate, flags=re.I
-                    ).strip()
+                        r'(?:\s*,?\s*(?:FANCODE|Star\s+Sports?(?:\s+Network)?|JioHotstar|Hotstar|Disney\+?|'
+                        r'Willow(?:\s+TV)?|Sky\s+Sports?|BT\s+Sport|DAZN|ESPN\+?|Fox\s+Sports?|'
+                        r'SuperSport|Kayo|Channel\s+\d+|Ten\s+Sports?|PTV\s+Sports?|Geo\s+Super|'
+                        r'Sony\s+(?:LIV|Six|Ten)|Cricbuzz|tapmad))+\s*$',
+                        '',
+                        candidate,
+                        flags=re.I
+                    ).strip().rstrip(',').strip()
                     if candidate and len(candidate) < 120:
                         venue_name = candidate
                         logger.info(f"Extracted venue from CREX page (between-sections): '{venue_name}'")
 
         # SECONDARY: regex-based fallback for pages with different structure
         # (e.g., no "Team Form" section, or venue appears before the datetime)
+        if not venue_name:
+            state_venue = (live_blk.get('v') or '').strip() if isinstance(live_blk, dict) else ''
+            if state_venue:
+                venue_name = state_venue
+
         if not venue_name:
             venue_patterns = [
                 r'([A-Za-z\s\-\'\.]+(?:Stadium|Ground|Gardens|Oval|Arena|Park|Reserve|Centre|Center|Field|Academy|Club|Complex|International Cricket Ground)(?:,\s*[A-Za-z\s\-]+)?)\s*(?:Team Form|Head to Head|Match|\d+(?:\.\d+)?[˚°]|$)',
@@ -1803,6 +1983,32 @@ class CREXScraper:
         team1, team2 = self.fetch_squads_with_playwright(
             match_url, team1_name, team2_name, team1_id, team2_id
         )
+        if not ((team1 and team1.players) or (team2 and team2.players)):
+            state_team1, state_team2 = self._extract_squads_from_embedded_state(
+                soup=soup,
+                team1_name=team1_name,
+                team2_name=team2_name,
+                team1_id=team1_id,
+                team2_id=team2_id,
+            )
+            if state_team1 or state_team2:
+                logger.info("Using embedded-state squad fallback for live page")
+                team1 = state_team1 or team1
+                team2 = state_team2 or team2
+
+        # Final fallback: parse any visible HTML squad content if Playwright/state extraction
+        # did not populate both teams. This preserves Playwright-first behavior while still
+        # salvaging data when browser binaries are unavailable at runtime.
+        if not (team1 and team1.players):
+            html_team1 = self._parse_squad(soup, team1_id, team1_name, is_first_team=True)
+            if html_team1 and html_team1.players:
+                logger.info("Recovered team1 squad from static HTML fallback")
+                team1 = html_team1
+        if not (team2 and team2.players):
+            html_team2 = self._parse_squad(soup, team2_id, team2_name, is_first_team=False)
+            if html_team2 and html_team2.players:
+                logger.info("Recovered team2 squad from static HTML fallback")
+                team2 = html_team2
         
         has_squads = bool((team1 and team1.players) or (team2 and team2.players))
         
@@ -2095,9 +2301,19 @@ class CREXScraper:
                 try:
                     page.wait_for_selector('a[href*="/player/"]', timeout=10000)
                 except:
-                    logger.warning("[PLAYWRIGHT] No player links found on page")
-                    browser.close()
-                    return None, None
+                    # New CREX live routes often expose squads under /match-details.
+                    fallback_url = match_url.rstrip('/')
+                    if not fallback_url.endswith('/match-details'):
+                        fallback_url = f'{fallback_url}/match-details'
+                    logger.info(f"[PLAYWRIGHT] Retrying squad extraction via {fallback_url}")
+                    try:
+                        page.goto(fallback_url, wait_until='domcontentloaded', timeout=60000)
+                        page.wait_for_timeout(2000)
+                        page.wait_for_selector('a[href*=\"/player/\"]', timeout=10000)
+                    except:
+                        logger.warning("[PLAYWRIGHT] No player links found on page")
+                        browser.close()
+                        return None, None
                 
                 # Find the squad tab buttons using the specific CREX class
                 # CREX uses: <button class="playingxi-button selected"> IRE </button>
@@ -2997,9 +3213,9 @@ class CREXScraper:
         
         team_names = [team.name, team.abbreviation]
         
-        # NZ Super Smash team rebrandings (new name -> old database name)
-        # Includes both men's and women's franchise names
-        nz_rebrand_aliases = {
+        # Team rebrandings / naming variants (new display name -> DB canonical name).
+        # Includes both men's and women's franchise names.
+        team_rebrand_aliases = {
             # Men's
             'northern brave': 'northern districts',
             'southern brave': 'southern districts', 
@@ -3020,6 +3236,12 @@ class CREXScraper:
             'northern brave women': 'northern districts',
             'otago sparks': 'otago',
             'otago sparks women': 'otago',
+            # IPL city spelling update (CREX/official branding -> DB canonical)
+            'royal challengers bengaluru': 'royal challengers bangalore',
+            'royal challengers bengaluru women': 'royal challengers bangalore',
+            # CREX sometimes truncates franchise city from the display name.
+            'royal challengers': 'royal challengers bangalore',
+            'royal challengers women': 'royal challengers bangalore',
         }
         
         # Common cricket team abbreviations (CREX abbreviation -> full name)
@@ -3072,6 +3294,8 @@ class CREXScraper:
             # BBL only: CREX also uses "MS" for Multan Sultans — prune/contradiction logic applies
             'ms': 'melbourne stars', 'mr': 'melbourne renegades', 'bh': 'brisbane heat',
             'hs': 'hobart hurricanes', 'as': 'adelaide strikers',
+            # IPL franchises
+            'rcb': 'royal challengers bangalore',
         }
         
         # Handle "A" teams (e.g., "Pakistan A Women", "India A Women")
@@ -3105,7 +3329,7 @@ class CREXScraper:
                         logger.debug(f"Expanded hyphenated A-team '{name_norm}' to '{variant}'")
         
         # Add aliases for rebranded teams
-        for alias_from, alias_to in nz_rebrand_aliases.items():
+        for alias_from, alias_to in team_rebrand_aliases.items():
             for name in list(team_names):
                 name_norm = name.lower().replace(' women', '').replace('-w', '').strip()
                 if alias_from in name_norm:
@@ -3159,6 +3383,31 @@ class CREXScraper:
                 ab = str(team.abbreviation).strip()
                 if ab.lower() not in {x.lower() for x in primary_raw}:
                     primary_raw.append(ab)
+
+            # Prefer explicit rebrand canonical targets before any raw exact hits.
+            # This keeps historical DB anchors stable even if both old/new names exist.
+            preferred_exact_names: List[str] = []
+            for raw in primary_raw:
+                raw_norm = raw.lower().replace(' women', '').replace('-w', '').strip()
+                for alias_from, alias_to in team_rebrand_aliases.items():
+                    if alias_from in raw_norm and alias_to not in preferred_exact_names:
+                        preferred_exact_names.append(alias_to)
+                        preferred_exact_names.append(alias_to + ' women')
+
+            for preferred in preferred_exact_names:
+                preferred_norm = preferred.lower().replace(' women', '').replace('-w', '').strip()
+                preferred_direction = get_direction(preferred)
+                for row in candidates:
+                    db_name = row['name']
+                    db_norm = db_name.lower().strip()
+                    db_direction = get_direction(db_name)
+                    if preferred_direction and db_direction and preferred_direction != db_direction:
+                        continue
+                    if preferred_norm == db_norm:
+                        logger.info(
+                            f"Matched team '{team.name}' to '{db_name}' (preferred rebrand alias, {source_label})"
+                        )
+                        return (row['team_id'], row['name'])
             
             for row in candidates:
                 db_name = row['name']

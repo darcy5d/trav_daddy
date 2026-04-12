@@ -48,18 +48,32 @@ class PolymarketClient:
         data = self._get_json(f"{self.clob_base_url}/ok")
         return {"success": True, "service": "polymarket", "ok": bool(data)}
 
-    def get_markets(self, limit: int = 20, active: bool = True, closed: bool = False) -> Any:
+    def get_markets(
+        self,
+        limit: int = 20,
+        active: Optional[bool] = True,
+        closed: Optional[bool] = False,
+        slug: Optional[str] = None,
+    ) -> Any:
         """
         Fetch markets from Gamma API.
 
         This endpoint is public and does not require API credentials.
         """
-        params = {
-            "limit": max(1, min(limit, 200)),
-            "active": str(bool(active)).lower(),
-            "closed": str(bool(closed)).lower(),
-        }
+        params: Dict[str, Any] = {"limit": max(1, min(limit, 500))}
+        if active is not None:
+            params["active"] = str(bool(active)).lower()
+        if closed is not None:
+            params["closed"] = str(bool(closed)).lower()
+        if slug:
+            params["slug"] = slug
         return self._get_json(f"{self.api_base_url}/markets", params=params)
+
+    def get_markets_by_slug(self, slug: str) -> Any:
+        """Fetch markets by exact slug via Gamma API."""
+        if not slug:
+            raise ValueError("slug is required")
+        return self.get_markets(limit=50, active=None, closed=None, slug=slug)
 
     def get_market(self, market_id: str) -> Any:
         """Fetch a single market from Gamma API by ID."""

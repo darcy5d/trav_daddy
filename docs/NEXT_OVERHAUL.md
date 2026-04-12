@@ -52,6 +52,9 @@ A running notepad of bugs, inefficiencies, and improvement ideas to address in t
 - **Done (Sprint 1):** Added Polymarket API client + read endpoints (`health`, `markets`, `orderbook`) so read-path wiring can proceed without trading enablement.
 - **Done (Sprint 1):** Added Betfair session bootstrap/keep-alive/status endpoints with masked token handling and configurable login paths.
 - **Done (Sprint 1.1):** Switched readiness gating to Polymarket-first so Wave 2 can proceed without Betfair credentials; Betfair remains optional diagnostics/scaffolding.
+- **Done (Sprint 2):** Added Polymarket fixture comparison service + endpoints (`/api/integrations/polymarket/compare`, `/api/integrations/polymarket/compare/batch`) with linker confidence, quote freshness, and explicit status branches (`ok`, `no_match`, `quote_unavailable`, `stale`).
+- **Done (Sprint 2):** Bulk Predict now renders per-row Polymarket market cards after simulation completes; Single Predict adds compact Polymarket comparison panel in results.
+- **Done (Sprint 2):** Live-running UI state in Bulk Predict simplified (clearer primary progress, cleaner ETA behavior).
 - **Deferred (later wave):** Actual order placement/execution credentials and write-path flows remain intentionally out of scope for this read-only wave.
 
 ### Wave 1 Sprint Sequence (execution order)

@@ -199,6 +199,53 @@
         display: block;
         margin-top: 0.25rem;
     }
+    .live-chip {
+        display: inline-block;
+        padding: 0.12rem 0.45rem;
+        border-radius: 999px;
+        font-size: 0.68rem;
+        font-weight: 700;
+        letter-spacing: 0.3px;
+        background: rgba(59, 130, 246, 0.2);
+        color: var(--accent-secondary);
+        border: 1px solid rgba(59, 130, 246, 0.35);
+    }
+    .market-mini-card {
+        margin-top: 0.45rem;
+        padding: 0.4rem 0.45rem;
+        border-radius: 6px;
+        background: rgba(17, 24, 39, 0.6);
+        border: 1px solid rgba(55, 65, 81, 0.7);
+        font-size: 0.72rem;
+        color: var(--text-secondary);
+    }
+    .market-mini-card strong {
+        color: var(--text-primary);
+    }
+    .market-badge {
+        display: inline-block;
+        font-size: 0.66rem;
+        font-weight: 700;
+        letter-spacing: 0.25px;
+        padding: 0.08rem 0.38rem;
+        border-radius: 999px;
+        margin-right: 0.3rem;
+    }
+    .market-badge-ok {
+        background: rgba(16, 185, 129, 0.15);
+        color: var(--accent-primary);
+        border: 1px solid rgba(16, 185, 129, 0.28);
+    }
+    .market-badge-warn {
+        background: rgba(245, 158, 11, 0.18);
+        color: var(--accent-warning);
+        border: 1px solid rgba(245, 158, 11, 0.3);
+    }
+    .market-badge-muted {
+        background: rgba(107, 114, 128, 0.2);
+        color: var(--text-muted);
+        border: 1px solid rgba(107, 114, 128, 0.32);
+    }
 </style>
 {% endblock %}
 
@@ -315,7 +362,7 @@
     let currentAbortController = null;
     let venuesCache = null; // Cache venue list so we only fetch once
     let availablePredictionModels = []; // { gender, format }[] from GET /api/prediction/available-models
-    const PREFETCH_CACHE_KEY = 'crexPrefetchCacheV1';
+    const PREFETCH_CACHE_KEY = 'crexPrefetchCacheV3';
     const PREFETCH_CACHE_TTL_MS = 20 * 60 * 1000;
     let prefetchedCrexMatches = new Map();
 
@@ -1097,15 +1144,19 @@
             statusEl.textContent = 'Running...';
             statusEl.className = 'status-running';
             
-            // Show progress bar + convergence chart + ETA in result cell
+            // Show cleaner running state: primary progress + compact live context
             const chartPoints = []; // [{pct, t1WinPct}]
             resultCell.innerHTML = `
-                <div style="min-width: 200px;">
+                <div style="min-width: 220px;">
+                    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.2rem;">
+                        <span class="live-chip">LIVE</span>
+                        <span id="sim-pct-${idx}" style="font-size: 0.72rem; color: var(--text-muted); font-family: 'JetBrains Mono', monospace;">0%</span>
+                    </div>
                     <div class="sim-progress">
                         <div class="sim-progress-fill" id="sim-fill-${idx}" style="width: 0%;"></div>
                     </div>
-                    <div style="display: flex; justify-content: space-between; font-size: 0.7rem; color: var(--text-muted); margin-top: 0.15rem;">
-                        <span id="sim-pct-${idx}">0%</span>
+                    <div style="display: flex; justify-content: space-between; font-size: 0.7rem; color: var(--text-muted); margin-top: 0.18rem;">
+                        <span>Running simulations...</span>
                         <span id="sim-eta-${idx}"></span>
                     </div>
                     <canvas id="chart-${idx}" class="convergence-canvas" width="200" height="50" style="margin-top: 0.25rem;"></canvas>
@@ -1222,7 +1273,7 @@
                         : '';
                     
                     resultCell.innerHTML = `
-                        <div style="min-width: 160px;">
+                        <div style="min-width: 220px;">
                             <div style="display: flex; justify-content: space-between; align-items: baseline;">
                                 <span class="win-pct ${t1Fav ? 'win-pct-fav' : 'win-pct-dog'}">${t1Pct.toFixed(1)}%</span>
                                 <span style="color: var(--text-muted); font-size: 0.7rem;">vs</span>
@@ -1237,8 +1288,14 @@
                                 <span>${warningIcon} ${(finalResult.elapsed_ms / 1000).toFixed(1)}s</span>
                                 <span>Avg ${finalResult.avg_team2_score}</span>
                             </div>
+                            <div id="market-mini-${idx}" class="market-mini-card">
+                                <span class="market-badge market-badge-muted">Market</span>
+                                Loading Polymarket quote...
+                            </div>
                         </div>
                     `;
+                    // Non-blocking market comparison enrichment.
+                    void enrichRowWithPolymarket(idx, info, entry, finalResult);
                     
                     statusEl.textContent = 'Done';
                     statusEl.className = 'status-done';
@@ -1316,6 +1373,7 @@
     // ============================================================
     function formatETA(seconds) {
         if (!seconds || seconds <= 0) return '';
+        seconds = Math.max(0, seconds);
         if (seconds < 60) return `~${Math.ceil(seconds)}s`;
         const mins = Math.floor(seconds / 60);
         const secs = Math.ceil(seconds % 60);
@@ -1326,16 +1384,89 @@
     }
     
     function updateTotalETA(matchesDone, totalReady, nSims, rate, currentMatchEtaSec) {
-        const matchesRemaining = totalReady - matchesDone;
+        // matchesDone increments after each completed row, while one row may still be in flight.
+        // Avoid counting current row twice by subtracting one full-match block when ETA for current row is provided.
+        const hasCurrentEta = currentMatchEtaSec && currentMatchEtaSec > 0;
+        const matchesRemainingAfterCurrent = Math.max(totalReady - matchesDone - (hasCurrentEta ? 1 : 0), 0);
         const rateEl = document.getElementById('eta-rate');
         const timeEl = document.getElementById('eta-total-time');
         
         if (rate > 0) {
             rateEl.textContent = Math.round(rate).toLocaleString();
-            // Time for remaining matches = (matchesRemaining * nSims / rate) + current match ETA
-            const remainingSec = (matchesRemaining * nSims / rate) + (currentMatchEtaSec || 0);
+            const remainingSec = (matchesRemainingAfterCurrent * nSims / rate) + (currentMatchEtaSec || 0);
             timeEl.textContent = formatETA(remainingSec);
             timeEl.style.color = 'var(--accent-secondary)';
+        }
+    }
+
+    function buildStartUtcForCompare(entry) {
+        const match = entry?.crexData?.match;
+        if (!match) return '';
+        if (match.start_utc) return match.start_utc;
+        if (match.date_time_gmt) return match.date_time_gmt;
+        const date = (match.start_date || '').trim();
+        const time = (match.start_time || '').trim();
+        if (!date) return '';
+        const combined = `${date}${time ? ' ' + time : ''}`;
+        const parsed = new Date(combined);
+        if (!Number.isNaN(parsed.getTime())) return parsed.toISOString();
+        return '';
+    }
+
+    function renderMarketMiniHtml(comparePayload) {
+        const status = comparePayload?.status || 'quote_unavailable';
+        if (status === 'ok' || status === 'stale') {
+            const p = comparePayload.probabilities || {};
+            const q = comparePayload.quote || {};
+            const edge = p.edge_pct_points;
+            const edgeText = edge === null || edge === undefined
+                ? '--'
+                : `${edge > 0 ? '+' : ''}${Number(edge).toFixed(1)} pp`;
+            const badgeClass = status === 'ok' ? 'market-badge-ok' : 'market-badge-warn';
+            const badgeLabel = status === 'ok' ? 'Polymarket' : 'Stale';
+            const ageSec = q.quote_age_sec ?? null;
+            const freshness = ageSec === null ? '' : `${ageSec}s ago`;
+            return `
+                <span class="market-badge ${badgeClass}">${badgeLabel}</span>
+                <strong>Model</strong> ${p.model_win_pct !== null && p.model_win_pct !== undefined ? Number(p.model_win_pct).toFixed(1) + '%' : '--'}
+                &nbsp;·&nbsp;
+                <strong>Market</strong> ${p.market_implied_pct !== null && p.market_implied_pct !== undefined ? Number(p.market_implied_pct).toFixed(1) + '%' : '--'}
+                &nbsp;·&nbsp;
+                <strong>Edge</strong> ${edgeText}
+                ${freshness ? `<div style="margin-top: 0.2rem; color: var(--text-muted);">${freshness}</div>` : ''}
+            `;
+        }
+        if (status === 'no_match') {
+            return '<span class="market-badge market-badge-muted">No market match</span>';
+        }
+        if (status === 'quote_unavailable') {
+            return '<span class="market-badge market-badge-warn">Quote unavailable</span>';
+        }
+        return '<span class="market-badge market-badge-muted">Unavailable</span>';
+    }
+
+    async function enrichRowWithPolymarket(idx, info, entry, finalResult) {
+        const marketEl = document.getElementById(`market-mini-${idx}`);
+        if (!marketEl) return;
+        try {
+            const params = new URLSearchParams();
+            params.set('team1', info.team1Name || 'Team 1');
+            params.set('team2', info.team2Name || 'Team 2');
+            if (info.seriesName) params.set('series', info.seriesName);
+            const startUtc = buildStartUtcForCompare(entry);
+            if (startUtc) params.set('start_utc', startUtc);
+            if (finalResult?.team1_win_prob !== undefined) params.set('model_team1_win_pct', String(finalResult.team1_win_prob));
+            if (finalResult?.team2_win_prob !== undefined) params.set('model_team2_win_pct', String(finalResult.team2_win_prob));
+
+            const response = await fetch(`/api/integrations/polymarket/compare?${params.toString()}`);
+            const payload = await response.json();
+            if (!payload?.success) {
+                marketEl.innerHTML = '<span class="market-badge market-badge-warn">Quote unavailable</span>';
+                return;
+            }
+            marketEl.innerHTML = renderMarketMiniHtml(payload);
+        } catch (err) {
+            marketEl.innerHTML = `<span class="market-badge market-badge-warn">Quote unavailable</span>`;
         }
     }
     

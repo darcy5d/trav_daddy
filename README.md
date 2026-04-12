@@ -117,6 +117,7 @@ cp .env.example .env
 Notes:
 - `.env` is ignored by git (`.gitignore`), so local API keys/secrets are not committed.
 - Keep real exchange/market credentials only in local `.env` or a secret manager.
+- `AUTO_INSTALL_PLAYWRIGHT_CHROMIUM=true` (default) auto-runs `python -m playwright install chromium` on app startup when the browser binary is missing.
 - Wave 2 integration readiness endpoint: `GET /api/integrations/credentials-status` (returns masked credential status only).
 
 ### Market Integration Environment Variables (Wave 2)
@@ -311,9 +312,17 @@ Training (e.g. `full_retrain.py`) reads from `best_hparams_{format}_{gender}.jso
 | `/api/integrations/polymarket/health` | GET | Polymarket CLOB health probe |
 | `/api/integrations/polymarket/markets` | GET | Polymarket public market list (`?limit=20&active=true&closed=false`) |
 | `/api/integrations/polymarket/orderbook` | GET | Polymarket CLOB orderbook by token (`?token_id=...`) |
+| `/api/integrations/polymarket/compare` | GET | Row-level fixture comparison (`team1`, `team2`, optional `start_utc`, `series`, model win % params) |
+| `/api/integrations/polymarket/compare/batch` | POST | Batch fixture comparison for bulk rows (`fixtures[]`) |
 | `/api/integrations/betfair/session/status` | GET | Betfair session status (masked token preview only) |
 | `/api/integrations/betfair/session/bootstrap` | POST | Bootstrap Betfair session via configured login path |
 | `/api/integrations/betfair/session/keep-alive` | POST | Refresh an existing Betfair session token |
+
+Bulk Predict row status mappings for Polymarket comparison:
+- `ok`: model %, market implied %, edge, freshness shown
+- `no_match`: "No market match"
+- `quote_unavailable`: "Quote unavailable"
+- `stale`: stale badge plus latest values where available
 
 ### Simulation
 | Endpoint | Method | Description |

@@ -622,6 +622,9 @@
         <div style="font-size: 0.875rem; color: var(--text-secondary);">
             <span id="t20-team1-info"></span> vs <span id="t20-team2-info"></span>
         </div>
+        <div id="single-polymarket-presim-card" style="display: none; margin-top: 0.75rem; padding: 0.65rem 0.75rem; border-radius: 8px; background: rgba(17, 24, 39, 0.45); border: 1px solid rgba(55, 65, 81, 0.65); font-size: 0.82rem; color: var(--text-secondary);">
+            <span id="single-polymarket-presim-content">Loading live market odds...</span>
+        </div>
     </div>
 </div>
 
@@ -924,6 +927,9 @@
     <div style="text-align: center; color: var(--text-muted); font-size: 0.875rem;">
         <span id="result-meta"></span>
     </div>
+    <div id="single-polymarket-card" style="display: none; margin-top: 0.9rem; padding: 0.75rem 0.9rem; border-radius: 8px; background: rgba(17, 24, 39, 0.6); border: 1px solid rgba(55, 65, 81, 0.7); font-size: 0.84rem; color: var(--text-secondary);">
+        <span id="single-polymarket-content">Loading Polymarket comparison...</span>
+    </div>
 </div>
 
 <!-- Scorecard Section (NN simulator only) - ESPN Cricinfo Style -->
@@ -1132,10 +1138,14 @@
     let upcomingFormatFilter = 'all'; // 'all' | 't20' | 'odi' | 'test'
     
     // Client-side prefetch cache for CREX match detail payloads.
-    const PREFETCH_CACHE_KEY = 'crexPrefetchCacheV1';
+    const PREFETCH_CACHE_KEY = 'crexPrefetchCacheV3';
     const PREFETCH_CACHE_TTL_MS = 20 * 60 * 1000;
     const PREFETCH_MAX_MATCHES = 8;
     let prefetchedCrexMatches = new Map(); // url -> { ts, data }
+    const POLYMARKET_COMPARE_TTL_MS = 45 * 1000;
+    const polymarketCompareCache = new Map(); // fixtureKey -> { ts, payload }
+    let upcomingPolymarketContexts = new Map(); // rowKey -> fixture context
+    let currentSelectedFixture = null;
     
     // Team filter state (for manual selection)
     const teamFilters = {
@@ -2035,9 +2045,131 @@
         return `<span class="tag-format ${t.cls}">${t.label}</span>`;
     }
 
+    function normalizeFixtureText(value) {
+        return String(value || '').trim().toLowerCase().replace(/\s+/g, ' ');
+    }
+
+    function buildPolymarketFixtureKey(team1, team2, startUtc, series) {
+        return [
+            normalizeFixtureText(team1),
+            normalizeFixtureText(team2),
+            String(startUtc || '').trim(),
+            normalizeFixtureText(series),
+        ].join('||');
+    }
+
+    function teamShortCode(name) {
+        const words = String(name || '').trim().split(/\s+/).filter(Boolean);
+        if (!words.length) return 'TM';
+        if (words.length === 1) return words[0].slice(0, 3).toUpperCase();
+        return words.slice(0, 3).map(w => w[0]).join('').toUpperCase();
+    }
+
+    function splitMatchTitleTeams(matchObj) {
+        if (matchObj?.team1 && matchObj?.team2) return [matchObj.team1, matchObj.team2];
+        const title = String(matchObj?.title || '').trim();
+        if (!title) return ['', ''];
+        const parts = title.split(/\s+vs\s+/i);
+        return [parts[0] || '', parts[1] || ''];
+    }
+
+    function parseMatchDateToUtcIso(datePart, timePart = '') {
+        const combined = `${String(datePart || '').trim()} ${String(timePart || '').trim()}`.trim();
+        if (!combined) return '';
+        const parsed = new Date(combined);
+        if (Number.isNaN(parsed.getTime())) return '';
+        return parsed.toISOString();
+    }
+
+    function buildFixtureContextForUpcoming(match, seriesName = '') {
+        const [team1, team2] = splitMatchTitleTeams(match);
+        return {
+            team1: team1 || 'Team 1',
+            team2: team2 || 'Team 2',
+            series: seriesName || '',
+            startUtc: String(match?.date_time_gmt || match?.start_utc || '').trim() ||
+                parseMatchDateToUtcIso(match?.start_date || '', match?.start_time || ''),
+        };
+    }
+
+    function summarizePolymarketMarketOnly(payload, fixture) {
+        if (!payload?.success) {
+            return '<span style="color: var(--accent-warning);">Quote unavailable</span>';
+        }
+        const status = payload.status || 'quote_unavailable';
+        if (status === 'no_match') {
+            return '<span style="color: var(--text-muted);">No market match</span>';
+        }
+        if (status === 'quote_unavailable') {
+            return '<span style="color: var(--accent-warning);">Quote unavailable</span>';
+        }
+        const implied = Number(payload?.probabilities?.market_implied_pct);
+        if (Number.isNaN(implied)) {
+            return '<span style="color: var(--accent-warning);">Quote unavailable</span>';
+        }
+        const team1Pct = Math.max(0, Math.min(100, implied));
+        const team2Pct = Math.max(0, Math.min(100, 100 - team1Pct));
+        const stale = status === 'stale' ? ' <span style="color: var(--accent-warning);">(stale)</span>' : '';
+        const age = payload?.quote?.quote_age_sec;
+        const ageText = age === null || age === undefined ? '' : ` · ${age}s ago`;
+        return `
+            <span style="font-weight: 600; color: var(--text-primary);">Live market odds:</span>
+            <span style="color: var(--accent-primary); font-weight: 600;">${teamShortCode(fixture.team1)} ${team1Pct.toFixed(1)}%</span>
+            &nbsp;·&nbsp;
+            <span style="color: var(--accent-secondary); font-weight: 600;">${teamShortCode(fixture.team2)} ${team2Pct.toFixed(1)}%</span>
+            ${stale}
+            <span style="color: var(--text-muted); font-size: 0.76rem;">${ageText}</span>
+        `;
+    }
+
+    async function fetchPolymarketCompare(fixture, modelData = null) {
+        const fixtureKey = buildPolymarketFixtureKey(fixture.team1, fixture.team2, fixture.startUtc, fixture.series);
+        const includeModel = !!(modelData && modelData.team1 !== undefined && modelData.team2 !== undefined);
+        const cacheKey = `${fixtureKey}::${includeModel ? 'model' : 'market'}`;
+        const now = Date.now();
+        const cached = polymarketCompareCache.get(cacheKey);
+        if (cached && (now - cached.ts) <= POLYMARKET_COMPARE_TTL_MS) {
+            return cached.payload;
+        }
+
+        const params = new URLSearchParams();
+        params.set('team1', fixture.team1 || 'Team 1');
+        params.set('team2', fixture.team2 || 'Team 2');
+        if (fixture.series) params.set('series', fixture.series);
+        if (fixture.startUtc) params.set('start_utc', fixture.startUtc);
+        if (includeModel) {
+            params.set('model_team1_win_pct', String(modelData.team1));
+            params.set('model_team2_win_pct', String(modelData.team2));
+        }
+
+        const response = await fetch(`/api/integrations/polymarket/compare?${params.toString()}`);
+        const payload = await response.json();
+        polymarketCompareCache.set(cacheKey, { ts: now, payload });
+        return payload;
+    }
+
+    function queueUpcomingPolymarketOddsRender() {
+        const rows = Array.from(document.querySelectorAll('[data-polymarket-row-key]'));
+        rows.forEach(row => {
+            const rowKey = row.getAttribute('data-polymarket-row-key');
+            const fixture = upcomingPolymarketContexts.get(rowKey);
+            if (!fixture) return;
+            row.innerHTML = '<span style="color: var(--text-muted);">Polymarket: loading...</span>';
+            void (async () => {
+                try {
+                    const payload = await fetchPolymarketCompare(fixture, null);
+                    row.innerHTML = summarizePolymarketMarketOnly(payload, fixture);
+                } catch (err) {
+                    row.innerHTML = '<span style="color: var(--accent-warning);">Polymarket: quote unavailable</span>';
+                }
+            })();
+        });
+    }
+
     function renderUpcomingMatchesList(seriesList) {
         const listEl = document.getElementById('matches-list');
         const emptyEl = document.getElementById('matches-empty');
+        upcomingPolymarketContexts = new Map();
         if (!seriesList || seriesList.length === 0) {
             listEl.style.display = 'none';
             emptyEl.style.display = 'block';
@@ -2051,7 +2183,7 @@
         listEl.innerHTML = '';
         const isCrex = currentDataSource === 'crex';
         const isEspn = currentDataSource === 'espn';
-        seriesList.forEach(series => {
+        seriesList.forEach((series, seriesIdx) => {
             const genderBadge = series.gender === 'female' ?
                 '<span style="background: #e91e63; color: white; padding: 2px 6px; border-radius: 4px; font-size: 0.7rem; margin-left: 0.5rem;">W</span>' :
                 '<span style="background: #2196f3; color: white; padding: 2px 6px; border-radius: 4px; font-size: 0.7rem; margin-left: 0.5rem;">M</span>';
@@ -2063,7 +2195,7 @@
                         ${series.series_name} ${genderBadge} ${formatBadge}
                     </h3>
                     <div style="display: flex; flex-direction: column; gap: 0.5rem;">
-                        ${series.matches.map(m => {
+                        ${series.matches.map((m, matchIdx) => {
                             let displayDateTime = '';
                             let countdownHtml = '';
                             let matchTimestamp = 0;
@@ -2088,6 +2220,9 @@
                             const formatTagHtml = getFormatTag(matchFormat);
                             let sourceLabel = isCrex ? '<span style="color: #4caf50; margin-left: 0.5rem;">CREX</span>' : (isEspn ? '<span style="color: #ff9800; margin-left: 0.5rem;">ESPNcricinfo</span>' : '');
                             const escapedUrl = (isExternalSource ? matchUrl : matchId).replace(/'/g, "\\'");
+                            const rowKey = `upcoming-${seriesIdx}-${matchIdx}`;
+                            const fixture = buildFixtureContextForUpcoming(m, series.series_name || '');
+                            upcomingPolymarketContexts.set(rowKey, fixture);
                             return `
                             <div style="display: flex; justify-content: space-between; align-items: center; padding: 0.75rem 1rem; background: var(--bg-tertiary); border-radius: 8px; border-left: 3px solid ${series.gender === 'female' ? '#e91e63' : '#2196f3'};" data-match-url="${matchUrl}" data-gender="${series.gender || 'male'}" data-format="${matchFormat}" data-model-format="${matchModelFormat}">
                                 <div style="flex: 1;">
@@ -2096,6 +2231,9 @@
                                         <span style="color: var(--text-secondary);">${displayDateTime}</span>${matchVenue ? ' • ' + matchVenue : ''}
                                         <span class="prefetch-status" style="margin-left: 0.5rem;"></span>
                                         ${sourceLabel}
+                                    </div>
+                                    <div data-polymarket-row-key="${rowKey}" style="font-size: 0.78rem; margin-top: 0.2rem; color: var(--text-muted);">
+                                        Polymarket: loading...
                                     </div>
                                 </div>
                                 <div style="display: flex; align-items: center; gap: 0.75rem;">
@@ -2114,6 +2252,7 @@
         });
         listEl.style.display = 'block';
         emptyEl.style.display = 'none';
+        queueUpcomingPolymarketOddsRender();
     }
     
     // Upcoming Matches Functions
@@ -2275,6 +2414,13 @@
         currentGender = gender;
         currentMatchFormat = format || 'T20';
         currentMatchModelFormat = modelFormat || format || 'T20';
+        currentSelectedFixture = null;
+        const preSimCard = document.getElementById('single-polymarket-presim-card');
+        const preSimContent = document.getElementById('single-polymarket-presim-content');
+        if (preSimCard && preSimContent) {
+            preSimCard.style.display = 'none';
+            preSimContent.textContent = 'Loading live market odds...';
+        }
         
         // Sync segmented controls to match gender AND set type to "all" for API matches
         // (API matches can be international or franchise, so we need all teams)
@@ -2343,6 +2489,8 @@
             
             if (data.success && data.match) {
                 const match = data.match;
+                currentSeriesId = match.series_id || '';
+                currentSeriesName = match.series_name || '';
                 
                 // Get team names - PREFER verified DB names over CREX labels
                 // (CREX sometimes mislabels teams by swapping squads)
@@ -2361,6 +2509,14 @@
                 document.getElementById('t20-team1-info').textContent = `${team1Matched}/${team1Players} matched`;
                 document.getElementById('t20-team2-info').textContent = `${team2Matched}/${team2Players} matched`;
                 document.getElementById('t20-match-info').style.display = 'block';
+                currentSelectedFixture = {
+                    team1: team1Name,
+                    team2: team2Name,
+                    series: currentSeriesName || '',
+                    startUtc: String(match.date_time_gmt || match.start_utc || '').trim()
+                        || parseMatchDateToUtcIso(match.start_date || '', match.start_time || ''),
+                };
+                void renderSinglePreSimPolymarketCard();
                 
                 console.log(`CREX match loaded: ${team1Name} vs ${team2Name}`);
                 console.log(`  Series: ${match.series_name}`);
@@ -2551,6 +2707,8 @@
             
             if (data.success && data.match) {
                 const match = data.match;
+                currentSeriesId = match.series_id || '';
+                currentSeriesName = match.series_name || '';
                 
                 // Get team names
                 const team1Name = match.team1?.long_name || match.team1_db?.name || 'Team 1';
@@ -2568,6 +2726,14 @@
                 document.getElementById('t20-team1-info').textContent = `${team1Matched}/${team1Players} matched`;
                 document.getElementById('t20-team2-info').textContent = `${team2Matched}/${team2Players} matched`;
                 document.getElementById('t20-match-info').style.display = 'block';
+                currentSelectedFixture = {
+                    team1: team1Name,
+                    team2: team2Name,
+                    series: currentSeriesName || '',
+                    startUtc: String(match.date_time_gmt || match.start_utc || '').trim()
+                        || parseMatchDateToUtcIso(match.start_date || '', match.start_time || ''),
+                };
+                void renderSinglePreSimPolymarketCard();
                 
                 console.log(`ESPN match loaded: ${team1Name} vs ${team2Name}`);
                 console.log(`  Venue: ${match.venue?.name} -> DB: ${match.venue?.db_venue_name}`);
@@ -2876,6 +3042,7 @@
             if (data.from_database && data.match) {
                 // DATABASE FALLBACK: No API squad, using recent lineups from our database
                 const match = data.match;
+                currentSeriesName = match.series_name || '';
                 
                 // Show match info with database info
                 document.getElementById('t20-match-name').textContent = `${match.team1_db_name} vs ${match.team2_db_name}`;
@@ -2883,6 +3050,14 @@
                 document.getElementById('t20-team1-info').textContent = `${match.team1_players.length} from last match (${match.team1_last_match || 'N/A'})`;
                 document.getElementById('t20-team2-info').textContent = `${match.team2_players.length} from last match (${match.team2_last_match || 'N/A'})`;
                 document.getElementById('t20-match-info').style.display = 'block';
+                currentSelectedFixture = {
+                    team1: match.team1_db_name || 'Team 1',
+                    team2: match.team2_db_name || 'Team 2',
+                    series: currentSeriesName || '',
+                    startUtc: String(match.date_time_gmt || match.start_utc || '').trim()
+                        || parseMatchDateToUtcIso(match.date || '', ''),
+                };
+                void renderSinglePreSimPolymarketCard();
                 
                 // Show info message
                 console.log(`Using database lineups: ${match.team1_db_name} (${match.team1_recent_xi.length} players), ${match.team2_db_name} (${match.team2_recent_xi.length} players)`);
@@ -2904,6 +3079,7 @@
             } else if (data.success && data.match) {
                 // API SQUAD: Full squad data from Cricket Data API
                 const match = data.match;
+                currentSeriesName = match.series_name || '';
                 
                 // Show match info
                 document.getElementById('t20-match-name').textContent = `${match.team1_db_name} vs ${match.team2_db_name}`;
@@ -2914,6 +3090,14 @@
                 document.getElementById('t20-team1-info').textContent = `${matched1}/${match.team1_squad.length} players`;
                 document.getElementById('t20-team2-info').textContent = `${matched2}/${match.team2_squad.length} players`;
                 document.getElementById('t20-match-info').style.display = 'block';
+                currentSelectedFixture = {
+                    team1: match.team1_db_name || 'Team 1',
+                    team2: match.team2_db_name || 'Team 2',
+                    series: currentSeriesName || '',
+                    startUtc: String(match.date_time_gmt || match.start_utc || '').trim()
+                        || parseMatchDateToUtcIso(match.date || '', ''),
+                };
+                void renderSinglePreSimPolymarketCard();
                 
                 // Auto-fill teams
                 await autoFillTeam(1, match.team1_db_name, match.team1_squad, match.team1_suggested_xi);
@@ -4097,6 +4281,7 @@
         document.getElementById('result-meta').textContent = meta;
         
         document.getElementById('results').style.display = 'block';
+        void renderSinglePolymarketComparison(data, team1Name, team2Name);
         
         // Display scorecard if available (NN simulator only)
         const scorecardSection = document.getElementById('scorecard-section');
@@ -4105,6 +4290,87 @@
             scorecardSection.style.display = 'block';
         } else {
             scorecardSection.style.display = 'none';
+        }
+    }
+
+    function buildSingleStartUtc() {
+        if (currentSelectedFixture?.startUtc) return currentSelectedFixture.startUtc;
+        const dateText = (document.getElementById('t20-match-date')?.textContent || '').trim();
+        if (!dateText) return '';
+        const parsed = new Date(dateText);
+        if (!Number.isNaN(parsed.getTime())) return parsed.toISOString();
+        return '';
+    }
+
+    function renderSinglePolymarketHtml(payload) {
+        if (!payload?.success) {
+            return '<span style="color: var(--accent-warning);">Polymarket quote unavailable</span>';
+        }
+        const status = payload.status || 'quote_unavailable';
+        if (status === 'no_match') {
+            return '<span style="color: var(--text-muted); font-weight: 600;">No market match</span>';
+        }
+        if (status === 'quote_unavailable') {
+            return '<span style="color: var(--accent-warning); font-weight: 600;">Quote unavailable</span>';
+        }
+
+        const p = payload.probabilities || {};
+        const q = payload.quote || {};
+        const edge = p.edge_pct_points;
+        const edgeText = edge === null || edge === undefined
+            ? '--'
+            : `${edge > 0 ? '+' : ''}${Number(edge).toFixed(1)} pp`;
+        const staleLabel = status === 'stale' ? ' (stale)' : '';
+        const age = q.quote_age_sec === null || q.quote_age_sec === undefined ? '' : `${q.quote_age_sec}s ago`;
+        return `
+            <strong>Model vs market${staleLabel}:</strong>
+            Model ${p.model_win_pct !== null && p.model_win_pct !== undefined ? Number(p.model_win_pct).toFixed(1) + '%' : '--'}
+            &nbsp;·&nbsp; Market ${p.market_implied_pct !== null && p.market_implied_pct !== undefined ? Number(p.market_implied_pct).toFixed(1) + '%' : '--'}
+            &nbsp;·&nbsp; Edge ${edgeText}
+            ${age ? `<div style="margin-top: 0.25rem; color: var(--text-muted); font-size: 0.78rem;">${age}</div>` : ''}
+        `;
+    }
+
+    async function renderSinglePreSimPolymarketCard() {
+        const card = document.getElementById('single-polymarket-presim-card');
+        const content = document.getElementById('single-polymarket-presim-content');
+        if (!card || !content) return;
+        if (!currentSelectedFixture?.team1 || !currentSelectedFixture?.team2) {
+            card.style.display = 'none';
+            return;
+        }
+        card.style.display = 'block';
+        content.textContent = 'Loading live market odds...';
+        try {
+            const payload = await fetchPolymarketCompare(currentSelectedFixture, null);
+            content.innerHTML = summarizePolymarketMarketOnly(payload, currentSelectedFixture);
+        } catch (err) {
+            content.innerHTML = '<span style="color: var(--accent-warning);">Polymarket quote unavailable</span>';
+        }
+    }
+
+    async function renderSinglePolymarketComparison(resultData, team1Name, team2Name) {
+        const card = document.getElementById('single-polymarket-card');
+        const content = document.getElementById('single-polymarket-content');
+        if (!card || !content) return;
+
+        card.style.display = 'block';
+        content.textContent = 'Loading Polymarket comparison...';
+
+        try {
+            const fixture = currentSelectedFixture || {
+                team1: team1Name || 'Team 1',
+                team2: team2Name || 'Team 2',
+                series: currentSeriesName || '',
+                startUtc: buildSingleStartUtc(),
+            };
+            const payload = await fetchPolymarketCompare(fixture, {
+                team1: resultData?.team1_win_prob,
+                team2: resultData?.team2_win_prob,
+            });
+            content.innerHTML = renderSinglePolymarketHtml(payload);
+        } catch (err) {
+            content.innerHTML = '<span style="color: var(--accent-warning);">Polymarket quote unavailable</span>';
         }
     }
     

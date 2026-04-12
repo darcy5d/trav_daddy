@@ -327,6 +327,8 @@ VENUE_ALIASES = {
     # Pakistan
     "gaddafi stadium": "Gaddafi Stadium",
     "national stadium karachi": "National Stadium, Karachi",
+    "national bank cricket arena": "National Stadium, Karachi",
+    "national bank cricket arena karachi": "National Stadium, Karachi",
     "rawalpindi cricket stadium": "Rawalpindi Cricket Stadium",
     # Sri Lanka
     "r premadasa stadium": "R. Premadasa Stadium",

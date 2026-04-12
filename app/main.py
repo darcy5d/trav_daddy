@@ -20,6 +20,7 @@ import multiprocessing
 N_CPU_CORES = multiprocessing.cpu_count()
 
 import logging
+import subprocess
 import sys
 from pathlib import Path
 from datetime import datetime, timedelta
@@ -51,6 +52,7 @@ from src.api.crex_scraper import format_type_to_model_format
 from src.integrations.credentials import get_market_credentials_status
 from src.integrations.polymarket import PolymarketClient
 from src.integrations.betfair import BetfairSessionManager
+from src.integrations.odds import PolymarketComparisonService
 
 # Initialize Flask app
 app = Flask(__name__)
@@ -78,6 +80,7 @@ _source_status_cache_expires = None
 SOURCE_STATUS_CACHE_TTL_SECONDS = 20 * 60
 _polymarket_client = None
 _betfair_session_manager = None
+_polymarket_compare_service = None
 
 
 def get_fast_simulator(gender: str = 'male'):
@@ -126,6 +129,15 @@ def get_betfair_session_manager() -> BetfairSessionManager:
         _betfair_session_manager = BetfairSessionManager()
         logger.info("Betfair session manager initialized")
     return _betfair_session_manager
+
+
+def get_polymarket_compare_service() -> PolymarketComparisonService:
+    """Get or initialize Polymarket comparison service."""
+    global _polymarket_compare_service
+    if _polymarket_compare_service is None:
+        _polymarket_compare_service = PolymarketComparisonService(client=get_polymarket_client())
+        logger.info("Polymarket comparison service initialized")
+    return _polymarket_compare_service
 
 
 def has_active_model(gender: str, format_type: str) -> bool:
@@ -4042,6 +4054,52 @@ def polymarket_orderbook():
         return jsonify({'success': False, 'error': str(e)}), 500
 
 
+@app.route('/api/integrations/polymarket/compare', methods=['GET'])
+def polymarket_compare():
+    """Compare fixture model odds vs Polymarket implied odds."""
+    try:
+        team1 = (request.args.get('team1') or '').strip()
+        team2 = (request.args.get('team2') or '').strip()
+        if not team1 or not team2:
+            return jsonify({'success': False, 'error': 'team1 and team2 parameters required'}), 400
+
+        start_utc = request.args.get('start_utc')
+        series = request.args.get('series')
+        model_team1_win_pct = request.args.get('model_team1_win_pct', type=float)
+        model_team2_win_pct = request.args.get('model_team2_win_pct', type=float)
+
+        service = get_polymarket_compare_service()
+        payload = service.compare_fixture(
+            team1=team1,
+            team2=team2,
+            start_utc=start_utc,
+            series=series,
+            model_team1_win_pct=model_team1_win_pct,
+            model_team2_win_pct=model_team2_win_pct,
+        )
+        return jsonify(payload)
+    except Exception as e:
+        logger.error(f"Error comparing Polymarket odds: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/integrations/polymarket/compare/batch', methods=['POST'])
+def polymarket_compare_batch():
+    """Batch Polymarket comparison for bulk row rendering."""
+    try:
+        payload = request.get_json(silent=True) or {}
+        fixtures = payload.get('fixtures') or []
+        if not isinstance(fixtures, list):
+            return jsonify({'success': False, 'error': 'fixtures must be an array'}), 400
+
+        service = get_polymarket_compare_service()
+        result = service.compare_batch(fixtures)
+        return jsonify(result)
+    except Exception as e:
+        logger.error(f"Error comparing batch Polymarket odds: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
 @app.route('/api/integrations/betfair/session/status', methods=['GET'])
 def betfair_session_status():
     """Get Betfair session status (masked)."""
@@ -4792,6 +4850,30 @@ def _check_playwright():
     Logs a prominent WARNING at startup so the problem is visible even when
     the terminal is not being watched.
     """
+    auto_install = os.getenv('AUTO_INSTALL_PLAYWRIGHT_CHROMIUM', 'true').lower() == 'true'
+
+    def _try_auto_install(reason: str) -> bool:
+        """Attempt a one-shot Chromium install when runtime binary is missing."""
+        if not auto_install:
+            return False
+        try:
+            logger.warning(
+                "[STARTUP] Attempting automatic Playwright Chromium install (%s). "
+                "Set AUTO_INSTALL_PLAYWRIGHT_CHROMIUM=false to disable.",
+                reason,
+            )
+            subprocess.run(
+                [sys.executable, '-m', 'playwright', 'install', 'chromium'],
+                check=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            return True
+        except Exception as install_error:
+            logger.warning("[STARTUP] Automatic Chromium install failed: %s", install_error)
+            return False
+
     try:
         from playwright.sync_api import sync_playwright
         with sync_playwright() as p:
@@ -4801,12 +4883,20 @@ def _check_playwright():
                 raise FileNotFoundError(executable)
         logger.info("[STARTUP] Playwright Chromium binary OK: %s", executable)
     except ImportError:
-        logger.warning(
-            "[STARTUP] ⚠  Playwright is NOT installed in this environment. "
-            "CREX squad scraping will fall back to static HTML only — squads may be "
-            "incomplete. Fix: pip install playwright && playwright install chromium"
-        )
+        installed = _try_auto_install('playwright package not importable')
+        if installed:
+            logger.info("[STARTUP] Playwright Chromium install completed after ImportError recovery attempt.")
+        else:
+            logger.warning(
+                "[STARTUP] ⚠  Playwright is NOT installed in this environment. "
+                "CREX squad scraping will fall back to static HTML only — squads may be "
+                "incomplete. Fix: pip install playwright && playwright install chromium"
+            )
     except Exception as e:
+        installed = _try_auto_install(str(e))
+        if installed:
+            logger.info("[STARTUP] Playwright Chromium install completed after binary recovery attempt.")
+            return
         logger.warning(
             "[STARTUP] ⚠  Playwright Chromium binary is MISSING or broken (%s). "
             "CREX squad scraping will fall back to static HTML only — squads may be "
