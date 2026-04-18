@@ -802,9 +802,13 @@ class EloCalculatorV3:
             
             new_overall_elo = (new_batting_elo * bat_weight + new_bowling_elo * bowl_weight)
             
-            # Insert into history
+            # Insert into history. Mirrors the team-side fix: INSERT OR IGNORE
+            # against the partial UNIQUE INDEX makes a stray re-run a no-op
+            # instead of either erroring (post-index) or double-applying the
+            # K-factor (pre-index, which is how 343,975 player duplicates
+            # accumulated in the live DB).
             cursor.execute("""
-                INSERT INTO player_elo_history (
+                INSERT OR IGNORE INTO player_elo_history (
                     player_id, date, match_id, format, gender,
                     batting_elo, bowling_elo, overall_elo,
                     batting_elo_change, bowling_elo_change, overall_elo_change
@@ -816,11 +820,16 @@ class EloCalculatorV3:
                 new_bowling_elo - bowling_elo,
                 new_overall_elo - (batting_elo * bat_weight + bowling_elo * bowl_weight)
             ))
-            
-            # Update current ELO
+
+            # Only update player_current_elo when we actually inserted a new
+            # history row; otherwise we'd clobber a later rating with an
+            # earlier match's outcome on a re-run.
+            if cursor.rowcount == 0:
+                continue
+
             suffix = f'{match_format.lower()}_{gender}'
             date_col = f'last_{suffix}_date'
-            
+
             cursor.execute(f"""
                 INSERT INTO player_current_elo (
                     player_id,
