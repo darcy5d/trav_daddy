@@ -292,6 +292,16 @@ ID_COLUMNS = [
     "gender_id",         # 0/1
 ]
 
+# Per-row over-level targets used by the v2 model's auxiliary per-over head.
+# These get pre-computed from the per-ball labels in the same builder pass
+# so each per-ball row carries the (runs, wkts) for the OVER it belongs to.
+# That lets the train loop apply the per-over loss without doing dynamic
+# aggregation during batching.
+OVER_TARGET_COLUMNS = [
+    "over_runs",   # total runs scored in the over this ball belongs to
+    "over_wkts",   # total wickets in the over this ball belongs to
+]
+
 
 def build_ball_training_v2(config: BuildConfig) -> BuildResult:
     """Build the v2 unified per-ball training artifact for one gender.
@@ -374,6 +384,14 @@ def build_ball_training_v2(config: BuildConfig) -> BuildResult:
         ids = np.zeros((n, len(ID_COLUMNS)), dtype=np.int32)
         y = np.zeros(n, dtype=np.int8)
         sw = np.zeros(n, dtype=np.float32)
+        # Per-over targets, stamped from the per-ball labels in a second pass
+        # below. shape (n, 2) - [over_runs, over_wkts].
+        over_targets = np.zeros((n, len(OVER_TARGET_COLUMNS)), dtype=np.int16)
+        # Sidecar arrays needed for the per-over aggregation pass; not
+        # persisted to the final npz.
+        match_ids_arr = np.zeros(n, dtype=np.int64)
+        innings_ids_arr = np.zeros(n, dtype=np.int64)
+        over_indices_arr = np.zeros(n, dtype=np.int16)
 
         # Cumulative innings state needs reset on each new innings.
         current_innings_id = None
@@ -513,6 +531,11 @@ def build_ball_training_v2(config: BuildConfig) -> BuildResult:
             )
             sw[idx] = weight
 
+            # Sidecar columns needed for the per-over aggregation pass
+            match_ids_arr[idx] = match_id
+            innings_ids_arr[idx] = innings_id
+            over_indices_arr[idx] = over
+
             # Update innings state for the NEXT row.
             # Wides/noballs do not advance the legal-ball counter and
             # do not increment the (batter-only) runs scored attribution
@@ -526,12 +549,44 @@ def build_ball_training_v2(config: BuildConfig) -> BuildResult:
             if wides == 0 and noballs == 0:
                 innings_legal_balls += 1
 
+        # ----------------------------------------------------------------
+        # Per-over aggregation pass: stamp each ball's over_runs and
+        # over_wkts so the train loop can apply the auxiliary per-over loss
+        # without dynamic batch-time aggregation. Group by
+        # (innings_id, over_idx) since innings_id is unique per match-innings.
+        # ----------------------------------------------------------------
+        logger.info(f"[{config.gender}] aggregating per-over targets across {n:,} rows")
+        over_run_lookup: Dict[Tuple[int, int], int] = {}
+        over_wkt_lookup: Dict[Tuple[int, int], int] = {}
+        for i in range(n):
+            key = (int(innings_ids_arr[i]), int(over_indices_arr[i]))
+            cls = int(y[i])
+            # OUTCOME_RUNS table mirroring vectorized_nn_sim_v2's contract
+            if cls in (1, 2, 3, 4):
+                over_run_lookup[key] = over_run_lookup.get(key, 0) + cls
+            elif cls == 5:
+                over_run_lookup[key] = over_run_lookup.get(key, 0) + 6
+            elif cls in (LABEL_WIDE, LABEL_NOBALL):
+                over_run_lookup[key] = over_run_lookup.get(key, 0) + 1
+            else:
+                over_run_lookup.setdefault(key, 0)
+            if cls == LABEL_WICKET:
+                over_wkt_lookup[key] = over_wkt_lookup.get(key, 0) + 1
+            else:
+                over_wkt_lookup.setdefault(key, 0)
+
+        for i in range(n):
+            key = (int(innings_ids_arr[i]), int(over_indices_arr[i]))
+            over_targets[i, 0] = over_run_lookup.get(key, 0)
+            over_targets[i, 1] = over_wkt_lookup.get(key, 0)
+
         # Persist
         out_path = config.output_dir / f"ball_training_v2_{config.gender}.npz"
         col_index = {
             "continuous_columns": np.array(CONTINUOUS_COLUMNS, dtype=object),
             "id_columns": np.array(ID_COLUMNS, dtype=object),
             "label_names": np.array(LABEL_NAMES, dtype=object),
+            "over_target_columns": np.array(OVER_TARGET_COLUMNS, dtype=object),
         }
         np.savez_compressed(
             out_path,
@@ -539,6 +594,7 @@ def build_ball_training_v2(config: BuildConfig) -> BuildResult:
             ids=ids,
             y=y,
             sample_weight=sw,
+            over_targets=over_targets,
             **col_index,
         )
 

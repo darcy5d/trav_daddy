@@ -209,7 +209,11 @@ class V2Simulator:
                 f"scripts/train_cricket_model_v2.py first"
             )
         logger.info(f"[v2-sim] loading model from {self._model_path}")
-        self._model = keras.models.load_model(self._model_path)
+        # compile=False skips loss/optimizer deserialisation. The training
+        # script (Phase 5) uses custom multi-task losses that can't be
+        # deserialised here without registration; we don't need them for
+        # forward-pass inference anyway.
+        self._model = keras.models.load_model(self._model_path, compile=False)
         self._predict_compiled = tf.function(
             self._model, jit_compile=True, reduce_retracing=True
         )
