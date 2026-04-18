@@ -408,11 +408,47 @@ Evaluation on a chronological holdout (last 20%) shows the 7-way ball outcome mo
 
 **Suggested order:** Implement class weights first; re-run training and `scripts/analyze_model_results.py` to compare F1 on rare outcomes. If still weak, add focal loss or sampling next.
 
-### 16. (Optional) Backtest: simulated vs actual match totals
-**File:** New script e.g. `scripts/backtest_ball_model.py`, or extend `scripts/backtest_predictions.py`
+### 16. Backtest: simulated vs actual match totals — **DONE (Wave 3.5)**
+**Files:** [`scripts/backtest_simulator.py`](../scripts/backtest_simulator.py), [`src/models/backtest.py`](../src/models/backtest.py).
 
-We have ball-level evaluation but no automated check that **match-level** simulations (run rates, wicket rates, win probabilities) line up with historical outcomes.
+For a chronological holdout of completed matches, the harness loads each match's actual XI from `player_match_stats`, looks up team & player ELOs **as of the match date** (via `team_elo_history` / `player_elo_history`, with the simulator's in-memory ELO caches temporarily overridden per match), runs N simulations, and reports Brier score, log-loss, calibration deciles, MAE of total runs and margin, plus per-tournament breakdowns. Per-match CSV + summary JSON land in `data/backtest/`.
 
-**Proposed feature:** A script that, for a held-out set of completed matches, runs the current ball model through the existing match simulator to produce simulated totals and win probabilities, then compares to actual results (e.g. margin of victory, total runs). Output: aggregate metrics (e.g. calibration of win prob, MAE of total runs). Helps validate that improving ball F1 (item 15) actually improves downstream simulation quality. Complement with **settled** `MODEL_EDGE` rows from the bet ledger (item 11) for real-money calibration, excluding `CROSS_VENUE_ARB` legs.
+**Documented v1 caveats (acceptable for the harness, address in v2):** per-batter / per-bowler outcome distributions still aggregate across the player's full career including the holdout matches (one match per career-long histogram leak); toss is simulated independently per Monte Carlo iteration rather than fixed to the actual toss outcome (matches the live Bulk Predict path); bowling lineup uses the 5 actual highest-overs bowlers and impact-sub selection is not modelled.
+
+**Wave 3.5 baseline (44 IPL T20 men, 2025 season, 500 sims/match):**
+
+| Metric | Value | 50/50 baseline | Verdict |
+| --- | --- | --- | --- |
+| Top-pick accuracy | 0.523 | 0.500 | barely better than coin-flip |
+| Brier score | 0.343 | 0.250 | **worse than always-50/50** |
+| Log loss | 1.034 | 0.693 | **worse than always-50/50** |
+| MAE total runs (per innings) | 30.2 | – | ~17% relative error |
+| MAE margin runs | 29.4 | – | – |
+
+Calibration deciles (model overconfidence is the headline signal):
+
+| Predicted bucket | Mean pred | Actual win rate |
+| --- | --- | --- |
+| [0.0, 0.1) | 0.048 | **0.400** |
+| [0.1, 0.2) | 0.127 | **0.500** |
+| [0.7, 0.8) | 0.759 | **0.500** |
+| [0.8, 0.9) | 0.855 | **0.333** |
+| [0.9, 1.0) | 0.947 | **0.333** |
+
+The probabilities are stretched aggressively toward 0 and 1: matches the model rates "95% certain" go the other way two times in three. This is the same calibration drift causing the 30+pp Polymarket edges visible in the live Bulk Predict UI.
+
+A pattern in the top-10 worst misses: **all** had ≥90% data coverage (so it isn't player-matching), and the sim systematically **underpredicted scores** (especially the chasing innings), e.g. 2025-04-29 KKR vs DC: sim said KKR avg 142, actual was 204. So the under-prediction of totals and the over-confidence on win probability are linked: if the model thinks both teams will score around 170 and one team actually posts 200+, the "upset" (by the model's view) is just normal modern T20 cricket.
+
+This gives Wave 4 the measurement substrate it needed: each modelling intervention (margin-of-victory term, venue/home boost, recency decay, team-specific dispersion, FIRST_INNINGS_SCORE_BONUS calibration) can now be A/B'd against this baseline by re-running the harness with `--label <variant>` and diffing the JSON summaries.
+
+**Operator runbook:**
+```bash
+# Default: last 6 months of T20 men (≈200 matches, ~40 min at 1000 sims)
+python scripts/backtest_simulator.py
+
+# Tighter, fast slice for iterating on a single change
+python scripts/backtest_simulator.py --tournament-pattern '%Indian Premier League%' \
+    --since-date 2025-01-01 --limit 50 --n-sims 500 --label baseline_ipl_2025
+```
 
 ---
