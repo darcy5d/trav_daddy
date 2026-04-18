@@ -13,17 +13,26 @@ history.
 | 2 | DONE | Polymarket / Betfair read paths + Bulk Predict UI polish |
 | 3 | DONE | Team franchise unification + ELO data repair |
 | 3.5 | DONE | Match-level backtest harness (item 16) |
-| **4** | **IN PROGRESS** | **Cricket Model v2 — strategic rewrite (this update)** |
+| **4** | **BUILD DONE; AWAITING TRAIN** | **Cricket Model v2 — strategic rewrite** |
 | 5 | PARKING LOT | ELO modelling refinements + market integration write-paths |
 | 6 | PARKING LOT | Advanced model features + new data sources |
 
-## Wave 4 (in progress) — Cricket Model v2 strategic rewrite
+## Wave 4 — Cricket Model v2 strategic rewrite (build complete; awaiting train)
 
-**Why:** the Wave 3.5 backtest measured concrete model pathologies — top-pick
-accuracy 52.3% (barely coin-flip), Brier 0.34 / log-loss 1.03 (worse than
-always-50/50), MAE 30.2 runs per innings, calibration deciles where
-predicted-95% buckets actually win 33%. Architecture map then surfaced three
-structural causes worth fixing in one coordinated pass:
+**Status (post-build):** All seven phases of the architecture rewrite have
+shipped (commits `1f44a6d` through `5572b1b` on `major-rework`). The full
+v2 stack — data layer, model architecture, calibration layer, hierarchical
+simulator, training script, A/B harness — is in. **What's left is the
+empirical training run + A/B against the Wave 3.5 baseline**, which is a
+1-2 hour compute job the operator runs offline. This section will be flipped
+to a clean "DONE" with metric deltas once that completes.
+
+**Why this wave existed:** the Wave 3.5 backtest measured concrete model
+pathologies — top-pick accuracy 52.3% (barely coin-flip), Brier 0.34 /
+log-loss 1.03 (worse than always-50/50), MAE 30.2 runs per innings,
+calibration deciles where predicted-95% buckets actually win 33%.
+Architecture map then surfaced three structural causes worth fixing in one
+coordinated pass:
 
 1. ODI is functionally broken (T20 assumptions in shared code paths)
 2. Per-ball IID sampling can't reproduce real over-level dynamics (boundary
@@ -35,35 +44,128 @@ Plus the now-known limitations: global per-player histograms with no context,
 hand-crafted venue features, no calibration layer, no temporal weighting,
 four siloed models that can't share representational signal.
 
-### In scope (this update)
+### Build phases (all shipped)
 
-- **Phase 0** — ODI plumbing fixes (`max_overs` defaulting, parallel-worker
-  format-type default, ball-training-data 120-balls hardcode, format-aware
-  phase boundaries). Independently shippable.
-- **Phase 1** — `src/features/ball_training_data_v2.py`: 9-class
-  extras-aware labels (dot, 1, 2, 3, 4, 6, wicket, **wide, noball**),
-  recency-weighted sample weights (exp half-life ~365 days), era feature,
-  joint output across all 4 format/gender combos.
-- **Phase 2** — `src/models/cricket_model_v2.py`: multi-task model with
-  learned player (24-dim) / venue (16-dim) / team (8-dim) embeddings, plus
-  **temporal ELO features kept as inputs** (team1_elo, team2_elo,
-  batter_elo, bowler_elo) alongside the embeddings — see "On ELO" below.
-  Shared backbone + per-(format, gender) ball-outcome heads + per-over
-  auxiliary head. Class-weighted loss for boundary/wicket imbalance.
-- **Phase 3** — `src/models/calibration.py`: post-hoc Platt scaling per
-  (format, gender) on win-prob outputs, persisted JSON, applied at the
-  simulator's match-aggregation step.
-- **Phase 4** — `src/models/vectorized_nn_sim_v2.py`: extras as first-class
-  citizens (wide / noball don't increment the legal-ball counter, free-hit
-  rule), format-aware over count + termination, **budget-bias hierarchical
-  sampling** using the per-over head.
-- **Phase 5** — `scripts/train_cricket_model_v2.py`: chronological split,
-  vocab tables with `<UNK>`, multi-task joint training, early-stopping on
-  backtest Brier (not val CCE).
-- **Phase 6** — `model_version` flag in `get_nn_simulator` + backtest
-  harness, side-by-side A/B per (format, gender), promotion gate
-  (Brier + log-loss + accuracy not regressing >1pp on >=200 matches).
-- **Phase 7** — Update Wave 4 section to DONE with concrete results.
+- **Phase 0 — ODI plumbing fixes (commit `1f44a6d`).** New
+  `src/utils/format_constants.py` centralises overs/balls/phase thresholds
+  per format. T20 = 20 overs / 120 balls / 6/15 phase split; ODI = 50
+  overs / 300 balls / 10/40 phase split. `simulate_matches` and
+  `simulate_detailed_match` both derive `max_overs` from `self.format_type`
+  when not pinned. `_simulate_innings_vectorized` hot-loop phase selection
+  now uses format-aware thresholds. Parallel worker constructs
+  `VectorizedNNSimulator(gender=gender, format_type=fmt)` instead of
+  defaulting format to T20. `ball_training_data.py` `balls_remaining`
+  hardcode now uses `balls_for_format(self.format_type)`.
+
+  **Phase 0 baseline (25 ODI male matches, 2025+, 300 sims/match):**
+  top-pick accuracy 0.680, Brier 0.272 (marginal vs 50/50's 0.250),
+  log-loss 0.978, MAE total runs 80.2, with One-Day Cup (Aus) at acc
+  0.875 / Brier 0.147 — same overconfidence shape as T20.
+
+- **Phase 1 — `src/features/ball_training_data_v2.py` (commit `830c7d7`).**
+  9-class outcome label `{dot, 1, 2, 3, 4, 6, wicket, wide, noball}`,
+  recency-weighted sample weights (exp half-life default 365 days), era
+  feature `(year - 2026) / 10`, native categorical id columns
+  (canonical batting/bowling team via `FranchiseResolver`), joint output
+  per gender (one npz, format_id is a row column). Per-over (`over_runs`,
+  `over_wkts`) targets stamped in a second pass so the trainer doesn't
+  need dynamic batch-time aggregation. Bye/legbye runs fold into the
+  matching run class (the ball still counts as legal).
+
+- **Phase 2 — `src/models/cricket_model_v2.py` (commit `01b9fba`).**
+  Multi-task model with learned player (24-dim) / venue (16-dim) / team
+  (8-dim) embeddings PLUS `temporal ELO features kept as inputs`
+  (team1_elo, team2_elo, batter_elo, bowler_elo) alongside the embeddings.
+  See "On ELO" below for why we kept ELO. Shared backbone (3 × Dense(256)
+  with BN + ReLU + Dropout) feeds 8 outputs (4 ball heads × 4 over heads).
+  `routed_cce_loss_fn` for class-weighted per-ball CCE; `over_nll_loss_fn`
+  for Gaussian (runs) + Poisson (wkts) per-over auxiliary loss.
+
+- **Phase 3 — `src/models/calibration.py` (commit `3a9ba62`).** Per-(format,
+  gender) Platt scaling fit by gradient descent on BCE. Decoupled from
+  the model so refitting calibration is a 5-second job. NLL-regression
+  guard falls back to identity when fit instability would make NLL worse.
+  9 unit tests in `tests/test_calibration.py`.
+
+  **Sanity fit on Wave 3.5 + Phase 0 baselines:**
+  T20 male `n=44 a=0.050 b=-0.000 NLL 1.034 -> 0.697`
+  ODI male `n=25 a=0.203 b=-0.506 NLL 0.978 -> 0.571`
+  The T20 fit's `a=0.050` is striking: the optimum is to almost
+  fully shrink toward 0.5, dropping NLL to essentially the always-50/50
+  baseline. The v1 model's confident predictions carry near-zero
+  information once calibrated. Calibration on top of v2 will be much
+  more interesting because v2's raw probabilities should already be
+  meaningfully better.
+
+- **Phase 4 — `src/models/vectorized_nn_sim_v2.py` (commit `130f42c`).**
+  9-class outcomes; wide / noball add 1 run, do NOT increment legal-ball
+  counter, do NOT advance the batter; noball sets the next legal ball as
+  free hit (wicket prob zeroed and renormalised, then flag clears).
+  Innings terminates on legal_balls >= max_overs * 6, with extras
+  headroom of `max_overs * 9` for the inner loop. **Budget-bias
+  hierarchical sampling** (Option B from planning): each over starts by
+  sampling `(over_runs_target, over_wkts_target)` from the per-over head,
+  then the per-ball softmax is biased by the running over budget so
+  high-budget overs lean toward 4/6 and low-budget overs lean toward
+  dot/single. Returns v1-compatible result dict + v2 extras
+  (`team1_win_prob_raw`, `calibration_used`). 10 unit tests in
+  `tests/test_simulator_v2_extras.py`.
+
+- **Phase 5 — `scripts/train_cricket_model_v2.py` (commit `dbdc83b`).**
+  Multi-task joint training. Loads ball_training_v2_{gender}.npz, builds
+  vocabs (UNK at index 0, default `min_count=5`), chronological split
+  via sample-weight ordering (train = oldest 85%, val = middle 10%, test
+  = held-back 5%), class weights from inverse frequency clipped to
+  [0.5, 5.0]. **Multi-task routing via per-output sample_weight masks**:
+  each row contributes loss only to its (format, gender) head; all four
+  heads share backbone gradients. Compiles with `loss_weights = 1.0` for
+  the ball head and `0.3` for the per-over auxiliary. EarlyStopping +
+  ReduceLROnPlateau + ModelCheckpoint to `data/models/v2/`.
+
+- **Phase 6 — A/B harness wiring (commit `5572b1b`).** New
+  `--model-version v1|v2` flag on `scripts/backtest_simulator.py`;
+  `_override_simulator_elos` polymorphic over both simulators (v1's
+  public attrs vs v2's lazy-loaded underscore attrs); new
+  `scripts/compare_backtests.py` for side-by-side diff + promotion-gate
+  verdict (Brier improves AND log-loss improves AND accuracy doesn't
+  regress > 1pp on >= 50 matches).
+
+- **Phase 7 — this docs update (current commit).**
+
+### Empirical training run (operator's next step)
+
+Roughly 1-2 hours of compute end-to-end:
+
+```bash
+# 1. Build the full v2 training data (both genders, both formats)
+python scripts/build_ball_training_v2.py --gender both
+# expect: ~2-4 GB total across both files; multi-million rows
+
+# 2. Train the v2 model (multi-task joint)
+python scripts/train_cricket_model_v2.py --epochs 15
+# Watch val_loss; EarlyStopping kicks in after 3 stale epochs
+
+# 3. Fit calibration on the Wave 3.5 baseline backtest
+python scripts/fit_calibration.py \
+    --backtest-csv data/backtest/backtest_baseline_ipl_2025.csv \
+    --backtest-csv data/backtest/backtest_baseline_odi_phase0.csv \
+    --output data/models/v2/calibration.json
+
+# 4. Run v2 backtest with same holdout as the V1 baseline
+python scripts/backtest_simulator.py \
+    --model-version v2 \
+    --tournament-pattern '%Indian Premier League%' \
+    --since-date 2025-01-01 --limit 50 --n-sims 500 \
+    --label v2_ipl_2025
+
+# 5. Compare against the Wave 3.5 baseline + verdict
+python scripts/compare_backtests.py \
+    --baseline data/backtest/backtest_baseline_ipl_2025_summary.json \
+    --candidate data/backtest/backtest_v2_ipl_2025_summary.json
+```
+
+This section will be replaced with the actual A/B numbers + a clean
+"DONE" header once the run completes.
 
 **On ELO (kept, not replaced):** ELO and team embeddings are complementary,
 not competing. The plan keeps the existing tiered ELO system as 4 input
@@ -283,6 +385,6 @@ Wave 4 intervention will be A/B'd against this baseline using
 | 12 | Cross-venue true-arb | Wave 5 |
 | 13 | Liquidity depth research | Wave 5 |
 | 14 | `cricketdata` R ingest | Wave 6 |
-| 15 | Ball outcome class imbalance | Wave 4 (class-weighted loss in Phase 2) |
+| 15 | Ball outcome class imbalance | DONE (Wave 4 Phase 5: class-weighted loss + 9-class extras) |
 | 16 | Match-level backtest | DONE (Wave 3.5) |
 | 17 | Cricsheet Register | Wave 6 (paired with team_external_ids in Wave 5) |

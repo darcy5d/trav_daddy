@@ -98,14 +98,43 @@ python -m src.data.ingest
 python scripts/backfill_franchises.py  # Idempotent; unifies known IPL franchise rebrands (RCB, Capitals, Punjab Kings, Pune Supergiant)
 python scripts/dedupe_elo_history.py    # Backup + full recalc + UNIQUE-index install (5+ minutes on a large DB)
 
-# 5. Train neural network (optional - or use GUI)
-python scripts/full_retrain.py  # Uses tiered ELO as features (34 features)
+# 5. Train neural network
+# Option A (legacy V1, 4 separate per-(format, gender) models, 34 features):
+python scripts/full_retrain.py
+# Option B (Wave 4 V2, multi-task joint, 9-class with extras, learned embeddings):
+python scripts/build_ball_training_v2.py --gender both       # build joint training data
+python scripts/train_cricket_model_v2.py                     # train multi-task model
+python scripts/fit_calibration.py \
+    --backtest-csv data/backtest/backtest_baseline_ipl_2025.csv \
+    --output data/models/v2/calibration.json                 # post-hoc Platt scaling
 
 # 6. Run the web app
 python app/main.py
 ```
 
 Visit `http://localhost:5001` in your browser. The Team Explorer tab (`/team-explorer`) lets you stage and apply additional franchise/duplicate merges; after applying any merges, re-run `python scripts/dedupe_elo_history.py --skip-backup` so ratings recompute under the new groupings.
+
+### Backtest harness + V1/V2 A/B (Wave 3.5 + Wave 4)
+
+The match-level backtest harness can run against either model architecture and the included compare script gives you a side-by-side diff with a promotion-gate verdict:
+
+```bash
+# Run a backtest with V1 (default; existing per-(format, gender) ball model)
+python scripts/backtest_simulator.py --tournament-pattern '%Indian Premier League%' \
+    --since-date 2025-01-01 --limit 50 --n-sims 500 --label baseline_ipl_2025
+
+# Re-run the same holdout with V2 (multi-task model with extras + per-over head + calibration)
+python scripts/backtest_simulator.py --model-version v2 \
+    --tournament-pattern '%Indian Premier League%' \
+    --since-date 2025-01-01 --limit 50 --n-sims 500 --label v2_ipl_2025
+
+# Diff + verdict
+python scripts/compare_backtests.py \
+    --baseline data/backtest/backtest_baseline_ipl_2025_summary.json \
+    --candidate data/backtest/backtest_v2_ipl_2025_summary.json
+```
+
+The promotion gate requires V2 to beat V1 on Brier AND log-loss AND not regress accuracy by more than 1pp on >=50 matches.
 
 ### Environment Variables
 
