@@ -261,6 +261,60 @@ def main() -> int:
     parser.add_argument("--early-stopping-patience", type=int, default=3)
     parser.add_argument("--label", default=None,
                         help="Optional model label (defaults to a timestamp).")
+    # Wave 4.5 A/B knobs
+    parser.add_argument(
+        "--class-weight-mode",
+        choices=["inverse-freq", "uniform", "boundary-only"],
+        default="inverse-freq",
+        help=(
+            "How to compute per-class weights for the per-ball CCE loss. "
+            "'inverse-freq' = clipped inverse frequency (current behaviour, "
+            "clip [0.7, 1.5]). 'uniform' = all 9 classes weight 1.0 (lets the "
+            "model learn natural class frequencies; tests if class weights "
+            "are causing wicket over-prediction). 'boundary-only' = 1.5 on "
+            "classes 4 (four) and 5 (six), 1.0 elsewhere."
+        ),
+    )
+    parser.add_argument(
+        "--over-loss-weight",
+        type=float,
+        default=0.3,
+        help=(
+            "Weight on the per-over auxiliary NLL loss. Default 0.3 matches "
+            "Phase 2's hyperparameter setting. Drop to 0.1 to test if the "
+            "over-level loss is over-smoothing per-ball outputs."
+        ),
+    )
+    parser.add_argument(
+        "--hidden-units",
+        type=int,
+        default=256,
+        help="Width of each backbone Dense layer. Default 256.",
+    )
+    parser.add_argument(
+        "--n-hidden-layers",
+        type=int,
+        default=3,
+        help="Depth of the backbone (number of Dense+BN+ReLU+Dropout blocks).",
+    )
+    parser.add_argument(
+        "--embedding-dim-batter",
+        type=int,
+        default=24,
+        help="Embedding dimension for batter and bowler ids.",
+    )
+    parser.add_argument(
+        "--embedding-dim-venue",
+        type=int,
+        default=16,
+        help="Embedding dimension for venue id.",
+    )
+    parser.add_argument(
+        "--embedding-dim-team",
+        type=int,
+        default=8,
+        help="Embedding dimension for team ids.",
+    )
     args = parser.parse_args()
 
     output_dir = Path(args.output_dir)
@@ -318,9 +372,22 @@ def main() -> int:
         f"split: train={len(train['y']):,}  val={len(val['y']):,}  test={len(test['y']):,}"
     )
 
-    # ----- Class weights from train labels -----
-    class_weights = compute_class_weights(train["y"])
-    logger.info("class weights (clipped inverse frequency):")
+    # ----- Class weights from train labels (mode-dependent) -----
+    if args.class_weight_mode == "uniform":
+        class_weights = {c: 1.0 for c in range(NUM_CLASSES_V2)}
+        logger.info("class weights: UNIFORM (all 1.0)")
+    elif args.class_weight_mode == "boundary-only":
+        # Upweight boundaries (4-runs and 6-runs) only; everything else 1.0.
+        # Diagnostic showed wicket OVER-prediction so we don't touch wicket
+        # weight; goal here is to push the model toward more boundaries
+        # without inflating wicket prob.
+        class_weights = {c: 1.0 for c in range(NUM_CLASSES_V2)}
+        class_weights[4] = 1.5  # LABEL_FOUR
+        class_weights[5] = 1.5  # LABEL_SIX
+        logger.info("class weights: BOUNDARY-ONLY (4=1.5, 6=1.5, rest=1.0)")
+    else:  # inverse-freq (default)
+        class_weights = compute_class_weights(train["y"])
+        logger.info("class weights: INVERSE-FREQ (clipped [0.7, 1.5])")
     for c in range(NUM_CLASSES_V2):
         logger.info(f"  {LABEL_NAMES[c]:>7}: {class_weights[c]:.3f}")
 
@@ -334,9 +401,19 @@ def main() -> int:
         n_teams=len(vocab_team) + 1,
         learning_rate=args.learning_rate,
         class_weights=class_weights,
+        weight_over_loss=args.over_loss_weight,
+        hidden_units=tuple([args.hidden_units] * args.n_hidden_layers),
+        dim_batter=args.embedding_dim_batter,
+        dim_bowler=args.embedding_dim_batter,  # tie to batter dim
+        dim_venue=args.embedding_dim_venue,
+        dim_team=args.embedding_dim_team,
     )
     model = build_cricket_model_v2(cfg)
-    logger.info(f"model params: {model.count_params():,}")
+    logger.info(
+        f"model params: {model.count_params():,}  "
+        f"(hidden={args.hidden_units}x{args.n_hidden_layers}, "
+        f"emb_batter={cfg.dim_batter}, over_loss_w={cfg.weight_over_loss})"
+    )
 
     # ----- Compile -----
     losses = {}

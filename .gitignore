@@ -42,9 +42,14 @@ env/
 # Data files (large files should not be committed)
 data/raw/
 data/processed/
+data/models/
+data/backtest/
+data/diagnostics/
 *.zip
 *.csv
 *.json
+*.keras
+*.npz
 !src/data/schema.sql
 
 # Database files

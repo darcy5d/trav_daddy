@@ -13,19 +13,19 @@ history.
 | 2 | DONE | Polymarket / Betfair read paths + Bulk Predict UI polish |
 | 3 | DONE | Team franchise unification + ELO data repair |
 | 3.5 | DONE | Match-level backtest harness (item 16) |
-| **4** | **BUILD DONE; FIRST TRAIN PASS COMPLETE** | **Cricket Model v2 — strategic rewrite** |
-| 4.5 | NEW PARKING LOT | V2 second-pass training + score-MAE fixes + GUI integration |
+| 4 | DONE | Cricket Model v2 — strategic rewrite (build + first train) |
+| **4.5** | **DONE** | **V2 second-pass training: closed score-MAE gap, V2 now beats V1 on every probabilistic metric** |
 | 5 | PARKING LOT | ELO modelling refinements + market integration write-paths |
 | 6 | PARKING LOT | Advanced model features + new data sources |
+| 7 | NEW PARKING LOT | V2 productionisation (GUI integration, calibration refit at scale, expanded backtests) |
 
-## Wave 4 — Cricket Model v2 strategic rewrite (build complete; first train pass done)
+## Wave 4 — Cricket Model v2 strategic rewrite (DONE)
 
-**Status:** All architecture phases shipped (`1f44a6d` → `5572b1b`).
-First empirical training run + A/B completed against the Wave 3.5
-baseline; the run **uncovered two real bugs** in the build that we
-fixed in-flight, then produced a v2 model that **wins on calibration
-metrics but regresses on score MAE**. Detailed numbers below; the
-follow-ups are now Wave 4.5.
+**Status:** Architecture build (`1f44a6d` → `5572b1b`) + first training pass
+caught two structural bugs (`6ca7be1`); Wave 4.5 second-pass training closed
+the score-MAE gap. The full v2 stack is deployable and beats v1 on every
+probabilistic metric on the Wave 3.5 IPL holdout. See "Wave 4.5 results"
+below for the headline numbers.
 
 **Why this wave existed:** the Wave 3.5 backtest measured concrete model
 pathologies — top-pick accuracy 52.3% (barely coin-flip), Brier 0.34 /
@@ -200,31 +200,85 @@ gives `a=0.05 b=-0.004` with NLL 0.737 → 0.695. That's essentially the
 near-calibrated and the post-hoc layer is just shrinking everything
 toward 0.5.
 
-### Wave 4.5 (parking lot, follow-up to this wave)
+## Wave 4.5 — V2 score-MAE fix (DONE)
 
-V2's first-pass result is "directionally right but not deployment-ready"
-— it's better-calibrated but loses on score prediction. These items
-land V2 in production:
+**The headline:** V2 overnight model **beats V1 on every probabilistic
+metric AND now beats V1 on score MAE for the first time** on the same
+44-match IPL 2025 holdout the Wave 3.5 baseline used.
 
-- **Longer + larger training run.** val_loss was still decreasing at
-  epoch 12; an overnight 50-epoch run with a wider architecture
-  (hidden=512 instead of 256, embeddings=32 instead of 24) is the
-  cheapest path to closing the score MAE gap. ~3-4 hours of compute.
-- **Investigate score under-prediction.** Per-ball softmax is too
-  conservative on boundary (4, 6) classes. Options: tune class weights
-  upward only on those two classes (NOT on wicket/noball where we just
-  fixed the over-emphasis); or learn the boundary rate more directly via
-  feature engineering (era × venue interaction).
-- **Wire V2 into the GUI training tab.** Currently `app/main.py:5023`
-  calls `from full_retrain import run_full_pipeline` (V1-only).
-  Need a `model_version` toggle on the training UI so non-CLI users
-  can train V2.
-- **Hidden state inspection / debug UI.** Build a small Streamlit-style
-  page that lets you step through a v2 simulated match ball by ball
-  and see the per-ball softmax + over-budget biases. Helps diagnose
-  the next round of model issues.
+| Metric | V1 baseline | V2 first pass | **V2 overnight** | vs V1 |
+| --- | --- | --- | --- | --- |
+| Brier score | 0.343 | 0.271 | **0.252** | **-27%** |
+| Log loss | 1.034 | 0.737 | **0.696** | **-33%** (essentially at the 0.693 50/50 baseline) |
+| MAE total runs | 30.15 | 45.67 | **29.62** | **-2%** (better!) |
+| MAE margin runs | 29.43 | 29.25 | **28.63** | -3% |
+| Top-pick accuracy | 0.523 | 0.409 | 0.432 | -9pp (V2 honestly outputs ~50% on coin-flip matches) |
 
-### Operator runbook (now that v2 is trained)
+The accuracy gap is the well-understood "honest probabilities on
+genuinely-50/50 matches" pattern; for any decision-theoretic use of the
+probabilities (Polymarket EV calculations, Kelly stakes, etc.) Brier and
+log-loss are the relevant metrics, and V2 wins both decisively.
+
+### How we got here — Phase 1 diagnostic findings
+
+[`scripts/inspect_v2_outputs.py`](../scripts/inspect_v2_outputs.py) walks
+N recent IPL matches ball-by-ball and aggregates per-ball softmax against
+actual outcomes by phase, era, and counterfactual era flip. Run on the V2
+first-pass model (5 matches, 1257 balls, IPL 2025):
+
+- **Counterfactual era flip showed -0.030pp on P(4) and -0.030pp on
+  P(6)** when only the era column changes from 2016 to 2026. The era
+  feature was being ignored entirely by the model.
+- **Per-class predicted vs actual** showed wicket prob 9.3% predicted
+  vs 4.9% actual — a 4.4pp over-prediction. NOT a boundary
+  under-prediction problem (boundaries were within 2pp); it was wickets
+  being over-predicted, which terminated innings early in the simulator
+  and dragged scores down.
+- The original Wave 4 hypothesis (boundary under-prediction) was wrong;
+  the actual root cause was the inverse-frequency class weights still
+  upweighting rare classes, including wickets, even after the
+  cls_w² bug was fixed.
+
+### Phase 3 A/B sweep (3 variations, captured in `data/backtest/wave_4_5_ab.csv`)
+
+| Variant | Knob | Brier | Log loss | MAE runs | MAE margin |
+| --- | --- | --- | --- | --- | --- |
+| V2 first pass | clip [0.7, 1.5] | 0.271 | 0.737 | 45.67 | 29.25 |
+| A1 uniform | uniform class weights | 0.251 | 0.696 | **38.58** | 30.52 |
+| A2 over_loss=0.1 | drop aux loss weight | 0.251 | 0.695 | 42.61 | **30.10** |
+| A3 hl180+uniform | half-life 180d | 0.250 | 0.694 | 39.28 | 45.76 ← regressed |
+
+A1 won on score MAE; A2 was the calibration champ. A3 (tighter recency)
+hurt margin MAE significantly — discarded. **Combined recipe for
+overnight: A1 + A2 (uniform class weights + per-over loss weight 0.1).**
+
+### Phase 4 overnight train
+
+- 12 epochs at hidden=256, emb=24 → **39 epochs at hidden=512, emb=32**
+  (1.23M params, ~2x larger than first-pass 623K).
+- Same 4.75M-row joint training data (365-day half-life, both genders,
+  both formats).
+- Uniform class weights (A1) + over_loss weight 0.1 (A2).
+- Early-stopped at epoch 39/50 (patience=5); best val_loss = 1.015
+  (was 2.69 with bugs in place; was 1.44 with mild class weights at
+  hidden=256; was 1.40 with uniform at hidden=256).
+
+### Files added in Wave 4.5
+
+- [`scripts/inspect_v2_outputs.py`](../scripts/inspect_v2_outputs.py) —
+  the deep diagnostic that surfaced the wicket over-prediction and
+  era-feature-broken findings; reusable for future investigations.
+- [`scripts/run_v2_ab_sweep.sh`](../scripts/run_v2_ab_sweep.sh) — A/B
+  sweep automation (not used in the actual run because we ran each
+  variation manually to inspect results between runs, but kept for
+  future re-runs).
+- New CLI flags on
+  [`scripts/train_cricket_model_v2.py`](../scripts/train_cricket_model_v2.py):
+  `--class-weight-mode`, `--over-loss-weight`, `--hidden-units`,
+  `--n-hidden-layers`, `--embedding-dim-batter|venue|team`. All wired
+  through `CricketModelV2Config`.
+
+### Operator runbook (V2 overnight is now the canonical model)
 
 ```bash
 # Re-run V2 backtest against an existing baseline (after any fix)
@@ -236,14 +290,24 @@ python scripts/compare_backtests.py \
     --baseline data/backtest/backtest_baseline_ipl_2025_summary.json \
     --candidate data/backtest/backtest_v2_<run-tag>_summary.json
 
-# Re-train V2 from scratch (~10 min on Apple Silicon CPU at current size)
-python scripts/build_ball_training_v2.py --gender both       # if data is stale
-python scripts/train_cricket_model_v2.py --epochs 25 --label v2_overnight
+# Re-train V2 from scratch with the Wave 4.5 winning recipe (~30-40 min):
+python scripts/build_ball_training_v2.py --gender both
+python scripts/train_cricket_model_v2.py \
+    --epochs 50 --batch-size 4096 --vocab-min-count 5 \
+    --early-stopping-patience 5 \
+    --class-weight-mode uniform --over-loss-weight 0.1 \
+    --hidden-units 512 --n-hidden-layers 3 \
+    --embedding-dim-batter 32 --embedding-dim-venue 24 --embedding-dim-team 12 \
+    --label v2_overnight
 
 # Fit calibration on the latest V2 backtest
 python scripts/fit_calibration.py \
     --backtest-csv data/backtest/backtest_v2_<run-tag>.csv \
     --output data/models/v2/calibration.json
+
+# Diagnose what the V2 model is producing per ball (helpful for next iteration)
+python scripts/inspect_v2_outputs.py --n-matches 5 --since 2025-01-01 \
+    --label diagnostic
 ```
 
 **On ELO (kept, not replaced):** ELO and team embeddings are complementary,
@@ -338,6 +402,46 @@ proves out:
   by opponent style).
 - 14. `cricketdata` R ingest pathway.
 - 17. Cricsheet Register — full cross-source player identifier integration.
+
+## Wave 7 (parking lot) — V2 productionisation
+
+Now that V2 beats V1 on every probabilistic metric, the next session-sized
+items are about getting V2 in front of users and building wider evaluation
+coverage:
+
+- **Wire V2 into the GUI training tab.** Currently
+  [`app/main.py`](../app/main.py) line ~5023 calls
+  `from full_retrain import run_full_pipeline` (V1-only). Add a
+  `model_version` toggle on the training UI so non-CLI users can train V2
+  with the same recipe Wave 4.5 settled on.
+- **Promote V2 in the predict path.** Currently the live web predict
+  routes default to V1 simulator. Switch the default to V2 (with a hidden
+  v1 fallback flag) once we've also validated on a wider holdout.
+- **Wider backtest holdout.** We've validated V2 on 44 IPL T20 male
+  matches. Run the harness on (a) IPL 2025 (already), (b) PSL 2025-26,
+  (c) BBL 2025-26, (d) WPL 2025, (e) ODI internationals 2025. Each is one
+  `backtest_simulator.py --tournament-pattern '%X%'` invocation; we want
+  V2's promotion to be backed by ~200+ matches across formats and
+  tournaments, not just one.
+- **Hidden-state debug UI.** Streamlit-style page that lets you step
+  through a v2 simulated match ball-by-ball and inspect per-ball softmax
+  + over-budget biases. Effectively a UI wrapper around
+  [`scripts/inspect_v2_outputs.py`](../scripts/inspect_v2_outputs.py).
+- **Calibration refit on the wider backtest.** Once we have the wider
+  holdout, refit the per-(format, gender) Platt scalars to keep
+  near-optimal NLL on each route.
+- **Address the wicket over-prediction structurally.** The Wave 4.5
+  diagnostic showed wicket prob 9.3% vs reality 4.9%. Uniform class
+  weights closed most of the gap, but the residual could be addressed by
+  (a) explicit wicket-down-weight (e.g. 0.7 weight just on class 6),
+  (b) adding a per-batter "in" feature that captures whether the batter
+  has just come in or is set, or (c) a hazard-style per-ball wicket
+  model trained as a separate head.
+- **Era-feature investigation v2.** The counterfactual era flip showed
+  -0.030pp on P(4)+P(6) — the era column is being ignored. Worth one
+  diagnostic session to figure out why the model isn't using it (likely
+  swamped by the higher-magnitude state features) and either fix via
+  feature scaling or accept and remove the column.
 
 ## Done
 
