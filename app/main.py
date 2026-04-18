@@ -68,6 +68,16 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# Run lightweight schema migrations on import so every entry point (web,
+# scripts importing app.main) sees the franchise-grouping tables and columns.
+# This is idempotent; safe to call repeatedly.
+try:
+    from src.data.database import init_franchise_tables as _init_franchise_tables
+
+    _init_franchise_tables()
+except Exception as _exc:  # pragma: no cover - logged but non-fatal at import time
+    logger.warning(f"Franchise schema init failed at startup: {_exc}")
+
 # Lazy load simulators (they take time to initialize)
 # Cache per gender to avoid re-initializing
 _fast_simulators = {}  # {'male': simulator, 'female': simulator}

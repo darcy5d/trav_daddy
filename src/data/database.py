@@ -335,6 +335,130 @@ class DatabaseManager:
         return cursor.fetchone() is not None
 
 
+def _column_exists(conn: sqlite3.Connection, table: str, column: str) -> bool:
+    """Return True if `table.column` exists. SQLite doesn't have IF NOT EXISTS
+    for ALTER TABLE ADD COLUMN, so callers do the check themselves."""
+    cursor = conn.cursor()
+    cursor.execute(f"PRAGMA table_info({table})")
+    return any(row[1] == column for row in cursor.fetchall())
+
+
+def init_franchise_tables(db_path: Optional[Path] = None) -> bool:
+    """
+    Schema V4: franchise grouping + cross-source identifiers + merge proposals.
+
+    Idempotent. Safe to call on every app startup. Adds:
+      - team_groups, team_external_ids, team_merge_proposals tables
+      - teams.franchise_id and teams.canonical_team_id columns
+      - Self-grouping for any teams that haven't been backfilled yet (so the
+        runtime resolver always has a valid mapping). Explicit franchise
+        unifications (RCB, Capitals, Punjab Kings) are applied separately by
+        scripts/backfill_franchises.py so app startup never silently rewrites
+        ratings.
+    """
+    if db_path is None:
+        db_path = DATABASE_PATH
+
+    schema_path = Path(__file__).parent / "schema_v4_franchise.sql"
+    if not schema_path.exists():
+        logger.error(f"Schema file not found: {schema_path}")
+        return False
+
+    try:
+        schema_sql = schema_path.read_text()
+
+        with get_db_connection(db_path) as conn:
+            cursor = conn.cursor()
+
+            conn.executescript(schema_sql)
+
+            # Add columns to the existing teams table if missing.
+            if not _column_exists(conn, "teams", "franchise_id"):
+                cursor.execute(
+                    "ALTER TABLE teams ADD COLUMN franchise_id INTEGER REFERENCES team_groups(group_id)"
+                )
+                logger.info("Added teams.franchise_id column")
+            if not _column_exists(conn, "teams", "canonical_team_id"):
+                cursor.execute(
+                    "ALTER TABLE teams ADD COLUMN canonical_team_id INTEGER REFERENCES teams(team_id)"
+                )
+                logger.info("Added teams.canonical_team_id column")
+
+            cursor.execute(
+                "CREATE INDEX IF NOT EXISTS idx_teams_franchise ON teams(franchise_id)"
+            )
+            cursor.execute(
+                "CREATE INDEX IF NOT EXISTS idx_teams_canonical ON teams(canonical_team_id)"
+            )
+
+            # Self-group any teams that don't yet have a franchise. This keeps
+            # the runtime resolver total: every team always points somewhere.
+            # Explicit multi-id franchise unifications happen in the backfill
+            # script (Phase B), not here.
+            cursor.execute(
+                """
+                SELECT team_id, name, country_code, team_type
+                FROM teams
+                WHERE franchise_id IS NULL
+                """
+            )
+            ungrouped = cursor.fetchall()
+            for row in ungrouped:
+                team_id = row["team_id"]
+                name = row["name"]
+                country = row["country_code"]
+                ttype = row["team_type"] or "domestic"
+                # Map teams.team_type -> team_groups.group_type. Anything we
+                # don't recognise lands in 'domestic' so the CHECK doesn't fire.
+                gtype = ttype if ttype in (
+                    "franchise", "international", "domestic"
+                ) else "domestic"
+                if gtype == "international":
+                    gtype = "national"
+
+                cursor.execute(
+                    """
+                    INSERT OR IGNORE INTO team_groups (
+                        canonical_name, group_type, country_code, notes
+                    ) VALUES (?, ?, ?, ?)
+                    """,
+                    (name, gtype, country, "Auto-created during V4 migration (self-group)"),
+                )
+                cursor.execute(
+                    "SELECT group_id FROM team_groups WHERE canonical_name = ?",
+                    (name,),
+                )
+                grp = cursor.fetchone()
+                if not grp:
+                    continue
+                group_id = grp["group_id"]
+
+                cursor.execute(
+                    """
+                    UPDATE teams
+                    SET franchise_id = ?, canonical_team_id = ?
+                    WHERE team_id = ?
+                    """,
+                    (group_id, team_id, team_id),
+                )
+
+            if ungrouped:
+                logger.info(
+                    f"Self-grouped {len(ungrouped)} teams under their own franchise rows"
+                )
+
+            logger.info("Franchise schema (V4) initialized")
+
+        return True
+
+    except Exception as e:
+        logger.error(f"Failed to initialize franchise schema: {e}")
+        import traceback
+
+        traceback.print_exc()
+        return False
+
+
 def init_model_versions_table(db_path: Optional[Path] = None) -> bool:
     """
     Initialize the model_versions table.

@@ -99,6 +99,37 @@ class EloCalculatorV3:
         self.k_factor_bowling = ELO_CONFIG['k_factor_player_bowling']
         self.rating_floor = ELO_CONFIG['rating_floor']
         self.rating_ceiling = ELO_CONFIG['rating_ceiling']
+        # Per-process cache of team_id -> canonical_team_id. Lazily filled by
+        # _canonical_team_id() so unit tests / fresh DBs don't pay the lookup
+        # cost on every match. Cleared explicitly when the franchise mapping
+        # changes (e.g. after a Team Explorer apply).
+        self._canonical_cache: Dict[int, int] = {}
+
+    def _canonical_team_id(self, conn, team_id: int) -> int:
+        """Resolve `team_id` to its franchise's canonical owner.
+
+        All ELO reads/writes (history, current, snapshots) go through this so
+        a 2017 Delhi Daredevils row updates the modern Delhi Capitals rating
+        series without rewriting the original match row.
+        """
+        if team_id in self._canonical_cache:
+            return self._canonical_cache[team_id]
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT canonical_team_id FROM teams WHERE team_id = ?",
+            (team_id,),
+        )
+        row = cursor.fetchone()
+        canonical = (
+            row['canonical_team_id'] if row and row['canonical_team_id'] is not None
+            else team_id
+        )
+        self._canonical_cache[team_id] = canonical
+        return canonical
+
+    def reset_canonical_cache(self) -> None:
+        """Drop the canonical-id cache. Call after any franchise-mapping change."""
+        self._canonical_cache.clear()
     
     def expected_score(self, rating_a: float, rating_b: float) -> float:
         """Calculate expected score for player/team A against B."""
@@ -275,22 +306,28 @@ class EloCalculatorV3:
         gender: str,
         as_of_date: Optional[datetime] = None
     ) -> float:
-        """Get team rating for specific format and gender."""
+        """Get team rating for specific format and gender.
+
+        Resolves to the franchise canonical_team_id first so a query against
+        the old rebrand id (e.g. team_id=111 for Royal Challengers Bangalore)
+        returns the unified Royal Challengers Bengaluru series.
+        """
+        canonical = self._canonical_team_id(conn, team_id)
         cursor = conn.cursor()
-        
+
         if as_of_date:
             cursor.execute("""
                 SELECT elo FROM team_elo_history
                 WHERE team_id = ? AND format = ? AND gender = ? AND date <= ?
                 ORDER BY date DESC, elo_id DESC
                 LIMIT 1
-            """, (team_id, match_format, gender, as_of_date))
+            """, (canonical, match_format, gender, as_of_date))
         else:
             col = f'elo_{match_format.lower()}_{gender}'
             cursor.execute(f"""
                 SELECT {col} FROM team_current_elo
                 WHERE team_id = ?
-            """, (team_id,))
+            """, (canonical,))
         
         row = cursor.fetchone()
         return row[0] if row else self.initial_rating
@@ -352,17 +389,26 @@ class EloCalculatorV3:
         10. Check for promotion review triggers
         """
         cursor = conn.cursor()
-        
-        # Step 1: Get team tiers
-        cursor.execute("SELECT tier FROM teams WHERE team_id = ?", (team1_id,))
+
+        # Resolve to franchise canonical ids so all rating reads/writes target
+        # the unified series. The match row itself stays labelled with the
+        # original team1_id/team2_id (preserves "this was a Daredevils match"
+        # historical fidelity).
+        canonical1 = self._canonical_team_id(conn, team1_id)
+        canonical2 = self._canonical_team_id(conn, team2_id)
+
+        # Step 1: Get team tiers (tier sits on the canonical row in unified
+        # franchises; the legacy row inherits via the canonical lookup).
+        cursor.execute("SELECT tier FROM teams WHERE team_id = ?", (canonical1,))
         tier1_row = cursor.fetchone()
         tier1 = tier1_row['tier'] if tier1_row and tier1_row['tier'] else 3
-        
-        cursor.execute("SELECT tier FROM teams WHERE team_id = ?", (team2_id,))
+
+        cursor.execute("SELECT tier FROM teams WHERE team_id = ?", (canonical2,))
         tier2_row = cursor.fetchone()
         tier2 = tier2_row['tier'] if tier2_row and tier2_row['tier'] else 3
-        
-        # Step 2: Current ratings
+
+        # Step 2: Current ratings (use the original ids; get_team_rating
+        # resolves to canonical internally).
         rating1 = self.get_team_rating(conn, team1_id, match_format, gender, match_date)
         rating2 = self.get_team_rating(conn, team2_id, match_format, gender, match_date)
         
@@ -403,21 +449,32 @@ class EloCalculatorV3:
         new_rating2 = self.apply_tier_boundaries(new_rating2, tier2)
         
         # Step 9: Store in history
-        for team_id, new_rating, old_rating in [
-            (team1_id, new_rating1, rating1),
-            (team2_id, new_rating2, rating2)
+        # IMPORTANT: write under the canonical_team_id so unified franchises
+        # share one rating series. INSERT OR IGNORE guards against the
+        # duplicate-row cascade we previously saw (~527K extra rows where the
+        # same match was applied repeatedly). Combined with the UNIQUE index
+        # added by scripts/dedupe_elo_history.py this is now structurally
+        # impossible.
+        for canonical_id, new_rating, old_rating in [
+            (canonical1, new_rating1, rating1),
+            (canonical2, new_rating2, rating2),
         ]:
             change = new_rating - old_rating
             cursor.execute("""
-                INSERT INTO team_elo_history (
+                INSERT OR IGNORE INTO team_elo_history (
                     team_id, date, match_id, format, gender, elo, elo_change
                 ) VALUES (?, ?, ?, ?, ?, ?, ?)
-            """, (team_id, match_date, match_id, match_format, gender, new_rating, change))
-            
-            # Update current rating
+            """, (canonical_id, match_date, match_id, match_format, gender, new_rating, change))
+
+            # Only update current_elo when we actually inserted a new row -
+            # otherwise we'd clobber a later rating with an earlier match's
+            # outcome on a re-run.
+            if cursor.rowcount == 0:
+                continue
+
             col = f'elo_{match_format.lower()}_{gender}'
             date_col = f'last_{match_format.lower()}_{gender}_date'
-            
+
             cursor.execute(f"""
                 INSERT INTO team_current_elo (team_id, {col}, {date_col})
                 VALUES (?, ?, ?)
@@ -425,12 +482,13 @@ class EloCalculatorV3:
                     {col} = excluded.{col},
                     {date_col} = excluded.{date_col},
                     updated_at = CURRENT_TIMESTAMP
-            """, (team_id, new_rating, match_date))
-        
-        # Step 10: Check promotion triggers
-        self.check_promotion_triggers(conn, team1_id, tier1, new_rating1, match_format, gender)
-        self.check_promotion_triggers(conn, team2_id, tier2, new_rating2, match_format, gender)
-        
+            """, (canonical_id, new_rating, match_date))
+
+        # Step 10: Check promotion triggers (against canonical id so the flag
+        # always points at the live franchise row).
+        self.check_promotion_triggers(conn, canonical1, tier1, new_rating1, match_format, gender)
+        self.check_promotion_triggers(conn, canonical2, tier2, new_rating2, match_format, gender)
+
         return new_rating1, new_rating2
     
     def check_promotion_triggers(
@@ -813,10 +871,25 @@ def calculate_all_elos_v3(force_recalculate: bool = False):
     from tqdm import tqdm
     
     calculator = EloCalculatorV3()
-    
+
     with get_db_connection() as conn:
         cursor = conn.cursor()
-        
+
+        if force_recalculate:
+            logger.warning(
+                "force_recalculate=True: wiping non-snapshot ELO history and "
+                "resetting current ELOs before re-running"
+            )
+            cursor.execute(
+                "DELETE FROM team_elo_history WHERE NOT is_monthly_snapshot"
+            )
+            cursor.execute(
+                "DELETE FROM player_elo_history WHERE NOT is_monthly_snapshot"
+            )
+            cursor.execute("DELETE FROM team_current_elo")
+            cursor.execute("DELETE FROM player_current_elo")
+            calculator.reset_canonical_cache()
+
         # Get all matches chronologically
         cursor.execute("""
             SELECT 
