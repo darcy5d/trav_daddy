@@ -144,40 +144,39 @@ def route_index_for_row(format_id: int, gender_id: int) -> int:
 
 def build_per_route_sample_weights(
     arrays: Dict[str, np.ndarray],
-    class_weights: Dict[int, float],
+    class_weights: Dict[int, float],  # noqa: ARG001 - kept for API compat
 ) -> Dict[str, np.ndarray]:
     """Build per-route sample weight arrays for the multi-task loss.
 
     For each output head, returns an array of shape (n,) with:
       - 0.0 on rows whose (format, gender) doesn't match the head's route.
-      - sample_weight[i] * class_weight[y[i]] on rows that do.
+      - sample_weight[i] (the recency-decay weight) on rows that do.
+
+    Class weights are NOT multiplied in here. They're applied INSIDE the
+    routed CCE loss function (cricket_model_v2.routed_cce_loss_fn) so
+    multiplying them in here too would square the effective per-class
+    weighting (cls_w * cls_w), wildly over-emphasising rare classes - in
+    the v1 training run this caused wicket prob to be ~6x what it should
+    have been, collapsing 2nd innings in the simulator. Bug discovered
+    when the V2 trained model produced team2 averages of 50 runs vs
+    team1 187, with team1_win_prob = 0.000 across 44 backtest matches.
 
     For per-over heads we use sample_weight directly (no class weighting -
     the over-level loss is regression, not classification).
-
-    Returned dict keys match the model's output names.
     """
     n = len(arrays["y"])
     fmt_col = arrays["ids"][:, ID_COLUMNS.index("format_id")]
     gen_col = arrays["ids"][:, ID_COLUMNS.index("gender_id")]
-    ys = arrays["y"]
     base_sw = arrays["sample_weight"]
-
-    cls_w_lookup = np.ones(NUM_CLASSES_V2, dtype=np.float32)
-    for c, w in class_weights.items():
-        if 0 <= c < NUM_CLASSES_V2:
-            cls_w_lookup[c] = float(w)
-    per_sample_class_w = cls_w_lookup[ys]
 
     out: Dict[str, np.ndarray] = {}
     for fmt, gen in ROUTE_KEYS:
         fmt_id = FORMAT_ID[fmt]
         gen_id = GENDER_ID[gen]
         mask = (fmt_col == fmt_id) & (gen_col == gen_id)
-        ball_w = np.where(mask, base_sw * per_sample_class_w, 0.0).astype(np.float32)
-        over_w = np.where(mask, base_sw, 0.0).astype(np.float32)
-        out[f"ball_{fmt.lower()}_{gen}"] = ball_w
-        out[f"over_{fmt.lower()}_{gen}"] = over_w
+        sw = np.where(mask, base_sw, 0.0).astype(np.float32)
+        out[f"ball_{fmt.lower()}_{gen}"] = sw
+        out[f"over_{fmt.lower()}_{gen}"] = sw
     return out
 
 
@@ -216,9 +215,18 @@ def build_inputs_dict(arrays: Dict[str, np.ndarray], vocabs: Dict[str, Dict[int,
     }
 
 
-def compute_class_weights(y: np.ndarray, clip_min: float = 0.5, clip_max: float = 5.0) -> Dict[int, float]:
+def compute_class_weights(y: np.ndarray, clip_min: float = 0.7, clip_max: float = 1.5) -> Dict[int, float]:
     """Inverse-frequency class weights, clipped so the rarest classes don't
-    blow up the loss."""
+    blow up the loss.
+
+    The first v2 training run used clip_max=5.0 which over-emphasised rare
+    classes (wickets, noballs) so much that the per-ball softmax produced
+    ~12% wicket prob (vs ~5% in reality), causing 2nd-innings batting
+    collapse in the simulator. clip range tightened to [0.7, 1.5] for the
+    next pass; v1 didn't use class weights at all and produced more
+    realistic ball distributions, so we err on the side of trusting
+    natural class frequencies more.
+    """
     counts = np.bincount(y, minlength=NUM_CLASSES_V2).astype(np.float64)
     total = counts.sum()
     weights: Dict[int, float] = {}

@@ -557,7 +557,11 @@ class V2Simulator:
             rng=rng,
         )
 
-        team1_won = first_runs >= targets  # team1 wins if team2 fails to chase
+        # Team 1 wins iff team 2 fails to reach the chase target.
+        # (Earlier version had `first_runs >= targets` which was always False
+        # because targets = first_runs + 1; that bug made every match return
+        # team1_win_prob = 0.000 regardless of how the model was performing.)
+        team1_won = second_runs < targets
         team1_win_prob_raw = float(team1_won.mean())
 
         # Apply calibration
