@@ -27,6 +27,7 @@ A running notepad of bugs, inefficiencies, and improvement ideas to address in t
 - 14. `cricketdata` R ingest pathway
 - 15. Ball outcome class-imbalance model work
 - 16. Match-level backtest (simulated vs actual outcomes)
+- 17. Cricsheet Register: ingest and wire cross-source player identifiers (CREX, Cricinfo, internal DB)
 
 ### Targeted Validation Note (Wave 1)
 - Confirm whether separate data is present and properly disaggregated for variants like Australia A / Australia A Women in existing team + ball-by-ball records. If gaps exist, capture as follow-up tasks under next waves.
@@ -303,6 +304,26 @@ The [cricketdata](https://cran.r-project.org/web/packages/cricketdata/vignettes/
 - **Port the ideas:** Use the package as a **spec** for which Cricinfo/Cricsheet endpoints and competition codes to hit, but implement fetch/normalize in Python — fewer runtimes, more code to own.
 
 **Checks before committing:** Diff sample IPL (or internationals) BBB against our current Cricsheet-derived tables for row counts and column semantics; confirm player-id alignment between Cricinfo and Cricsheet naming; document refresh cadence and licensing (open data from Cricsheet; Cricinfo scraping policy).
+
+### 17. Cricsheet Register — cross-source player identity
+
+**Reference:** [The Cricsheet Register](https://cricsheet.org/register/) (official page; downloads: [`people.csv`](https://cricsheet.org/register/people.csv), [`names.csv`](https://cricsheet.org/register/names.csv)).
+
+Cricsheet maintains an **open registry** that links a single **Cricsheet person identifier** (`identifier` in the CSV) to **external IDs on multiple data sources**, plus **name variants** so the same human can be recognised across sites that spell or abbreviate names differently.
+
+**Why it matters for a DB / pipeline overhaul**
+
+- **Single join key across feeds:** The register maps one person to IDs used elsewhere (e.g. ESPNcricinfo, CricketArchive, BCCI, Big Bash, Pulse, NV Play, Opta, and several others — 12 sources on the page as of exploration). That is the natural backbone for aligning **ball-by-ball JSON** (Cricsheet), **player aggregates / bios** (Cricinfo-style APIs or R `cricketdata`), **domestic league feeds**, and **CREX-derived squads** without relying only on fuzzy name matching.
+- **Name disambiguation:** `names.csv` lists alternate spellings and source-specific variants; `people.csv` includes a `unique_name` guaranteed distinct per person — useful when cleaning duplicates and stub players.
+- **Upstream usage:** Cricsheet uses the register when merging sources for matches and is **gradually adding the Cricsheet identifier from the Register into released match data**, so our schema should treat `registry_id` (already present on `players` per `DATABASE_SCHEMA.md`) as the stable anchor and **refresh** mappings from these CSVs on ingest.
+- **License:** Distributed under [ODC-BY](http://opendatacommons.org/licenses/by/1.0/) — attribute Cricsheet when publishing derivatives.
+
+**Proposed overhaul actions**
+
+- **Ingest:** Versioned download of `people.csv` + `names.csv` (same cadence as other Cricsheet artifacts); store or materialise a lookup table keyed by Cricsheet `identifier` with columns for each `key_*` source.
+- **Join strategy:** Prefer **ID-first** resolution (CREX id → Cricinfo id → Cricsheet id via register) before falling back to `name_matcher`-style fuzzy logic; log when only fuzzy path hits.
+- **Coverage gaps:** Not every person has every external id — document expected sparsity and keep current stub-registration behaviour where the register has no row yet.
+- **Cross-check item 14:** Using the register as ground truth for **Cricinfo ↔ Cricsheet** identity should satisfy the “confirm player-id alignment” check listed under the `cricketdata` R ingest path.
 
 ---
 

@@ -224,7 +224,13 @@ class CREXScraper:
     SCHEDULE_URL = f"{BASE_URL}/schedule"
     # SPA date-wise schedule uses this endpoint (see FixtureService in CREX bundles).
     CRICKAPI_GET_FIXTURE_URL = "https://crickapi.com/fixture/getFixture"
-    # Angular TransferState used to embed rows under this key inside script#app-root-state
+    # Angular TransferState used to embed rows under one of these keys inside
+    # script#app-root-state. CREX migrated from crickapi.com to stats.crickapi.com
+    # in early 2026; we keep both for compatibility.
+    _FIXTURE_STATE_KEYS = (
+        "https://stats.crickapi.com/fixture/getFixture",
+        "https://crickapi.com/fixture/getFixture",
+    )
     _FIXTURE_STATE_KEY = "https://crickapi.com/fixture/getFixture"
     
     HEADERS = {
@@ -335,6 +341,11 @@ class CREXScraper:
         'hobart': ['tasmania', 'hobart hurricanes'],
     }
     
+    # Process-wide cache of CREX series_id (sf / f_key) → series name. Populated
+    # opportunistically from any CREX page (schedule, /series, individual match)
+    # so that one fetch's mapping enriches every later request in the same run.
+    _series_name_cache: Dict[str, str] = {}
+
     def __init__(self, request_delay: float = 1.0):
         """
         Initialize scraper.
@@ -990,9 +1001,20 @@ class CREXScraper:
         state = self._decode_crex_app_root_state(script.string)
         if not state:
             return []
-        rows = state.get(self._FIXTURE_STATE_KEY)
-        if not isinstance(rows, list):
+        rows: List[dict] = []
+        for key in self._FIXTURE_STATE_KEYS:
+            value = state.get(key)
+            if isinstance(value, list) and value:
+                rows = value
+                break
+        if not rows:
             return []
+        # Schedule SSR rows arrive fully populated (incl. series name `n`); seed the
+        # in-process series cache so later enrichment of API-fetched rows is free.
+        self._update_series_cache_from_rows(rows)
+        # Also harvest mappings exposed alongside the schedule (e.g.
+        # getHomeMapDatadatewise → s field) for sf→name pairs not present in rows.
+        self._update_series_cache_from_state(state)
         return self._rows_to_schedule_matches(rows, formats)
 
     def _fixture_row_to_schedule_match(self, fx: dict) -> Optional[CREXMatch]:
@@ -1207,18 +1229,37 @@ class CREXScraper:
         return matches
     
     def _get_all_schedule_matches(self, formats: List[str] = None) -> List[CREXMatch]:
-        """Get all matches from schedule without time filtering (internal method)."""
+        """Get all matches from schedule without time filtering (internal method).
+
+        We always parse the SSR `app-root-state` first because its rows are fully
+        populated (incl. series name `n`); the paginated CrickAPI POST returns
+        every fixture but strips `n`, so the SSR pass primes our series cache for
+        the API rows that follow.
+        """
         html = self._fetch(self.SCHEDULE_URL)
         soup = BeautifulSoup(html, 'html.parser') if html else None
 
-        matches: List[CREXMatch] = []
+        ssr_matches: List[CREXMatch] = []
         if soup:
-            matches = self._parse_schedule_from_embedded_state(soup, formats)
+            ssr_matches = self._parse_schedule_from_embedded_state(soup, formats)
 
-        if not matches:
-            api_rows = self._fetch_schedule_fixture_rows()
-            matches = self._rows_to_schedule_matches(api_rows, formats)
+        api_rows = self._fetch_schedule_fixture_rows()
+        api_matches = self._rows_to_schedule_matches(api_rows, formats)
 
+        # Merge: prefer SSR rows where available (richer fields), then fold in
+        # any API-only matches keyed by crex_id.
+        seen: set = set()
+        matches: List[CREXMatch] = []
+        for m in ssr_matches:
+            if m.crex_id and m.crex_id not in seen:
+                seen.add(m.crex_id)
+                matches.append(m)
+        for m in api_matches:
+            if m.crex_id and m.crex_id not in seen:
+                seen.add(m.crex_id)
+                matches.append(m)
+
+        # Final DOM fallback only if everything else came up empty.
         if not matches and soup:
             matches = self._parse_schedule_from_dom(soup, formats)
 
@@ -1227,87 +1268,176 @@ class CREXScraper:
 
         return matches
 
+    def _update_series_cache_from_rows(self, rows: List[dict]) -> int:
+        """Harvest sf → series_name from any iterable of fixture rows.
+
+        SSR-rendered schedule/match pages embed full fixtures with the `n`
+        (series name) field populated; the CrickAPI POST fallback does not.
+        Caching from SSR avoids a second network round-trip for those series.
+        """
+        added = 0
+        for fx in rows:
+            if not isinstance(fx, dict):
+                continue
+            sf = str(fx.get('sf') or fx.get('f_key') or '').strip()
+            name = (fx.get('n') or fx.get('seriesShortName') or fx.get('sn') or '').strip()
+            if sf and name and sf not in self._series_name_cache:
+                self._series_name_cache[sf] = name
+                added += 1
+        return added
+
+    def _update_series_cache_from_state(self, state: dict) -> int:
+        """Harvest sf → name from any `getHomeMapData*` block exposing an `s` list.
+
+        CREX ships several mapping endpoints (datewise / serieswise / homeSeries
+        / liveparsing / matchinfo) whose payloads share a common ``{s: [{f_key, n, sn}], ...}``
+        shape. Pulling them all keeps the cache fresh regardless of which page
+        we landed on.
+        """
+        if not isinstance(state, dict):
+            return 0
+        added = 0
+        for key, value in state.items():
+            if 'getHomeMapData' not in key or not isinstance(value, dict):
+                continue
+            s_list = value.get('s')
+            if not isinstance(s_list, list):
+                continue
+            for s in s_list:
+                if not isinstance(s, dict):
+                    continue
+                sf = str(s.get('f_key') or s.get('sf') or '').strip()
+                name = (s.get('n') or s.get('sn') or '').strip()
+                if sf and name and sf not in self._series_name_cache:
+                    self._series_name_cache[sf] = name
+                    added += 1
+        return added
+
     def _fetch_series_name_map(self) -> Dict[str, str]:
         """
         Fetch series fkey → name mappings from the CREX series page embedded JSON.
         Uses the same app-root-state approach that works for teams.
         """
-        series_map: Dict[str, str] = {}
-        
         try:
             html = self._fetch(f"{self.BASE_URL}/series")
             if not html:
-                return series_map
-            
+                return dict(self._series_name_cache)
+
             soup = BeautifulSoup(html, 'html.parser')
             script = soup.find('script', id='app-root-state')
             if not script or not script.string:
-                return series_map
-            
+                return dict(self._series_name_cache)
+
             state = self._decode_crex_app_root_state(script.string)
             if not state:
-                return series_map
-            
-            # Extract from fixture entries on series page (has 'n' field with series name)
-            fixture_data = state.get('https://crickapi.com/fixture/getFixture', {})
-            if isinstance(fixture_data, dict):
-                for month_key, fixtures in fixture_data.items():
-                    if isinstance(fixtures, list):
-                        for fx in fixtures:
-                            if isinstance(fx, dict):
-                                sf = fx.get('sf', '')
-                                n = fx.get('n', '')
-                                if sf and n:
-                                    series_map[sf] = n
-            
-            # Extract from mapping data (higher quality names)
-            for map_key in [
-                'https://oc.crickapi.com/mapping/getHomeMapDataserieswise',
-                'https://oc.crickapi.com/mapping/getHomeMapDatahomeSeries'
-            ]:
-                map_data = state.get(map_key, {})
-                if isinstance(map_data, dict):
-                    for s in map_data.get('s', []):
-                        if isinstance(s, dict):
-                            sf = s.get('f_key', '')
-                            name = s.get('n', '') or s.get('sn', '')
-                            if sf and name:
-                                series_map[sf] = name
-            
-            logger.info(f"Fetched {len(series_map)} series name mappings from CREX")
-            
+                return dict(self._series_name_cache)
+
+            # Extract from fixture entries on the /series page (legacy + current SSR keys).
+            for fixture_key in (
+                'https://stats.crickapi.com/fixture/getFixture',
+                'https://crickapi.com/fixture/getFixture',
+            ):
+                fixture_data = state.get(fixture_key)
+                if isinstance(fixture_data, list):
+                    self._update_series_cache_from_rows(fixture_data)
+                elif isinstance(fixture_data, dict):
+                    for fixtures in fixture_data.values():
+                        if isinstance(fixtures, list):
+                            self._update_series_cache_from_rows(fixtures)
+
+            # Extract from any mapping block on the page (e.g. datewise / serieswise / homeSeries).
+            self._update_series_cache_from_state(state)
+
+            logger.info(f"Series name cache now holds {len(self._series_name_cache)} mappings (after /series harvest)")
+
         except Exception as e:
             logger.debug(f"Failed to fetch series names: {e}")
-        
-        return series_map
+
+        return dict(self._series_name_cache)
+
+    def _resolve_series_names_via_match_pages(self, missing_series_ids: List[str], matches: List[CREXMatch]) -> int:
+        """Last-resort enrichment: fetch one match page per unmapped series_id.
+
+        Each CREX match page embeds a `getHomeMapData*` block listing every series
+        referenced on the page. One fetch per missing series_id therefore unlocks
+        the name for every match in that series in a single round-trip.
+        """
+        if not missing_series_ids:
+            return 0
+
+        # Group matches by series_id so we can pick a representative URL per series
+        # (cheap to skip series that suddenly appear in the cache mid-loop).
+        by_series: Dict[str, List[CREXMatch]] = {}
+        for m in matches:
+            if m.series_id in missing_series_ids and m.match_url:
+                by_series.setdefault(m.series_id, []).append(m)
+
+        added = 0
+        for sf in list(by_series.keys()):
+            if sf in self._series_name_cache:
+                continue
+            url = by_series[sf][0].match_url
+            try:
+                html = self._fetch(url)
+                if not html:
+                    continue
+                soup = BeautifulSoup(html, 'html.parser')
+                script = soup.find('script', id='app-root-state')
+                if not script or not script.string:
+                    continue
+                state = self._decode_crex_app_root_state(script.string)
+                if not state:
+                    continue
+                added += self._update_series_cache_from_state(state)
+            except Exception as e:
+                logger.debug(f"Series-page fallback failed for {sf} via {url}: {e}")
+
+        return added
 
     def _enrich_series_names(self, matches: List[CREXMatch]):
         """Fill in missing series names from CREX series directory."""
-        # Check if any matches are missing series names
+        # Always seed the cache with anything matches already carry (SSR / API rows).
+        self._update_series_cache_from_rows([
+            {'sf': m.series_id, 'n': m.series_name}
+            for m in matches if m.series_id and m.series_name
+        ])
+
         missing_count = sum(1 for m in matches if not m.series_name and m.series_id)
         if missing_count == 0:
-            # Still need to recheck gender for all matches in case series was present
             self._recheck_gender_from_series(matches)
             return
-        
+
         logger.info(f"Enriching {missing_count} matches with missing series names")
-        
-        # Fetch series name mappings
+
+        # First pass: cache + /series page mappings.
         series_map = self._fetch_series_name_map()
-        if not series_map:
-            return
-        
-        # Apply series names
-        enriched = 0
-        for match in matches:
-            if not match.series_name and match.series_id:
-                name = series_map.get(match.series_id)
-                if name:
-                    match.series_name = name
-                    enriched += 1
-        
+
+        def apply_map(source_label: str) -> int:
+            applied = 0
+            for match in matches:
+                if not match.series_name and match.series_id:
+                    name = self._series_name_cache.get(match.series_id) or series_map.get(match.series_id)
+                    if name:
+                        match.series_name = name
+                        applied += 1
+            if applied:
+                logger.debug(f"Applied {applied} series names from {source_label}")
+            return applied
+
+        enriched = apply_map('cache + /series')
+
+        # Second pass: any series_ids still missing get a one-off match-page fetch.
+        still_missing = sorted({m.series_id for m in matches if not m.series_name and m.series_id})
+        if still_missing:
+            logger.info(
+                f"{len(still_missing)} series IDs still unresolved after /series; "
+                f"falling back to per-series match-page lookup: {still_missing}"
+            )
+            self._resolve_series_names_via_match_pages(still_missing, matches)
+            enriched += apply_map('match-page fallback')
+
         logger.info(f"Enriched {enriched}/{missing_count} matches with series names")
-        
+
         # Recheck gender now that series names are available
         self._recheck_gender_from_series(matches)
 
