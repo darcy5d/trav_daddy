@@ -402,36 +402,54 @@ class VectorizedNNSimulator:
             Dict with simulation results
         """
         max_balls = max_overs * 6
-        
-        # DEBUG: Track how many players are found in distributions vs using defaults
-        # Use a tuple of player IDs as a key to detect if this is a new simulation request
+
+        # Compute distribution-match counts every call so we can return them in
+        # the results dict (used by Bulk Predict's per-fixture data-quality
+        # badge). Cheap: 4 small dict lookups per player.
+        def safe_int(x):
+            try:
+                return int(x)
+            except (ValueError, TypeError):
+                return None
+
+        team1_bat_found = sum(1 for pid in team1_batter_ids if safe_int(pid) in self.batter_dists)
+        team1_bowl_found = sum(1 for pid in team1_bowler_ids if safe_int(pid) in self.bowler_dists)
+        team2_bat_found = sum(1 for pid in team2_batter_ids if safe_int(pid) in self.batter_dists)
+        team2_bowl_found = sum(1 for pid in team2_bowler_ids if safe_int(pid) in self.bowler_dists)
+
+        total_players = len(team1_batter_ids) + len(team1_bowler_ids) + len(team2_batter_ids) + len(team2_bowler_ids)
+        total_found = team1_bat_found + team1_bowl_found + team2_bat_found + team2_bowl_found
+
+        # Only log on the first call per (team1, team2) key to keep bulk-predict
+        # logs readable; the structured numbers are surfaced via the results dict.
         sim_key = (tuple(team1_batter_ids[:3]), tuple(team2_batter_ids[:3]))
         if not hasattr(self, '_last_sim_key') or self._last_sim_key != sim_key:
             self._last_sim_key = sim_key
-            
-            # Convert IDs to int for proper lookup
-            def safe_int(x):
-                try:
-                    return int(x)
-                except (ValueError, TypeError):
-                    return None
-            
-            team1_bat_found = sum(1 for pid in team1_batter_ids if safe_int(pid) in self.batter_dists)
-            team1_bowl_found = sum(1 for pid in team1_bowler_ids if safe_int(pid) in self.bowler_dists)
-            team2_bat_found = sum(1 for pid in team2_batter_ids if safe_int(pid) in self.batter_dists)
-            team2_bowl_found = sum(1 for pid in team2_bowler_ids if safe_int(pid) in self.bowler_dists)
-            
-            total_players = len(team1_batter_ids) + len(team1_bowler_ids) + len(team2_batter_ids) + len(team2_bowler_ids)
-            total_found = team1_bat_found + team1_bowl_found + team2_bat_found + team2_bowl_found
-            
             logger.info(f"[DIST] Simulator gender={self.gender}, format={self.format_type}")
             logger.info(f"[DIST] Team1: {team1_bat_found}/{len(team1_batter_ids)} batters, {team1_bowl_found}/{len(team1_bowler_ids)} bowlers have distributions")
             logger.info(f"[DIST] Team2: {team2_bat_found}/{len(team2_batter_ids)} batters, {team2_bowl_found}/{len(team2_bowler_ids)} bowlers have distributions")
             logger.info(f"[DIST] Overall: {total_found}/{total_players} players with ball-by-ball data ({100*total_found/total_players:.1f}%)")
-            
             if total_found < total_players * 0.5:
                 logger.warning(f"[DIST] LOW MATCH RATE! Less than 50% of players have distribution data.")
                 logger.warning(f"[DIST] Missing players will use default distributions (less accurate).")
+
+        dist_quality = {
+            "team1": {
+                "batters_found": team1_bat_found,
+                "batters_total": len(team1_batter_ids),
+                "bowlers_found": team1_bowl_found,
+                "bowlers_total": len(team1_bowler_ids),
+            },
+            "team2": {
+                "batters_found": team2_bat_found,
+                "batters_total": len(team2_batter_ids),
+                "bowlers_found": team2_bowl_found,
+                "bowlers_total": len(team2_bowler_ids),
+            },
+            "overall_found": total_found,
+            "overall_total": total_players,
+            "overall_pct": (total_found / total_players) if total_players else 0.0,
+        }
         
         # Pre-compute player distribution matrices
         team1_bat_dists = np.array([self.get_batter_dist(pid) for pid in team1_batter_ids])  # (11, 8)
@@ -628,6 +646,12 @@ class VectorizedNNSimulator:
             'team2_score_range': (np.percentile(team2_scores, 5), np.percentile(team2_scores, 95)),
             'team1_scores': team1_scores,
             'team2_scores': team2_scores,
+            # V4: per-fixture player-distribution match rates and the team ELOs
+            # that actually fed the NN (post franchise resolution). Surfaced on
+            # the Bulk Predict UI as a per-row data-quality + rating badge.
+            'dist_quality': dist_quality,
+            'team1_elo_used': float(team1_elo),
+            'team2_elo_used': float(team2_elo),
         }
         
         if toss_stats:

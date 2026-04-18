@@ -1272,6 +1272,38 @@
                         ? `<span style="color: var(--accent-warning); cursor: help;" title="${finalResult.data_warnings.join(' | ')}">&#9888;</span>`
                         : '';
                     
+                    // V4 diagnostics row: per-fixture player-distribution
+                    // match rate (data quality) + the team ELOs that actually
+                    // fed the simulator (post franchise resolution). Coloured
+                    // amber when distribution coverage drops below 85%.
+                    let diagRow = '';
+                    const dq = finalResult.dist_quality;
+                    const fi = finalResult.franchise_info;
+                    if (dq || fi) {
+                        const pct = dq ? Math.round((dq.overall_pct || 0) * 100) : null;
+                        const distColor = pct === null
+                            ? 'var(--text-muted)'
+                            : pct >= 85 ? 'var(--accent-success, var(--text-muted))' :
+                              pct >= 70 ? '#d4a017' : '#ef4444';
+                        const t1Elo = fi?.team1?.elo_used;
+                        const t2Elo = fi?.team2?.elo_used;
+                        const t1Merged = fi?.team1 && fi.team1.team_id && fi.team1.canonical_team_id && fi.team1.team_id !== fi.team1.canonical_team_id;
+                        const t2Merged = fi?.team2 && fi.team2.team_id && fi.team2.canonical_team_id && fi.team2.team_id !== fi.team2.canonical_team_id;
+                        const mergedHint = (t1Merged || t2Merged) ? ' &middot; <span title="Reading unified franchise rating">franchise unified</span>' : '';
+                        const distLabel = dq
+                            ? `<span style="color: ${distColor};" title="Players with ball-by-ball distributions: T1 ${dq.team1.batters_found+dq.team1.bowlers_found}/${dq.team1.batters_total+dq.team1.bowlers_total} &middot; T2 ${dq.team2.batters_found+dq.team2.bowlers_found}/${dq.team2.batters_total+dq.team2.bowlers_total}">data ${pct}%</span>`
+                            : '';
+                        const eloLabel = (t1Elo != null && t2Elo != null)
+                            ? `<span title="Team ELOs fed into the model after franchise resolution">ELO ${Math.round(t1Elo)} v ${Math.round(t2Elo)}</span>`
+                            : '';
+                        const sep = distLabel && eloLabel ? ' &middot; ' : '';
+                        diagRow = `
+                            <div style="font-size: 0.66rem; color: var(--text-muted); margin-top: 0.15rem; font-family: 'JetBrains Mono', monospace;">
+                                ${distLabel}${sep}${eloLabel}${mergedHint}
+                            </div>
+                        `;
+                    }
+
                     resultCell.innerHTML = `
                         <div style="min-width: 220px;">
                             <div style="display: flex; justify-content: space-between; align-items: baseline;">
@@ -1288,6 +1320,7 @@
                                 <span>${warningIcon} ${(finalResult.elapsed_ms / 1000).toFixed(1)}s</span>
                                 <span>Avg ${finalResult.avg_team2_score}</span>
                             </div>
+                            ${diagRow}
                             <div id="market-mini-${idx}" class="market-mini-card">
                                 <span class="market-badge market-badge-muted">Market</span>
                                 Loading Polymarket quote...

@@ -740,15 +740,35 @@ class EloCalculatorV3:
             
             # Update batting ELO with tier-adjusted K-factor
             if stats['batting_innings'] > 0 and stats['balls_faced'] > 0:
+                # Calibration fix (Wave 3): the previous mapping was
+                #   actual = min(1.0, runs / (balls * avg_sr/100) / 2.0)
+                # which compressed everything: a SR-130 batter (league
+                # average) sat at exactly 0.5 = no rating change vs peer
+                # expectation, while a SR-150 innings only scored 0.577
+                # (vs 0.5 expected -> +1.15 ELO at K=15). Anything below
+                # league-mean SR lost rating regardless of context. Result
+                # in the live DB: V Kohli 1483, MS Dhoni 1465, AD Russell
+                # 1320 - none of which is signal, all of it formula.
+                #
+                # New mapping is centred at 0.5 when runs == expected and
+                # scales linearly with runs above/below expectation,
+                # bounded at [0, 1]. A SR-150 innings of 30 balls now
+                # scores ~0.577 only when expected_runs is 39 - fine -
+                # but a 50 off 20 (SR 250) properly scores ~0.78 instead
+                # of being capped at 0.96 by the bounding term.
                 avg_sr = 130 if match_format == 'T20' else 85
                 expected_runs = stats['balls_faced'] * (avg_sr / 100)
                 opponent_adjustment = (stats['opponent_elo'] - self.initial_rating) / 400
                 expected_runs *= (1 - opponent_adjustment * 0.1)
-                
-                performance = stats['runs_scored'] / max(expected_runs, 1)
-                actual_score = min(1.0, performance / 2.0)
+
+                runs_above_expected = stats['runs_scored'] - expected_runs
+                # Scale by max(expected_runs, 10) so a single ball innings
+                # can't tilt the rating by an order of magnitude; the floor
+                # of 10 corresponds to ~7-8 balls of expectation.
+                actual_score = 0.5 + 0.5 * (runs_above_expected / max(expected_runs, 10.0))
+                actual_score = max(0.0, min(1.0, actual_score))
                 expected_score = self.expected_score(batting_elo, stats['opponent_elo'])
-                
+
                 new_batting_elo = self.calculate_new_rating(
                     batting_elo, expected_score, actual_score, adjusted_k_batting
                 )

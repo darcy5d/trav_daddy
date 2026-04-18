@@ -2338,6 +2338,25 @@ def simulate_match():
                 'note': 'Toss simulated independently for each of the {} matches'.format(n_simulations)
             }
         
+        # V4: surface canonical franchise + dist quality alongside the headline
+        # numbers so the Bulk Predict UI can render a small per-row badge.
+        from src.data.franchise_resolver import get_resolver
+        _r = get_resolver()
+        franchise_info = {
+            'team1': {
+                'team_id': team1_id,
+                'canonical_team_id': _r.canonical(team1_id),
+                'franchise_id': _r.franchise(team1_id),
+                'elo_used': results.get('team1_elo_used'),
+            },
+            'team2': {
+                'team_id': team2_id,
+                'canonical_team_id': _r.canonical(team2_id),
+                'franchise_id': _r.franchise(team2_id),
+                'elo_used': results.get('team2_elo_used'),
+            },
+        }
+
         # Format response
         response = {
             'success': True,
@@ -2355,7 +2374,9 @@ def simulate_match():
             'toss_info': toss_info,
             'gender': gender,
             'format': model_format,
-            'data_warnings': data_warnings if data_warnings else None
+            'data_warnings': data_warnings if data_warnings else None,
+            'dist_quality': results.get('dist_quality'),
+            'franchise_info': franchise_info,
         }
 
         # Generate detailed scorecard for NN simulator
@@ -2741,6 +2762,26 @@ def simulate_match_stream():
                     'note': f'Toss simulated for each of {n_simulations} matches'
                 }
             
+            # V4: dist quality (carry the LAST chunk's snapshot since it's
+            # constant across chunks for the same fixture) + canonical
+            # franchise so the bulk-predict UI can render a per-row badge.
+            from src.data.franchise_resolver import get_resolver
+            _r = get_resolver()
+            franchise_info = {
+                'team1': {
+                    'team_id': team1_id,
+                    'canonical_team_id': _r.canonical(team1_id),
+                    'franchise_id': _r.franchise(team1_id),
+                    'elo_used': chunk_results.get('team1_elo_used'),
+                },
+                'team2': {
+                    'team_id': team2_id,
+                    'canonical_team_id': _r.canonical(team2_id),
+                    'franchise_id': _r.franchise(team2_id),
+                    'elo_used': chunk_results.get('team2_elo_used'),
+                },
+            }
+
             # Build final result
             result = {
                 'type': 'result',
@@ -2758,7 +2799,9 @@ def simulate_match_stream():
                 'toss_info': toss_info,
                 'gender': gender,
                 'format': model_format,
-                'data_warnings': stream_data_warnings if stream_data_warnings else None
+                'data_warnings': stream_data_warnings if stream_data_warnings else None,
+                'dist_quality': chunk_results.get('dist_quality'),
+                'franchise_info': franchise_info,
             }
 
             # Generate scorecard for NN simulator
