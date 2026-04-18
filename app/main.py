@@ -1522,6 +1522,12 @@ def pad_with_db_fillers(batting_order, team_id, team_elo, gender, format_type):
     elo_col = f'batting_elo_{format_type.lower()}_{gender}'
     team_elo_col = f'elo_{format_type.lower()}_{gender}'
 
+    # V4 franchise unification: resolve to canonical_team_id so rebrand-legacy
+    # ids (e.g. 111 RCB Bangalore) read the unified franchise rating instead
+    # of missing the row and falling back to 1500.
+    from src.data.franchise_resolver import get_resolver
+    canonical_team_id = get_resolver().canonical(team_id) or team_id
+
     try:
         conn = get_connection()
         cursor = conn.cursor()
@@ -1531,7 +1537,7 @@ def pad_with_db_fillers(batting_order, team_id, team_elo, gender, format_type):
         # would select their historically *best* players rather than their average.
         cursor.execute(
             f"SELECT COALESCE({team_elo_col}, ?) FROM team_current_elo WHERE team_id = ?",
-            (team_elo, team_id)
+            (team_elo, canonical_team_id)
         )
         row = cursor.fetchone()
         resolved_elo = row[0] if row else team_elo

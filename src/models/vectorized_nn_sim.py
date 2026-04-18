@@ -258,14 +258,25 @@ class VectorizedNNSimulator:
             self.player_bowling_elo = {}
     
     def get_team_elo(self, team_id: Optional[int]) -> float:
-        """Get current team ELO (default 1500)."""
+        """Get current team ELO (default 1500).
+
+        Resolves to the franchise canonical_team_id first so a query for a
+        legacy rebrand id (e.g. 111 Royal Challengers Bangalore) returns the
+        unified franchise's rating instead of a default-1500 miss.
+        """
         if team_id is None:
             logger.warning("[ELO FALLBACK] team_id is None -- using default ELO 1500. "
                            "This team was not matched to the database.")
             return 1500.0
-        elo = self.team_current_elo.get(team_id, 1500.0)
-        if elo == 1500.0 and team_id not in self.team_current_elo:
-            logger.warning(f"[ELO FALLBACK] team_id={team_id} not found in ELO cache -- using default 1500.")
+
+        from src.data.franchise_resolver import get_resolver
+        canonical = get_resolver().canonical(team_id)
+        elo = self.team_current_elo.get(canonical, 1500.0)
+        if elo == 1500.0 and canonical not in self.team_current_elo:
+            extra = f" (via canonical={canonical})" if canonical != team_id else ""
+            logger.warning(
+                f"[ELO FALLBACK] team_id={team_id}{extra} not found in ELO cache -- using default 1500."
+            )
         return elo
     
     def get_player_batting_elo(self, player_id) -> float:
