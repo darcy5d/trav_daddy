@@ -69,6 +69,17 @@ def main() -> int:
     parser.add_argument("--n-sims", type=int, default=1000, help="Monte Carlo iterations per match (default: 1000)")
     parser.add_argument("--simulator", default="nn", choices=["nn"], help="Simulator backend (default: nn)")
     parser.add_argument(
+        "--model-version",
+        default="v1",
+        choices=["v1", "v2"],
+        help=(
+            "Which model architecture to use: v1 = legacy ball_prediction_model_*.keras "
+            "(per-format/gender histograms, 7-class softmax) or v2 = cricket_model_v2 "
+            "(joint multi-task with embeddings + per-over head, 9-class extras-aware, "
+            "with optional Platt calibration). Default v1 for backwards compatibility."
+        ),
+    )
+    parser.add_argument(
         "--no-toss",
         action="store_true",
         help="Disable toss simulation; team1 always bats first.",
@@ -114,9 +125,12 @@ def main() -> int:
     # Build the simulator once and reuse it across matches; the per-match
     # ELO override context manager keeps it stateless between invocations.
     if args.simulator == "nn":
-        from src.models.vectorized_nn_sim import VectorizedNNSimulator
-
-        simulator = VectorizedNNSimulator(gender=args.gender, format_type=args.format)
+        if args.model_version == "v1":
+            from src.models.vectorized_nn_sim import VectorizedNNSimulator
+            simulator = VectorizedNNSimulator(gender=args.gender, format_type=args.format)
+        else:  # v2
+            from src.models.vectorized_nn_sim_v2 import V2Simulator, V2SimulatorConfig
+            simulator = V2Simulator(V2SimulatorConfig(format_type=args.format, gender=args.gender))
     else:
         raise SystemExit(f"Unsupported simulator: {args.simulator}")
 

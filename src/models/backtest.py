@@ -299,6 +299,10 @@ def _historical_player_elos(
     return bat, bowl
 
 
+_V1_ELO_ATTRS = ("team_current_elo", "player_batting_elo", "player_bowling_elo")
+_V2_ELO_ATTRS = ("_team_current_elo", "_player_batting_elo", "_player_bowling_elo")
+
+
 @contextmanager
 def _override_simulator_elos(
     simulator,
@@ -309,16 +313,30 @@ def _override_simulator_elos(
 ):
     """Temporarily replace the simulator's in-memory ELO caches.
 
-    The VectorizedNNSimulator caches `team_current_elo`,
-    `player_batting_elo`, and `player_bowling_elo` in process at construction
-    time. For backtest we want as-of-date ratings instead. We swap in a
-    layered dict (overrides first, fall back to live) for the duration of one
-    match and restore on exit so the simulator stays usable across matches
-    and after the backtest finishes.
+    Polymorphic over v1 and v2 simulators:
+    - v1 (VectorizedNNSimulator) eagerly loads ELOs at construction into
+      public attributes (team_current_elo, player_batting_elo, player_bowling_elo).
+    - v2 (V2Simulator) lazily loads via _load_current_elos() into underscore-
+      prefixed attributes (_team_current_elo, _player_batting_elo,
+      _player_bowling_elo). This wrapper triggers the load if needed and then
+      swaps the same way.
+
+    Either way: layered dict (overrides first, fall back to live) for the
+    duration of one match, then restore on exit.
     """
-    orig_team = simulator.team_current_elo
-    orig_bat = simulator.player_batting_elo
-    orig_bowl = simulator.player_bowling_elo
+    # Detect which API surface the simulator exposes
+    if hasattr(simulator, "team_current_elo"):
+        attr_names = _V1_ELO_ATTRS
+    else:
+        # v2 - trigger lazy load and use the underscore attrs
+        if hasattr(simulator, "_load_current_elos"):
+            simulator._load_current_elos()
+        attr_names = _V2_ELO_ATTRS
+
+    team_attr, bat_attr, bowl_attr = attr_names
+    orig_team = getattr(simulator, team_attr) or {}
+    orig_bat = getattr(simulator, bat_attr) or {}
+    orig_bowl = getattr(simulator, bowl_attr) or {}
 
     layered_team = dict(orig_team)
     layered_team.update(team_overrides)
@@ -327,15 +345,15 @@ def _override_simulator_elos(
     layered_bowl = dict(orig_bowl)
     layered_bowl.update(player_bowling_overrides)
 
-    simulator.team_current_elo = layered_team
-    simulator.player_batting_elo = layered_bat
-    simulator.player_bowling_elo = layered_bowl
+    setattr(simulator, team_attr, layered_team)
+    setattr(simulator, bat_attr, layered_bat)
+    setattr(simulator, bowl_attr, layered_bowl)
     try:
         yield
     finally:
-        simulator.team_current_elo = orig_team
-        simulator.player_batting_elo = orig_bat
-        simulator.player_bowling_elo = orig_bowl
+        setattr(simulator, team_attr, orig_team)
+        setattr(simulator, bat_attr, orig_bat)
+        setattr(simulator, bowl_attr, orig_bowl)
 
 
 # ============================================================================
