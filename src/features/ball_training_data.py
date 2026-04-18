@@ -34,6 +34,7 @@ from config import DATABASE_PATH
 from src.data.database import get_connection
 from src.features.player_distributions import PlayerDistributionBuilder
 from src.features.venue_stats import VenueStatsBuilder
+from src.utils.format_constants import balls_for_format, phase_for_over
 
 logger = logging.getLogger(__name__)
 
@@ -165,18 +166,19 @@ def normalize_elo(elo: float) -> float:
     return (elo - 1500) / 200
 
 
-def get_innings_phase(over: int) -> Tuple[int, int, int]:
+def get_innings_phase(over: int, format_type: str = "T20") -> Tuple[int, int, int]:
     """
-    Get one-hot encoded phase.
-    
+    Get one-hot encoded phase, format-aware.
+
+    T20: PP 0-5, middle 6-14, death 15-19.
+    ODI: PP1 0-9, middle 10-39, death 40-49.
+
+    Default kept as T20 for backwards compatibility with any callers that
+    haven't passed `format_type` yet.
+
     Returns: (is_powerplay, is_middle, is_death)
     """
-    if over < 6:
-        return (1, 0, 0)  # Powerplay
-    elif over < 15:
-        return (0, 1, 0)  # Middle
-    else:
-        return (0, 0, 1)  # Death
+    return phase_for_over(format_type, over)
 
 
 def outcome_to_class(runs_batter: int, is_wicket: bool) -> int:
@@ -366,18 +368,20 @@ class BallTrainingDataGenerator:
             over = row['over_number']
             ball = row['ball_number']
             
-            # Calculate target/required rate for 2nd innings
+            # Calculate target/required rate for 2nd innings.
+            # Format-aware: T20 = 120 legal balls per innings, ODI = 300.
+            # Was hardcoded to 120 which silently mis-trained ODI rows.
             target = None
             required_rate = 0.0
             if row['innings_number'] == 2 and first_innings_score is not None:
                 target = first_innings_score + 1
-                balls_remaining = 120 - innings_balls
+                balls_remaining = balls_for_format(self.format_type) - innings_balls
                 if balls_remaining > 0:
                     runs_needed = target - innings_runs
                     required_rate = runs_needed * 6 / balls_remaining if runs_needed > 0 else 0
-            
-            # Phase features
-            is_powerplay, is_middle, is_death = get_innings_phase(over)
+
+            # Phase features (format-aware: T20 6/15, ODI 10/40)
+            is_powerplay, is_middle, is_death = get_innings_phase(over, self.format_type)
             
             # Get player distributions
             batter_dist = self.player_distributions.get_batter_vector(row['batter_id'])

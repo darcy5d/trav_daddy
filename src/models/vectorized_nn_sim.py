@@ -84,6 +84,7 @@ except Exception as e:
 # paths (e.g. model training in the web app) and cause Metal/XLA crashes.
 
 from src.features.venue_stats import VenueStatsBuilder
+from src.utils.format_constants import overs_for_format, phase_arrays, phase_for_over
 
 logger = logging.getLogger(__name__)
 
@@ -371,7 +372,7 @@ class VectorizedNNSimulator:
         team1_bowler_ids: List[int],
         team2_batter_ids: List[int],
         team2_bowler_ids: List[int],
-        max_overs: int = 20,
+        max_overs: Optional[int] = None,
         venue_id: Optional[int] = None,
         use_toss: bool = False,
         toss_field_prob: float = 0.65,
@@ -389,7 +390,8 @@ class VectorizedNNSimulator:
             team1_bowler_ids: List of 5 bowler player IDs for team 1
             team2_batter_ids: List of 11 batter player IDs for team 2
             team2_bowler_ids: List of 5 bowler player IDs for team 2
-            max_overs: Maximum overs per innings (20 for T20)
+            max_overs: Maximum overs per innings. Derived from self.format_type
+                when None (20 for T20, 50 for ODI).
             venue_id: Optional venue ID for venue-specific effects
             use_toss: If True, simulate toss for each match (50/50 winner, then choose bat/field)
             toss_field_prob: Probability winner chooses to field (default 0.65 for T20)
@@ -401,6 +403,11 @@ class VectorizedNNSimulator:
         Returns:
             Dict with simulation results
         """
+        # Derive overs from format when caller doesn't pin it. Previously
+        # defaulted to 20 unconditionally, which silently simulated ODI
+        # matches as T20s.
+        if max_overs is None:
+            max_overs = overs_for_format(self.format_type)
         max_balls = max_overs * 6
 
         # Compute distribution-match counts every call so we can return them in
@@ -710,10 +717,10 @@ class VectorizedNNSimulator:
             (batting_team_elo - bowling_team_elo) / 200
         ], dtype=np.float32)
         
-        # Pre-compute phase arrays (constant for each phase)
-        PHASE_POWERPLAY = np.array([1, 0, 0], dtype=np.float32)
-        PHASE_MIDDLE = np.array([0, 1, 0], dtype=np.float32)
-        PHASE_DEATH = np.array([0, 0, 1], dtype=np.float32)
+        # Format-aware phase arrays + over thresholds. T20: PP 0-5, mid 6-14,
+        # death 15-19. ODI: PP1 0-9, mid 10-39, death 40-49. Pre-computed so
+        # the hot loop's phase selection doesn't allocate per ball.
+        PHASE_POWERPLAY, PHASE_MIDDLE, PHASE_DEATH, MID_OVER_THRESHOLD, DEATH_OVER_THRESHOLD = phase_arrays(self.format_type)
         
         # Pre-compute tiled venue features (reused every ball)
         venue_tiled = np.tile(venue_features, (n_matches, 1))
@@ -762,15 +769,15 @@ class VectorizedNNSimulator:
                 break
             
             over = ball_idx // 6
-            
-            # Select phase (pre-computed arrays)
-            if over < 6:
+
+            # Select phase using format-aware thresholds (T20: 6/15, ODI: 10/40)
+            if over < MID_OVER_THRESHOLD:
                 phase = PHASE_POWERPLAY
-            elif over < 15:
+            elif over < DEATH_OVER_THRESHOLD:
                 phase = PHASE_MIDDLE
             else:
                 phase = PHASE_DEATH
-            
+
             # Calculate required rate (vectorized, in-place where possible)
             if target is not None:
                 balls_remaining = max_balls - balls
@@ -893,7 +900,7 @@ class VectorizedNNSimulator:
         team1_bowler_ids: List[int],
         team2_batter_ids: List[int],
         team2_bowler_ids: List[int],
-        max_overs: int = 20,
+        max_overs: Optional[int] = None,
         venue_id: Optional[int] = None,
         team1_bats_first: bool = True,
         team1_id: Optional[int] = None,
@@ -906,6 +913,8 @@ class VectorizedNNSimulator:
 
         Returns detailed per-player batting and bowling stats.
         """
+        if max_overs is None:
+            max_overs = overs_for_format(self.format_type)
         max_balls = max_overs * 6
         venue_features = self.get_venue_features(venue_id)
 
@@ -1168,13 +1177,10 @@ class VectorizedNNSimulator:
             else:
                 req_rate = 0
             
-            # Phase
-            if over < 6:
-                phase = np.array([1, 0, 0], dtype=np.float32)
-            elif over < 15:
-                phase = np.array([0, 1, 0], dtype=np.float32)
-            else:
-                phase = np.array([0, 0, 1], dtype=np.float32)
+            # Phase (format-aware: T20 uses 6/15, ODI uses 10/40)
+            phase = np.array(
+                phase_for_over(self.format_type, over), dtype=np.float32
+            )
             
             # Build features
             batter_dist = bat_dists[current_batter_idx]
@@ -1417,20 +1423,32 @@ _worker_simulators = {}
 def _run_simulation_chunk(args):
     """
     Worker function for parallel simulation.
-    
+
     Creates its own simulator instance (TensorFlow models can't be shared across processes).
     """
-    (n_matches, team1_batters, team1_bowlers, team2_batters, team2_bowlers, 
-     venue_id, use_toss, toss_field_prob, gender, worker_id) = args
-    
+    # Tuple shape: (n_matches, t1bat, t1bowl, t2bat, t2bowl, venue_id, use_toss,
+    #               toss_field_prob, gender, format_type, worker_id).
+    # format_type was added in Wave 4 Phase 0; legacy 10-tuple call sites
+    # default to T20 for backwards compatibility.
+    if len(args) == 10:
+        (n_matches, team1_batters, team1_bowlers, team2_batters, team2_bowlers,
+         venue_id, use_toss, toss_field_prob, gender, worker_id) = args
+        format_type = "T20"
+    else:
+        (n_matches, team1_batters, team1_bowlers, team2_batters, team2_bowlers,
+         venue_id, use_toss, toss_field_prob, gender, format_type, worker_id) = args
+
     global _worker_simulators
-    
-    # Create simulator for this worker if not exists
-    if gender not in _worker_simulators:
-        _worker_simulators[gender] = VectorizedNNSimulator(gender=gender)
-    
-    simulator = _worker_simulators[gender]
-    
+
+    # Cache one simulator per (gender, format) so ODI workers don't load the
+    # T20 model and silently produce 20-over results.
+    cache_key = (gender, (format_type or "T20").upper())
+    if cache_key not in _worker_simulators:
+        _worker_simulators[cache_key] = VectorizedNNSimulator(
+            gender=gender, format_type=cache_key[1]
+        )
+    simulator = _worker_simulators[cache_key]
+
     results = simulator.simulate_matches(
         n_matches,
         team1_batters,
@@ -1439,9 +1457,9 @@ def _run_simulation_chunk(args):
         team2_bowlers,
         venue_id=venue_id,
         use_toss=use_toss,
-        toss_field_prob=toss_field_prob
+        toss_field_prob=toss_field_prob,
     )
-    
+
     return {
         'team1_scores': results['team1_scores'].tolist(),
         'team2_scores': results['team2_scores'].tolist(),
@@ -1460,6 +1478,7 @@ def run_parallel_simulations(
     use_toss: bool = False,
     toss_field_prob: float = 0.65,
     gender: str = 'male',
+    format_type: str = 'T20',
     n_workers: Optional[int] = None,
     progress_callback = None
 ) -> Dict:
@@ -1501,6 +1520,7 @@ def run_parallel_simulations(
                 use_toss,
                 toss_field_prob,
                 gender,
+                format_type,
                 i  # worker_id
             ))
     
