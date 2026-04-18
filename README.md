@@ -94,8 +94,9 @@ python app/main.py
 python -m src.data.downloader
 python -m src.data.ingest
 
-# 4. Calculate ELO ratings (tiered system)
-python scripts/recalculate_tiered_elo.py  # One-time full recalculation
+# 4. Calculate ELO ratings (tiered system + V4 franchise unification)
+python scripts/backfill_franchises.py  # Idempotent; unifies known IPL franchise rebrands (RCB, Capitals, Punjab Kings, Pune Supergiant)
+python scripts/dedupe_elo_history.py    # Backup + full recalc + UNIQUE-index install (5+ minutes on a large DB)
 
 # 5. Train neural network (optional - or use GUI)
 python scripts/full_retrain.py  # Uses tiered ELO as features (34 features)
@@ -104,7 +105,7 @@ python scripts/full_retrain.py  # Uses tiered ELO as features (34 features)
 python app/main.py
 ```
 
-Visit `http://localhost:5001` in your browser.
+Visit `http://localhost:5001` in your browser. The Team Explorer tab (`/team-explorer`) lets you stage and apply additional franchise/duplicate merges; after applying any merges, re-run `python scripts/dedupe_elo_history.py --skip-backup` so ratings recompute under the new groupings.
 
 ### Environment Variables
 

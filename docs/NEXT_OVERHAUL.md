@@ -46,6 +46,59 @@ A running notepad of bugs, inefficiencies, and improvement ideas to address in t
 - 8. Polymarket integration (read-path only: model prob vs market implied)
 - 9. Betfair integration (read-path only: best-odds comparison foundations) — **parked for now; Polymarket-first execution**
 
+### In Wave 3 — Team Franchise Unification + ELO Data Repair (current implementation scope)
+
+Diagnosis (this wave's "why"): Monte Carlo win probabilities for IPL fixtures were diverging hard from the live ladder. Two compounding root causes were found:
+
+1. **Duplicate ELO history rows.** `team_elo_history` had ~32,260 `(team, match)` keys with multiple inserts and ~527K extra rows; the player history was even worse (~344K duplicate keys). Re-running the recalc kept re-applying the K-factor on the same loss. KKR's 2025-05-25 SRH loss was applied 13 times in a row, dragging KKR to the tier-3 floor of 1350. Mumbai Indians sat at 1351.7 from the same pattern on 2025-06-01. Punjab Kings (old `Kings XI Punjab` row) and several others were similarly pinned.
+2. **Franchise rebrand orphans.** Both `Royal Challengers Bangalore` (id 111, 165 matches, ELO 1367) and `Royal Challengers Bengaluru` (id 283, 51 matches, ELO 1631) lived in `teams`. Same for Daredevils (364) / Capitals (115), Kings XI (117) / Punjab Kings (196), and Pune Supergiant(s). Each rebrand's modern id only saw the post-rename slice; the model had no memory of the franchise's full history.
+
+A third structural axis surfaced and got fixed in the same wave:
+
+3. **Player batting ELO formula bias.** `calculator_v3.update_player_ratings_for_match` used `actual = min(1.0, runs / (balls * avg_sr/100) / 2.0)`, which compressed everything: a SR-130 batter (league mean) sat at exactly 0.5 = no rating change vs peer expectation, and anything below 130 SR lost rating regardless of context. Result in the live DB pre-fix: V Kohli 1483, MS Dhoni 1465, AD Russell 1320 — none of which is signal.
+
+**Done (Sprint 0 — schema + backfill):**
+- Schema V4 (`src/data/schema_v4_franchise.sql`) adds `team_groups`, `team_external_ids`, `team_merge_proposals`, plus `teams.franchise_id` and `teams.canonical_team_id` columns. Idempotent migration via `init_franchise_tables()` runs on app startup.
+- `scripts/backfill_franchises.py` self-groups every existing team 1:1, then explicitly unifies the known IPL franchise rebrands: Bangalore+Bengaluru → 283, Daredevils+Capitals → 115, Kings XI+Punjab Kings → 196, Pune Supergiant(s) → 362. Soft flag for SRH ↔ Deccan Chargers if Deccan rows are added later. Idempotent + dry-run mode.
+- `team_external_ids` is the schema scaffold paired with item 17 (Cricsheet Register) on the player side. Sources enumerated: cricinfo, crex, cricsheet, espn, bcci, polymarket, betfair, opta, pulse. Population at scale is a Wave 4 item.
+
+**Done (Sprint 1 — calculator + recalc):**
+- `EloCalculatorV3` is now franchise-aware: every read/write of team ratings resolves to the canonical_team_id first, while the match row itself stays labelled with the original team1_id/team2_id (preserves "this was a Daredevils match" historical fidelity).
+- `team_elo_history` writes use `INSERT OR IGNORE` and a partial UNIQUE INDEX is installed by the dedupe script after the recalc, making the duplicate-row cascade structurally impossible going forward.
+- `force_recalculate=True` actually wipes non-snapshot history and resets `team_current_elo` / `player_current_elo` before iterating; previously the flag was ignored.
+- `scripts/dedupe_elo_history.py` orchestrates: timestamped DB backup → full recalc → UNIQUE-index install → before/after validation report covering IPL teams + spotlight players. **Phase C result: 32,260 + 343,975 duplicates → 0/0; KKR 1350 → 1427 (+77); MI 1351 → 1437 (+85); PBKS unified 1350/1408 → 1487; AD Russell batting 1320 → 1461 (+141); V Kohli batting 1483 → 1531 (+48).**
+
+**Done (Sprint 2 — runtime resolver):**
+- `src/data/franchise_resolver.py` is a process-wide singleton mapping any `teams.team_id` to its `canonical_team_id` (and `franchise_id`). Identity-mapped for unknown ids; degrades gracefully on a pre-V4 schema.
+- `VectorizedNNSimulator.get_team_elo` resolves to canonical before lookup so a query for legacy id 111 returns the unified RCB rating instead of missing the row and falling back to 1500.
+- `app.main.pad_order_with_team_extras` likewise resolves before reading `team_current_elo`.
+
+**Done (Sprint 3 — Team Explorer tab + workflow):**
+- New `/team-explorer` page modelled on the Data Explorer (Country → group_type → franchise → members hierarchy), surfacing franchise groupings, fuzzy duplicate candidates (rapidfuzz `ratio` AND `token_set_ratio` both must clear the threshold, plus same-country and length-similarity gates so we no longer surface noise like "Australia" vs "South Australia"), and a pending → approved → applied proposals queue.
+- API endpoints under `/api/team-explorer/`: `franchises`, `duplicates`, `proposals` (GET/POST), `proposals/<id>/decision`, `proposals/apply`. Apply takes a timestamped DB backup, rewrites `teams.franchise_id` + `canonical_team_id` in a single transaction, removes orphan groups, invalidates the `FranchiseResolver` cache, and returns the manual `dedupe_elo_history.py --skip-backup` follow-up command rather than blocking the request on a 5+ min recalc.
+- End-to-end smoke test: `Dhaka Capital` (team 309, BPL 2024-25) + `Dhaka Capitals` (team 359, BPL 2025-26) round-tripped pending → approved → applied successfully and the resolver picked up the new mapping immediately.
+
+**Done (Sprint 4 — diagnostics + player batting fix):**
+- `VectorizedNNSimulator` now returns `dist_quality` (per-team batters/bowlers with ball-by-ball distributions) and `team1_elo_used`/`team2_elo_used` (the actual ELO post franchise resolution) on every call.
+- Bulk Predict UI renders a small per-row badge under the win bars: data-coverage % (amber below 85%, red below 70%), team ELOs that fed the model, and a "franchise unified" hint when the displayed team resolves to a different canonical id.
+- Player batting ELO formula fix landed and recalc'd. Every spotlight IPL batter went up: V Kohli 1531 → 1557 (+25), MS Dhoni 1490 → 1512 (+22), AD Russell 1461 → 1494 (+33), PD Salt 1568 → 1621 (+53), GJ Maxwell 1549 → 1599 (+50), CV Varun 1392 → 1467 (+75). Team ELOs unchanged (team formula was untouched). 0 duplicates.
+
+**Operator runbook (one-shot, in order):**
+1. `python scripts/backfill_franchises.py --dry-run` to preview, then without `--dry-run` to apply.
+2. `python scripts/dedupe_elo_history.py` (takes a timestamped backup, runs the full recalc end-to-end, installs the UNIQUE indexes).
+3. After any future Team Explorer "apply" action, re-run `python scripts/dedupe_elo_history.py --skip-backup` to recompute under the new groupings.
+
+### Wave 4 — ELO modelling overhaul (parking lot)
+
+These came out of the Wave 3 diagnosis but were intentionally deferred so each can be measured cleanly against the Wave 3 baseline. **Prerequisite: item 16 (match-level backtest harness)** — every Wave 4 item needs a calibration target and a way to measure log-loss change against held-out historical matches. Without that harness we can't tell which intervention drove which improvement.
+
+- **Margin-of-victory term in team ELO.** Replace the binary `actual ∈ {0, 0.5, 1}` in `update_team_ratings` (`src/elo/calculator_v3.py`) with a continuous score that scales with margin (NRR-equivalent or capped log function). A 100-run win should move more rating than a Super Over.
+- **Venue / home advantage.** Add a `venue_home_advantage` table learned from historical home/away splits, and inject as an additive term into `expected_score` for the home side. Particularly relevant for Chinnaswamy / Eden / Chepauk.
+- **Recency decay / half-life.** Either an exponential decay on contribution to `elo_change`, or a rolling-window companion "form ELO" that the simulator blends with the long-term rating. Today's K-factor is fixed and ELO is "all matches equal" — bad for capturing in-season form swings.
+- **Team-specific scoring dispersion in the simulator.** Extend `src/models/vectorized_nn_sim.py` so per-team variance / collapse hazard is learned, not flattened by the global Dirichlet alpha. Captures the boom/bust profile of teams like KKR.
+- **`FIRST_INNINGS_SCORE_BONUS` calibration.** Not a code change — a calibration exercise. Constant currently sits at 1.05 in `src/models/vectorized_nn_sim.py` to correct for an observed chase advantage. Once item 16 lands, run a backtest comparing first-innings vs chasing win rates against historical and tune the constant.
+- **Populate `team_external_ids` for Cricinfo/CREX/Cricsheet at scale.** Schema landed in Wave 3 (Phase A). Ingestion is data-pipeline work that pairs naturally with item 17 (Cricsheet Register) on the player side — both should be done together so the Team Explorer's external-id chips become real cross-source links rather than placeholders.
+
 ### Wave 2 Progress Snapshot
 - **Done (Sprint 0):** Credentials/config readiness scaffold added for market integrations (`config.py` + `.env.example`) with explicit read-path defaults.
 - **Done (Sprint 0):** Added integration credential status endpoint (`/api/integrations/credentials-status`) returning masked previews + missing-field diagnostics.
