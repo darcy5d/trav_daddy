@@ -241,6 +241,12 @@ def data_explorer_page():
     return render_template('data_explorer.html')
 
 
+@app.route('/team-explorer')
+def team_explorer_page():
+    """Team / franchise explorer page (V4 franchise unification UI)."""
+    return render_template('team_explorer.html')
+
+
 # ============================================================================
 # API Routes
 # ============================================================================
@@ -441,6 +447,517 @@ def data_explorer_venues():
     except Exception as e:
         logger.error(f"Error building venue explorer payload: {e}")
         return jsonify({"success": False, "error": str(e)}), 500
+
+
+# ============================================================================
+# Team Explorer (V4 franchise unification)
+# ============================================================================
+#
+# Backs the Team Explorer tab. Surfaces franchise groupings, fuzzy duplicate
+# candidates across teams, and a staged pending -> approved -> applied
+# workflow for merging multiple teams.team_id rows under one franchise.
+#
+# Apply takes a timestamped DB backup, rewrites teams.franchise_id and
+# teams.canonical_team_id in a single transaction, and invalidates the
+# in-process FranchiseResolver cache. The actual ELO recalc that picks up
+# the new groupings is intentionally manual (run scripts/dedupe_elo_history.py)
+# because it can take 5+ minutes and shouldn't tie up an HTTP request.
+
+def _team_explorer_franchise_rows() -> List[Dict[str, Any]]:
+    """List every team_groups row with its members + headline ELO."""
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT
+            g.group_id,
+            g.canonical_name,
+            g.group_type,
+            g.country_code,
+            g.notes,
+            t.team_id,
+            t.name AS team_name,
+            t.team_type,
+            t.tier,
+            t.canonical_team_id,
+            ce.elo_t20_male,
+            ce.elo_t20_female,
+            (
+                SELECT COUNT(*) FROM matches m
+                WHERE m.team1_id = t.team_id OR m.team2_id = t.team_id
+            ) AS match_count
+        FROM team_groups g
+        LEFT JOIN teams t ON t.franchise_id = g.group_id
+        LEFT JOIN team_current_elo ce ON ce.team_id = t.team_id
+        ORDER BY g.canonical_name, t.name
+        """
+    )
+
+    grouped: Dict[int, Dict[str, Any]] = {}
+    for row in cur.fetchall():
+        gid = row["group_id"]
+        if gid not in grouped:
+            grouped[gid] = {
+                "group_id": gid,
+                "canonical_name": row["canonical_name"],
+                "group_type": row["group_type"],
+                "country_code": row["country_code"],
+                "notes": row["notes"],
+                "members": [],
+                "member_count": 0,
+                "total_matches": 0,
+                "canonical_elo_t20_male": None,
+                "canonical_elo_t20_female": None,
+            }
+        if row["team_id"] is None:
+            continue
+        is_canonical = row["team_id"] == row["canonical_team_id"]
+        grouped[gid]["members"].append(
+            {
+                "team_id": row["team_id"],
+                "name": row["team_name"],
+                "team_type": row["team_type"],
+                "tier": row["tier"],
+                "is_canonical": is_canonical,
+                "match_count": row["match_count"] or 0,
+                "elo_t20_male": row["elo_t20_male"],
+                "elo_t20_female": row["elo_t20_female"],
+            }
+        )
+        grouped[gid]["member_count"] += 1
+        grouped[gid]["total_matches"] += row["match_count"] or 0
+        if is_canonical:
+            grouped[gid]["canonical_elo_t20_male"] = row["elo_t20_male"]
+            grouped[gid]["canonical_elo_t20_female"] = row["elo_t20_female"]
+
+    conn.close()
+    return list(grouped.values())
+
+
+def _team_explorer_duplicate_candidates(
+    similarity_threshold: float = 0.82,
+    limit: int = 200,
+) -> List[Dict[str, Any]]:
+    """Heuristic candidate pairs for merging.
+
+    Heuristics (all low-cost):
+      - Token-set ratio across canonical_name pairs that live in different
+        team_groups (so we never propose a no-op merge).
+      - Same country_code (or both NULL) so we don't propose
+        "Royal Challengers Bengaluru" merged with "Trinidad Royals".
+      - Excludes pairs whose ids are already in the same group via members.
+    """
+    try:
+        from rapidfuzz import fuzz
+    except ImportError:
+        logger.warning("rapidfuzz not installed; duplicate finder disabled")
+        return []
+
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT g.group_id, g.canonical_name, g.group_type, g.country_code,
+               COUNT(t.team_id) AS member_count,
+               (
+                   SELECT COUNT(*) FROM matches m
+                   JOIN teams tt ON tt.team_id IN (m.team1_id, m.team2_id)
+                   WHERE tt.franchise_id = g.group_id
+               ) AS match_count
+        FROM team_groups g
+        LEFT JOIN teams t ON t.franchise_id = g.group_id
+        GROUP BY g.group_id
+        ORDER BY g.canonical_name
+        """
+    )
+    groups = [dict(r) for r in cur.fetchall()]
+    conn.close()
+
+    candidates: List[Dict[str, Any]] = []
+    for i, a in enumerate(groups):
+        for b in groups[i + 1 :]:
+            if a["group_id"] == b["group_id"]:
+                continue
+            # Same-country gate (treat both-NULL as a permissible pair)
+            if a["country_code"] and b["country_code"] and a["country_code"] != b["country_code"]:
+                continue
+            # Length sanity: don't propose pairs where one is dramatically
+            # longer than the other (filters out "Australia" vs "South Australia"
+            # collisions that token_set_ratio happily scores 1.0).
+            la, lb = len(a["canonical_name"]), len(b["canonical_name"])
+            if max(la, lb) > 0 and min(la, lb) / max(la, lb) < 0.6:
+                continue
+            ratio = fuzz.ratio(a["canonical_name"], b["canonical_name"]) / 100.0
+            token = fuzz.token_set_ratio(a["canonical_name"], b["canonical_name"]) / 100.0
+            # Both signals must clear the bar. ratio handles typos and rebrand
+            # spellings ("Bengaluru" vs "Bangalore"); token catches reorderings.
+            if ratio < similarity_threshold or token < similarity_threshold:
+                continue
+            score = (ratio + token) / 2.0
+            candidates.append(
+                {
+                    "group_a": {
+                        "group_id": a["group_id"],
+                        "name": a["canonical_name"],
+                        "country_code": a["country_code"],
+                        "member_count": a["member_count"],
+                        "match_count": a["match_count"],
+                    },
+                    "group_b": {
+                        "group_id": b["group_id"],
+                        "name": b["canonical_name"],
+                        "country_code": b["country_code"],
+                        "member_count": b["member_count"],
+                        "match_count": b["match_count"],
+                    },
+                    "similarity": round(score, 3),
+                    "ratio": round(ratio, 3),
+                    "token_set": round(token, 3),
+                }
+            )
+
+    candidates.sort(key=lambda c: -c["similarity"])
+    return candidates[:limit]
+
+
+@app.route('/api/team-explorer/franchises', methods=['GET'])
+def team_explorer_franchises():
+    """Return all franchise groupings + members + headline ELO."""
+    try:
+        franchises = _team_explorer_franchise_rows()
+        type_counts: Dict[str, int] = {}
+        for g in franchises:
+            type_counts[g["group_type"]] = type_counts.get(g["group_type"], 0) + 1
+        return jsonify(
+            {
+                "success": True,
+                "summary": {
+                    "total_franchises": len(franchises),
+                    "by_group_type": type_counts,
+                    "multi_member": sum(1 for g in franchises if g["member_count"] > 1),
+                },
+                "franchises": franchises,
+            }
+        )
+    except Exception as e:
+        logger.error(f"Error building franchise list: {e}")
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
+@app.route('/api/team-explorer/duplicates', methods=['GET'])
+def team_explorer_duplicates():
+    """Heuristic merge candidate pairs."""
+    try:
+        threshold = float(request.args.get('similarity', 0.82))
+        threshold = max(0.5, min(0.99, threshold))
+        limit = int(request.args.get('limit', 200))
+        candidates = _team_explorer_duplicate_candidates(
+            similarity_threshold=threshold, limit=limit
+        )
+        return jsonify(
+            {
+                "success": True,
+                "similarity_threshold": threshold,
+                "count": len(candidates),
+                "candidates": candidates,
+            }
+        )
+    except Exception as e:
+        logger.error(f"Error building duplicate candidates: {e}")
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
+@app.route('/api/team-explorer/proposals', methods=['GET'])
+def team_explorer_list_proposals():
+    """List merge proposals, optionally filtered by status."""
+    try:
+        status = request.args.get('status')
+        conn = get_connection()
+        cur = conn.cursor()
+        if status:
+            cur.execute(
+                """
+                SELECT p.*, st.name AS source_team_name, tg.canonical_name AS target_group_name,
+                       tt.name AS target_canonical_team_name
+                FROM team_merge_proposals p
+                JOIN teams st ON st.team_id = p.source_team_id
+                JOIN team_groups tg ON tg.group_id = p.target_group_id
+                LEFT JOIN teams tt ON tt.team_id = p.target_canonical_team_id
+                WHERE p.status = ?
+                ORDER BY p.created_at DESC
+                """,
+                (status,),
+            )
+        else:
+            cur.execute(
+                """
+                SELECT p.*, st.name AS source_team_name, tg.canonical_name AS target_group_name,
+                       tt.name AS target_canonical_team_name
+                FROM team_merge_proposals p
+                JOIN teams st ON st.team_id = p.source_team_id
+                JOIN team_groups tg ON tg.group_id = p.target_group_id
+                LEFT JOIN teams tt ON tt.team_id = p.target_canonical_team_id
+                ORDER BY p.created_at DESC
+                LIMIT 200
+                """
+            )
+        proposals = [dict(r) for r in cur.fetchall()]
+        conn.close()
+        return jsonify({"success": True, "count": len(proposals), "proposals": proposals})
+    except Exception as e:
+        logger.error(f"Error listing merge proposals: {e}")
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
+@app.route('/api/team-explorer/proposals', methods=['POST'])
+def team_explorer_create_proposal():
+    """Stage a new merge proposal.
+
+    Body JSON: {
+        source_team_id: int,
+        target_group_id: int,
+        target_canonical_team_id: int (optional - defaults to current canonical),
+        rationale: str,
+        fuzzy_score: float (optional)
+    }
+    """
+    try:
+        data = request.get_json() or {}
+        source_team_id = data.get('source_team_id')
+        target_group_id = data.get('target_group_id')
+        if not source_team_id or not target_group_id:
+            return jsonify(
+                {"success": False, "error": "source_team_id and target_group_id required"}
+            ), 400
+
+        conn = get_connection()
+        cur = conn.cursor()
+
+        # Validate both ends exist.
+        cur.execute("SELECT team_id, franchise_id FROM teams WHERE team_id = ?", (source_team_id,))
+        src = cur.fetchone()
+        if not src:
+            conn.close()
+            return jsonify({"success": False, "error": f"Unknown source_team_id={source_team_id}"}), 400
+
+        cur.execute("SELECT group_id, canonical_name FROM team_groups WHERE group_id = ?", (target_group_id,))
+        tgt = cur.fetchone()
+        if not tgt:
+            conn.close()
+            return jsonify({"success": False, "error": f"Unknown target_group_id={target_group_id}"}), 400
+
+        # No-op merges should not be staged.
+        if src["franchise_id"] == target_group_id:
+            conn.close()
+            return jsonify(
+                {
+                    "success": False,
+                    "error": (
+                        f"team_id={source_team_id} is already in group {target_group_id} "
+                        f"({tgt['canonical_name']}); nothing to merge"
+                    ),
+                }
+            ), 400
+
+        # Default target_canonical_team_id to whichever team_id currently owns
+        # the target group's rating series.
+        target_canonical = data.get('target_canonical_team_id')
+        if not target_canonical:
+            cur.execute(
+                """
+                SELECT canonical_team_id FROM teams
+                WHERE franchise_id = ? AND canonical_team_id = team_id
+                LIMIT 1
+                """,
+                (target_group_id,),
+            )
+            row = cur.fetchone()
+            target_canonical = row['canonical_team_id'] if row else None
+
+        cur.execute(
+            """
+            INSERT INTO team_merge_proposals (
+                source_team_id, target_group_id, target_canonical_team_id,
+                status, proposer, rationale, fuzzy_score
+            ) VALUES (?, ?, ?, 'pending', ?, ?, ?)
+            """,
+            (
+                source_team_id,
+                target_group_id,
+                target_canonical,
+                data.get('proposer') or 'team-explorer-ui',
+                data.get('rationale') or '',
+                data.get('fuzzy_score'),
+            ),
+        )
+        proposal_id = cur.lastrowid
+        conn.commit()
+        conn.close()
+
+        return jsonify({"success": True, "proposal_id": proposal_id})
+    except Exception as e:
+        logger.error(f"Error creating merge proposal: {e}")
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
+@app.route('/api/team-explorer/proposals/<int:proposal_id>/decision', methods=['POST'])
+def team_explorer_decide_proposal(proposal_id: int):
+    """Approve or reject a pending proposal. Body: {decision: 'approve'|'reject'}."""
+    try:
+        data = request.get_json() or {}
+        decision = (data.get('decision') or '').lower()
+        if decision not in ('approve', 'reject'):
+            return jsonify({"success": False, "error": "decision must be 'approve' or 'reject'"}), 400
+
+        new_status = 'approved' if decision == 'approve' else 'rejected'
+        conn = get_connection()
+        cur = conn.cursor()
+        cur.execute(
+            """
+            UPDATE team_merge_proposals
+            SET status = ?, decided_at = CURRENT_TIMESTAMP, decided_by = ?
+            WHERE proposal_id = ? AND status = 'pending'
+            """,
+            (new_status, data.get('decided_by') or 'team-explorer-ui', proposal_id),
+        )
+        if cur.rowcount == 0:
+            conn.close()
+            return jsonify(
+                {"success": False, "error": "Proposal not found or not pending"}
+            ), 404
+        conn.commit()
+        conn.close()
+        return jsonify({"success": True, "proposal_id": proposal_id, "status": new_status})
+    except Exception as e:
+        logger.error(f"Error deciding proposal {proposal_id}: {e}")
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
+@app.route('/api/team-explorer/proposals/apply', methods=['POST'])
+def team_explorer_apply_proposals():
+    """Apply all approved proposals in a single transaction.
+
+    Steps:
+      1. Take a timestamped DB backup so the operator can roll back.
+      2. For each approved proposal: rewrite the source team's franchise_id +
+         canonical_team_id; if the target group's other members still point at
+         a stale canonical, fix them too.
+      3. Mark the proposals as 'applied'.
+      4. Invalidate the FranchiseResolver cache.
+
+    The user must run scripts/dedupe_elo_history.py separately to recompute
+    ratings under the new groupings (it's a 5+ minute job).
+    """
+    try:
+        import shutil
+
+        conn = get_connection()
+        cur = conn.cursor()
+        cur.execute(
+            """
+            SELECT proposal_id, source_team_id, target_group_id, target_canonical_team_id
+            FROM team_merge_proposals
+            WHERE status = 'approved'
+            ORDER BY created_at
+            """
+        )
+        approved = [dict(r) for r in cur.fetchall()]
+        if not approved:
+            conn.close()
+            return jsonify({"success": True, "applied": 0, "message": "No approved proposals to apply"})
+
+        # Backup before writes. The DB is large; the copy can take a minute.
+        ts = datetime.now().strftime('%Y%m%d_%H%M%S')
+        backup_path = Path(str(DATABASE_PATH)).with_suffix(f'.db.bak.{ts}')
+        logger.info(f"Backing up DB to {backup_path} before applying merges")
+        shutil.copy2(str(DATABASE_PATH), str(backup_path))
+        for suffix in ('-wal', '-shm'):
+            sidecar = Path(str(DATABASE_PATH) + suffix)
+            if sidecar.exists():
+                shutil.copy2(str(sidecar), str(backup_path) + suffix)
+
+        try:
+            cur.execute("BEGIN")
+            applied_ids = []
+            for p in approved:
+                source = p['source_team_id']
+                group = p['target_group_id']
+                canonical = p['target_canonical_team_id']
+
+                # Re-point the source team into the target group.
+                cur.execute(
+                    """
+                    UPDATE teams
+                    SET franchise_id = ?, canonical_team_id = ?
+                    WHERE team_id = ?
+                    """,
+                    (group, canonical or source, source),
+                )
+                # If a canonical was specified, force every member of the group
+                # to point at it (handles the case where the group previously
+                # had a different canonical owner).
+                if canonical:
+                    cur.execute(
+                        """
+                        UPDATE teams
+                        SET canonical_team_id = ?
+                        WHERE franchise_id = ?
+                        """,
+                        (canonical, group),
+                    )
+
+                cur.execute(
+                    """
+                    UPDATE team_merge_proposals
+                    SET status = 'applied', applied_at = CURRENT_TIMESTAMP
+                    WHERE proposal_id = ?
+                    """,
+                    (p['proposal_id'],),
+                )
+                applied_ids.append(p['proposal_id'])
+
+            # Clean up orphan team_groups rows (the auto-created self-group
+            # that the moved team used to belong to is now empty).
+            cur.execute(
+                """
+                DELETE FROM team_groups
+                WHERE group_id NOT IN (SELECT franchise_id FROM teams WHERE franchise_id IS NOT NULL)
+                  AND group_id NOT IN (SELECT group_id FROM team_external_ids WHERE group_id IS NOT NULL)
+                  AND group_id NOT IN (SELECT target_group_id FROM team_merge_proposals)
+                """
+            )
+            orphans_removed = cur.rowcount
+
+            cur.execute("COMMIT")
+        except Exception as inner:
+            cur.execute("ROLLBACK")
+            conn.close()
+            logger.error(f"Apply rolled back: {inner}")
+            return jsonify({"success": False, "error": f"Apply rolled back: {inner}"}), 500
+        conn.close()
+
+        # Invalidate runtime caches so the next predict request sees the new
+        # mapping. ELO recalc is intentionally manual (multi-minute job).
+        from src.data.franchise_resolver import get_resolver
+        get_resolver().invalidate()
+
+        return jsonify(
+            {
+                "success": True,
+                "applied": len(applied_ids),
+                "applied_proposal_ids": applied_ids,
+                "orphan_groups_removed": orphans_removed,
+                "backup_path": str(backup_path),
+                "next_step": (
+                    "Run `python scripts/dedupe_elo_history.py --skip-backup` to "
+                    "recompute team ELOs under the new franchise groupings."
+                ),
+            }
+        )
+    except Exception as e:
+        logger.error(f"Error applying proposals: {e}")
+        return jsonify({"success": False, "error": str(e)}), 500
+
 
 @app.route('/api/teams', methods=['GET'])
 def get_teams():

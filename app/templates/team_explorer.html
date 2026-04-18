@@ -1,0 +1,480 @@
+{% extends "base.html" %}
+
+{% block title %}Team Explorer - Cricket Predictor{% endblock %}
+
+{% block content %}
+<style>
+    .explorer-controls {
+        display: grid;
+        grid-template-columns: repeat(4, minmax(0, 1fr));
+        gap: 1rem;
+        align-items: end;
+    }
+    .summary-grid {
+        display: grid;
+        grid-template-columns: repeat(4, minmax(0, 1fr));
+        gap: 1rem;
+    }
+    .summary-stat {
+        background: var(--bg-tertiary);
+        border: 1px solid var(--border-color);
+        border-radius: 10px;
+        padding: 0.9rem;
+    }
+    .summary-stat .value {
+        font-size: 1.5rem;
+        font-family: 'JetBrains Mono', monospace;
+        color: var(--accent-primary);
+        font-weight: 700;
+    }
+    .summary-stat .label {
+        font-size: 0.8rem;
+        color: var(--text-secondary);
+        margin-top: 0.35rem;
+    }
+    .panel-title-row {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        margin-bottom: 0.75rem;
+    }
+    .muted {
+        color: var(--text-secondary);
+        font-size: 0.85rem;
+    }
+    .scroll-panel {
+        max-height: 460px;
+        overflow: auto;
+        border: 1px solid var(--border-color);
+        border-radius: 10px;
+    }
+    .country-block {
+        border-bottom: 1px solid var(--border-color);
+        padding: 0.75rem;
+    }
+    .country-header {
+        font-weight: 600;
+        margin-bottom: 0.4rem;
+    }
+    .group-type-row {
+        margin-left: 0.5rem;
+        font-size: 0.85rem;
+        color: var(--text-secondary);
+        margin-top: 0.3rem;
+    }
+    .franchise-row {
+        margin-left: 1rem;
+        padding: 0.35rem 0;
+        border-bottom: 1px dashed var(--border-color);
+    }
+    .franchise-row:last-child { border-bottom: none; }
+    .franchise-name {
+        font-weight: 600;
+    }
+    .member-list {
+        margin-left: 1.25rem;
+        font-size: 0.82rem;
+        color: var(--text-secondary);
+    }
+    .member-list .canonical-tag {
+        background: var(--accent-primary);
+        color: var(--bg-primary);
+        padding: 0 0.4rem;
+        border-radius: 4px;
+        font-size: 0.7rem;
+        margin-left: 0.4rem;
+        font-weight: 600;
+        font-family: 'JetBrains Mono', monospace;
+    }
+    .badge {
+        display: inline-block;
+        padding: 0 0.4rem;
+        font-size: 0.72rem;
+        border-radius: 4px;
+        background: var(--bg-secondary);
+        border: 1px solid var(--border-color);
+        color: var(--text-secondary);
+        font-family: 'JetBrains Mono', monospace;
+        margin-right: 0.25rem;
+    }
+    .btn-mini {
+        padding: 0.18rem 0.55rem;
+        font-size: 0.78rem;
+    }
+    .status-pill {
+        display: inline-block;
+        padding: 0.05rem 0.45rem;
+        border-radius: 4px;
+        font-size: 0.72rem;
+        font-family: 'JetBrains Mono', monospace;
+        text-transform: uppercase;
+    }
+    .status-pending  { background: #4a3a00; color: #ffd166; }
+    .status-approved { background: #003a4a; color: #66d6ff; }
+    .status-applied  { background: #003a1a; color: #66ff9c; }
+    .status-rejected { background: #3a0000; color: #ff6666; }
+    @media (max-width: 900px) {
+        .explorer-controls { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+        .summary-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    }
+</style>
+
+<div class="hero" style="padding: 1.5rem 0 2rem 0;">
+    <h1>Team Explorer</h1>
+    <p>Inspect franchise groupings, propose merges for duplicates and rebrands, and review the staged-approval queue. ELO recalc is a separate manual step (run <code>scripts/dedupe_elo_history.py --skip-backup</code> after applying).</p>
+</div>
+
+<div class="card">
+    <div class="explorer-controls">
+        <div class="form-group">
+            <label for="similarity">Duplicate Similarity</label>
+            <select id="similarity">
+                <option value="0.78">0.78</option>
+                <option value="0.82" selected>0.82</option>
+                <option value="0.86">0.86</option>
+                <option value="0.90">0.90</option>
+                <option value="0.95">0.95</option>
+            </select>
+        </div>
+        <div class="form-group">
+            <label for="status-filter">Proposals Status</label>
+            <select id="status-filter">
+                <option value="">All</option>
+                <option value="pending" selected>Pending</option>
+                <option value="approved">Approved</option>
+                <option value="applied">Applied</option>
+                <option value="rejected">Rejected</option>
+            </select>
+        </div>
+        <div class="form-group">
+            <button class="btn btn-primary" onclick="loadAll()">Refresh</button>
+        </div>
+        <div class="form-group">
+            <button class="btn btn-success" onclick="applyApproved()">Apply Approved Proposals</button>
+        </div>
+    </div>
+</div>
+
+<div class="card">
+    <div class="summary-grid" id="summary-grid">
+        <div class="loading"><div class="spinner"></div></div>
+    </div>
+</div>
+
+<div class="grid grid-2">
+    <div class="card">
+        <div class="panel-title-row">
+            <h2 class="card-title">Franchise Groupings</h2>
+            <span class="muted" id="franchise-count"></span>
+        </div>
+        <div class="scroll-panel" id="franchise-panel">
+            <div class="loading"><div class="spinner"></div></div>
+        </div>
+    </div>
+    <div class="card">
+        <div class="panel-title-row">
+            <h2 class="card-title">Fuzzy Merge Candidates</h2>
+            <span class="muted" id="duplicate-count"></span>
+        </div>
+        <div class="scroll-panel">
+            <table class="table" id="duplicates-table">
+                <thead>
+                    <tr>
+                        <th>Score</th>
+                        <th>Group A (members, matches)</th>
+                        <th>Group B (members, matches)</th>
+                        <th>Country</th>
+                        <th>Stage Merge</th>
+                    </tr>
+                </thead>
+                <tbody></tbody>
+            </table>
+        </div>
+    </div>
+</div>
+
+<div class="card">
+    <div class="panel-title-row">
+        <h2 class="card-title">Merge Proposals</h2>
+        <span class="muted" id="proposal-count"></span>
+    </div>
+    <div class="scroll-panel">
+        <table class="table" id="proposals-table">
+            <thead>
+                <tr>
+                    <th>ID</th>
+                    <th>Source Team</th>
+                    <th>Target Group</th>
+                    <th>Canonical</th>
+                    <th>Status</th>
+                    <th>Rationale</th>
+                    <th>Created</th>
+                    <th>Actions</th>
+                </tr>
+            </thead>
+            <tbody></tbody>
+        </table>
+    </div>
+</div>
+
+<script>
+let _franchisesCache = [];
+
+async function fetchJSON(url, init) {
+    const resp = await fetch(url, init);
+    if (!resp.ok) {
+        const text = await resp.text();
+        throw new Error(`${resp.status} ${resp.statusText}: ${text}`);
+    }
+    return resp.json();
+}
+
+async function loadFranchises() {
+    const data = await fetchJSON('/api/team-explorer/franchises');
+    if (!data.success) throw new Error(data.error || 'Failed to load franchises');
+    _franchisesCache = data.franchises;
+
+    document.getElementById('franchise-count').textContent =
+        `${data.summary.total_franchises} groups (${data.summary.multi_member} multi-member)`;
+
+    const summary = document.getElementById('summary-grid');
+    const byType = data.summary.by_group_type || {};
+    summary.innerHTML = `
+        <div class="summary-stat">
+            <div class="value">${data.summary.total_franchises}</div>
+            <div class="label">Total Franchises</div>
+        </div>
+        <div class="summary-stat">
+            <div class="value">${data.summary.multi_member}</div>
+            <div class="label">Multi-Member Groups</div>
+        </div>
+        <div class="summary-stat">
+            <div class="value">${byType.franchise || 0}</div>
+            <div class="label">Franchise Type</div>
+        </div>
+        <div class="summary-stat">
+            <div class="value">${(byType.national || 0) + (byType.national_a || 0) + (byType.national_u19 || 0) + (byType.national_women || 0)}</div>
+            <div class="label">National-ish Type</div>
+        </div>
+    `;
+
+    const panel = document.getElementById('franchise-panel');
+    const byCountry = {};
+    data.franchises.forEach(g => {
+        const c = g.country_code || 'Unknown';
+        byCountry[c] = byCountry[c] || {};
+        byCountry[c][g.group_type] = byCountry[c][g.group_type] || [];
+        byCountry[c][g.group_type].push(g);
+    });
+
+    const countries = Object.keys(byCountry).sort();
+    panel.innerHTML = countries.map(country => {
+        const types = byCountry[country];
+        const typeKeys = Object.keys(types).sort();
+        return `
+            <div class="country-block">
+                <div class="country-header">${country} (${typeKeys.reduce((acc, t) => acc + types[t].length, 0)} groups)</div>
+                ${typeKeys.map(t => `
+                    <div class="group-type-row">${t}</div>
+                    ${types[t].map(g => renderFranchise(g)).join('')}
+                `).join('')}
+            </div>
+        `;
+    }).join('') || '<div style="padding: 1rem;" class="muted">No franchise groups yet.</div>';
+}
+
+function renderFranchise(g) {
+    const memberCount = g.member_count;
+    const elo = g.canonical_elo_t20_male
+        ? `<span class="badge">T20M ELO ${g.canonical_elo_t20_male.toFixed(0)}</span>`
+        : '';
+    const members = g.members.map(m => `
+        <div>
+            #${m.team_id} ${m.name}
+            ${m.is_canonical ? '<span class="canonical-tag">canonical</span>' : ''}
+            <span class="badge">${m.match_count}m</span>
+        </div>
+    `).join('');
+    return `
+        <div class="franchise-row">
+            <div>
+                <span class="franchise-name">${g.canonical_name}</span>
+                ${elo}
+                <span class="badge">${memberCount} member${memberCount === 1 ? '' : 's'}</span>
+                <span class="badge">${g.total_matches}m total</span>
+            </div>
+            <div class="member-list">${members}</div>
+        </div>
+    `;
+}
+
+async function loadDuplicates() {
+    const sim = document.getElementById('similarity').value;
+    const data = await fetchJSON(`/api/team-explorer/duplicates?similarity=${sim}`);
+    if (!data.success) throw new Error(data.error || 'Failed to load duplicates');
+
+    document.getElementById('duplicate-count').textContent =
+        `${data.count} candidate pair${data.count === 1 ? '' : 's'} at \u2265 ${(data.similarity_threshold * 100).toFixed(0)}%`;
+
+    const tbody = document.querySelector('#duplicates-table tbody');
+    if (!data.candidates.length) {
+        tbody.innerHTML = '<tr><td colspan="5" class="muted" style="padding: 0.6rem;">No candidate pairs at this threshold.</td></tr>';
+        return;
+    }
+    tbody.innerHTML = data.candidates.map(c => `
+        <tr>
+            <td><span class="badge">${(c.similarity * 100).toFixed(0)}%</span></td>
+            <td>${c.group_a.name}<br><span class="muted">${c.group_a.member_count}m / ${c.group_a.match_count} matches</span></td>
+            <td>${c.group_b.name}<br><span class="muted">${c.group_b.member_count}m / ${c.group_b.match_count} matches</span></td>
+            <td>${c.group_a.country_code || c.group_b.country_code || ''}</td>
+            <td>
+                <button class="btn btn-primary btn-mini"
+                        onclick="stageMergeFromCandidate(${c.group_a.group_id}, ${c.group_b.group_id}, '${c.group_a.name.replace(/'/g, "\\'")}', '${c.group_b.name.replace(/'/g, "\\'")}', ${c.similarity})">
+                    Stage A→B
+                </button>
+                <button class="btn btn-secondary btn-mini"
+                        onclick="stageMergeFromCandidate(${c.group_b.group_id}, ${c.group_a.group_id}, '${c.group_b.name.replace(/'/g, "\\'")}', '${c.group_a.name.replace(/'/g, "\\'")}', ${c.similarity})">
+                    Stage B→A
+                </button>
+            </td>
+        </tr>
+    `).join('');
+}
+
+async function loadProposals() {
+    const status = document.getElementById('status-filter').value;
+    const url = status ? `/api/team-explorer/proposals?status=${status}` : '/api/team-explorer/proposals';
+    const data = await fetchJSON(url);
+    if (!data.success) throw new Error(data.error || 'Failed to load proposals');
+
+    document.getElementById('proposal-count').textContent =
+        `${data.count} ${status || 'all'} proposal${data.count === 1 ? '' : 's'}`;
+
+    const tbody = document.querySelector('#proposals-table tbody');
+    if (!data.proposals.length) {
+        tbody.innerHTML = '<tr><td colspan="8" class="muted" style="padding: 0.6rem;">No proposals to show.</td></tr>';
+        return;
+    }
+    tbody.innerHTML = data.proposals.map(p => {
+        const actions = p.status === 'pending'
+            ? `<button class="btn btn-success btn-mini" onclick="decideProposal(${p.proposal_id}, 'approve')">Approve</button>
+               <button class="btn btn-danger btn-mini"  onclick="decideProposal(${p.proposal_id}, 'reject')">Reject</button>`
+            : '';
+        return `
+            <tr>
+                <td>${p.proposal_id}</td>
+                <td>#${p.source_team_id} ${p.source_team_name || ''}</td>
+                <td>#${p.target_group_id} ${p.target_group_name || ''}</td>
+                <td>${p.target_canonical_team_id ? '#' + p.target_canonical_team_id + ' ' + (p.target_canonical_team_name || '') : '<span class="muted">auto</span>'}</td>
+                <td><span class="status-pill status-${p.status}">${p.status}</span></td>
+                <td><span class="muted">${p.rationale || ''}</span></td>
+                <td><span class="muted">${(p.created_at || '').replace('T', ' ').slice(0, 19)}</span></td>
+                <td>${actions}</td>
+            </tr>
+        `;
+    }).join('');
+}
+
+async function loadAll() {
+    try {
+        await Promise.all([loadFranchises(), loadDuplicates(), loadProposals()]);
+    } catch (err) {
+        alert('Refresh failed: ' + err.message);
+    }
+}
+
+async function stageMergeFromCandidate(sourceGroupId, targetGroupId, sourceName, targetName, similarity) {
+    // Find a member team from the source group to use as source_team_id.
+    const sourceGroup = _franchisesCache.find(g => g.group_id === sourceGroupId);
+    if (!sourceGroup || !sourceGroup.members.length) {
+        alert(`Cannot stage merge: source group "${sourceName}" has no members`);
+        return;
+    }
+
+    if (sourceGroup.members.length > 1) {
+        const confirmAll = confirm(
+            `"${sourceName}" has ${sourceGroup.members.length} members. ` +
+            `This will stage one proposal per member moving them all into "${targetName}". Continue?`
+        );
+        if (!confirmAll) return;
+    }
+
+    const rationale = prompt(
+        `Rationale for merging "${sourceName}" -> "${targetName}" (similarity ${(similarity * 100).toFixed(0)}%):`,
+        `Fuzzy match ${(similarity * 100).toFixed(0)}%`
+    );
+    if (rationale === null) return;
+
+    let staged = 0;
+    let failures = [];
+    for (const m of sourceGroup.members) {
+        try {
+            const resp = await fetchJSON('/api/team-explorer/proposals', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({
+                    source_team_id: m.team_id,
+                    target_group_id: targetGroupId,
+                    rationale,
+                    fuzzy_score: similarity,
+                }),
+            });
+            if (resp.success) staged += 1;
+            else failures.push(`#${m.team_id} ${m.name}: ${resp.error}`);
+        } catch (e) {
+            failures.push(`#${m.team_id} ${m.name}: ${e.message}`);
+        }
+    }
+    let msg = `Staged ${staged} proposal${staged === 1 ? '' : 's'}.`;
+    if (failures.length) msg += `\n\nFailures:\n` + failures.join('\n');
+    alert(msg);
+    await loadProposals();
+}
+
+async function decideProposal(id, decision) {
+    if (decision === 'reject' && !confirm(`Reject proposal #${id}?`)) return;
+    try {
+        await fetchJSON(`/api/team-explorer/proposals/${id}/decision`, {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({decision}),
+        });
+        await loadProposals();
+    } catch (e) {
+        alert('Decision failed: ' + e.message);
+    }
+}
+
+async function applyApproved() {
+    const ok = confirm(
+        'Apply all approved proposals?\n\n' +
+        '1. The DB will be backed up first.\n' +
+        '2. teams.franchise_id and canonical_team_id will be rewritten in a single transaction.\n' +
+        '3. ELO will NOT be recalculated automatically; run scripts/dedupe_elo_history.py afterwards.'
+    );
+    if (!ok) return;
+
+    try {
+        const data = await fetchJSON('/api/team-explorer/proposals/apply', {method: 'POST'});
+        if (data.success) {
+            alert(
+                `Applied ${data.applied} proposal${data.applied === 1 ? '' : 's'}.\n` +
+                `Backup: ${data.backup_path || '(none)'}\n\n` +
+                `${data.next_step || ''}`
+            );
+            await loadAll();
+        } else {
+            alert('Apply failed: ' + data.error);
+        }
+    } catch (e) {
+        alert('Apply failed: ' + e.message);
+    }
+}
+
+document.addEventListener('DOMContentLoaded', () => {
+    document.getElementById('similarity').addEventListener('change', loadDuplicates);
+    document.getElementById('status-filter').addEventListener('change', loadProposals);
+    loadAll();
+});
+</script>
+{% endblock %}
