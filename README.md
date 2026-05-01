@@ -1,489 +1,289 @@
-# Cricket Match Predictor
+# Cricket Match Predictor — Polymarket Edge Engine
 
-A neural network-powered Monte Carlo simulation system for predicting T20 cricket match outcomes. Supports both Men's and Women's cricket including franchise leagues (IPL, BBL, WBBL, WPL, etc.) and international T20s.
+A calibrated cricket match simulator built around a multi-task neural network
+(V2) and a Polygon CLOB write-path for placing edge bets and (eventually)
+providing liquidity on thin Polymarket cricket sub-markets. Supports T20 and
+ODI for both men's and women's cricket. Active focus: Polymarket. Other
+exchange integrations are deferred indefinitely (see
+[`docs/NEXT_OVERHAUL.md`](docs/NEXT_OVERHAUL.md)).
 
-## Features
+## What this is
 
-### Core Prediction Engine
-- **Neural Network Ball-by-Ball Simulation**: Predicts individual ball outcomes (dot, single, boundary, wicket) using a 34-feature deep learning model
-- **ELO-Enhanced Features**: 5 ELO features integrated into predictions (batting/bowling team ELO, ELO differential, batter/bowler individual ELO)
-- **Temporal ELO Consistency**: Training uses historical ELOs at match date; simulations use current ELOs
-- **Monte Carlo Simulation**: Run 1,000-10,000 match simulations to generate win probabilities with real-time progress streaming
-- **Tiered ELO Rating System (V3)**: 5-tier classification with tier-adjusted K-factors (stronger opponents = larger ELO gains)
-- **Men's & Women's Cricket**: Separate models trained on men's and women's T20 data
-- **Toss Simulation**: Per-match toss outcomes simulated based on historical venue/team data
-- **Sample Scorecards**: View detailed ball-by-ball scorecards from representative simulations
+- **Cricket simulator (V2)**: ball-by-ball Monte Carlo over a multi-task
+  neural network with learned player/venue/team embeddings, hierarchical
+  per-over budget biasing, 9-class outcomes including extras, and per-(format,
+  gender) Platt calibration.
+- **Polymarket compare service**: links each upcoming cricket fixture to the
+  matching Polymarket event and surfaces model edge across all 4 modellable
+  cricket markets (Moneyline, Team Top Batter, Most Sixes, Toss Match Double).
+- **Guarded write-path** (Wave 5 in progress): semi-auto live betting with
+  hard caps, kill switch, bet ledger, and a graduating $200 -> $1000
+  envelope.
 
-### Match Discovery & Data Integration
-- **CREX Integration**: Primary source for upcoming T20 matches with comprehensive squad data
-- **Playwright-Powered Scraping**: Dynamic JavaScript rendering for reliable squad extraction from tabbed interfaces
-- **Player Affiliation Verification**: Authoritative team identity using database player history (fixes squad mislabeling)
-- **Unified Match View**: See all upcoming matches (Men's [M] and Women's [W]) in one place with countdown timers
-- **Smart Team Matching**: Tab abbreviation matching (IRE, ITA) with fallback to player affiliations
-- **Intelligent Venue Matching**: Fuzzy matching with canonical aliases (e.g., "Optus Stadium" -> "Perth Stadium")
-- **Automatic Squad Loading**: Pre-fetch match squads with player-to-database matching and role detection
-- **ESPN Cricinfo Fallback**: Secondary source when CREX data unavailable
-
-### User Interface
-- **Global Timezone Selector**: View all match times in your preferred timezone (defaults to Melbourne)
-- **Dynamic Time Conversion**: All timestamps (match times, training dates, model versions) respect timezone selection
-- **Data & Training Management**: Comprehensive GUI for managing models, data downloads, and retraining
-- **Tiered Team Rankings**: View ELO rankings with International/Regional/Domestic tabs, tier badges, and 30-day ELO change indicators
-- **Admin Promotion Review**: API endpoints for reviewing and approving tier adjustments for teams
-- **Responsive Design**: Modern, clean interface with real-time updates
-
-### Data Management & Training
-- **Automated Data Downloads**: GUI-driven downloads from Cricsheet.org (male/female datasets)
-- **Model Versioning**: Track all trained models with metadata (training date, samples, accuracy, data range)
-- **Active Model Management**: Switch between different model versions on-the-fly
-- **Database Status Dashboard**: Real-time view of data freshness, match counts, and coverage gaps
-- **Reset & Rebuild (Day 0)**: Complete database reset with backup, re-ingestion, and full retraining pipeline
-- **Real-time Progress Tracking**: Live progress bars and logs for downloads and training jobs
-
-### Venue & Team Data
-- **600+ Venues**: Comprehensive venue database with country flags and hierarchical grouping (including West Indies regions)
-- **Venue Statistics**: Scoring rates, boundary percentages, and wicket rates per venue
-- **Hierarchical Team Selection**: Segmented controls for easy team filtering
-- **Gender-Aware Filtering**: Automatic filtering of teams, players, and venues by match gender
-
-## Quick Start
-
-### Apple Silicon (M1/M2/M3) - Recommended
-
-For best performance with GPU acceleration, use the automated setup script:
+## Quickstart
 
 ```bash
-# 1. Clone the repository
 git clone https://github.com/yourusername/cricket-match-predictor.git
 cd cricket-match-predictor
 
-# 2. Run the Apple Silicon setup script (installs Python 3.11 + Metal GPU)
+# Apple Silicon (recommended) — Python 3.11 + Metal GPU
 ./scripts/setup_apple_silicon.sh
-
-# 3. Activate the environment
 source venv311/bin/activate
 
-# 4. Install Playwright browsers (for CREX squad scraping)
+# Or generic Linux/Intel
+python -m venv venv && source venv/bin/activate && pip install -r requirements.txt
+
 playwright install chromium
+cp .env.example .env
 
-# 5. Run the web app
+# Build database + ELO + V2 model (one-shot operator runbook below)
+
 python app/main.py
 ```
 
-This gives you **~400-600 simulations/second** with Metal GPU acceleration vs ~100 sims/sec on CPU.
+Visit `http://localhost:5001` and use:
 
-### Standard Setup (Linux/Windows/Intel Mac)
+- `/predict` — single-match Monte Carlo
+- `/bulk-predict` — fixture grid with Polymarket compare cards
+- `/team-explorer` — franchise unification + duplicate cleanup
+- `/rankings` — tiered ELO leaderboards
+- `/training` — model versions and data ingestion
+- `/live-betting` — Wave 5 Phase 6d (will appear once Phase 6 ships)
 
-```bash
-# 1. Clone and setup
-git clone https://github.com/yourusername/cricket-match-predictor.git
-cd cricket-match-predictor
-python -m venv venv
-source venv/bin/activate
-pip install -r requirements.txt
+## Architecture
 
-# 2. Install Playwright browsers (for CREX squad scraping)
-playwright install chromium
+```mermaid
+flowchart LR
+    cricsheet["Cricsheet ball-by-ball JSON"]
+    crex["CREX upcoming fixtures"]
+    poly_read["Polymarket Gamma + CLOB read"]
+    poly_history["Polymarket /prices-history"]
+    poly_write["Polymarket CLOB write py-clob-client"]
 
-# 3. Download data and build database (via GUI or CLI)
-# Option A: Use the web GUI (recommended)
-python app/main.py
-# Visit http://localhost:5001/training and click "Download Latest Data"
+    db["SQLite cricket.db"]
+    elo["Tiered ELO V3 + franchise resolver"]
+    train["Build training data v2 (joint, recency-weighted)"]
+    model["Cricket Model V2 multi-task NN"]
+    cal["Per-format Platt calibration"]
+    sim["Vectorized NN simulator V2"]
+    market_out["Per-market probability outputs"]
+    compare["Polymarket compare service 4 markets"]
+    backtest["Match-level backtest harness"]
+    ev["Polymarket historical EV backtest"]
+    risk["Server-side risk gate hard caps + kill switch"]
+    ledger["Bet ledger + reconciliation"]
+    ui["Flask web app + Bulk Predict UI + Live Betting tab"]
 
-# Option B: CLI method
-python -m src.data.downloader
-python -m src.data.ingest
-
-# 4. Calculate ELO ratings (tiered system + V4 franchise unification)
-python scripts/backfill_franchises.py  # Idempotent; unifies known IPL franchise rebrands (RCB, Capitals, Punjab Kings, Pune Supergiant)
-python scripts/dedupe_elo_history.py    # Backup + full recalc + UNIQUE-index install (5+ minutes on a large DB)
-
-# 5. Train neural network
-# Option A (legacy V1, 4 separate per-(format, gender) models, 34 features):
-python scripts/full_retrain.py
-# Option B (Wave 4 V2, multi-task joint, 9-class with extras, learned embeddings):
-python scripts/build_ball_training_v2.py --gender both       # build joint training data
-python scripts/train_cricket_model_v2.py                     # train multi-task model
-python scripts/fit_calibration.py \
-    --backtest-csv data/backtest/backtest_baseline_ipl_2025.csv \
-    --output data/models/v2/calibration.json                 # post-hoc Platt scaling
-
-# 6. Run the web app
-python app/main.py
+    cricsheet --> db
+    crex --> db
+    db --> elo --> train --> model --> sim
+    sim --> cal
+    sim --> market_out
+    market_out --> compare
+    poly_read --> compare
+    sim --> backtest --> ev
+    poly_history --> ev
+    ev --> risk
+    compare --> ui
+    ui --> risk --> ledger --> poly_write
 ```
 
-Visit `http://localhost:5001` in your browser. The Team Explorer tab (`/team-explorer`) lets you stage and apply additional franchise/duplicate merges; after applying any merges, re-run `python scripts/dedupe_elo_history.py --skip-backup` so ratings recompute under the new groupings.
+## What we model on Polymarket
 
-### Backtest harness + V1/V2 A/B (Wave 3.5 + Wave 4)
+| Market | Outcomes | Modellable | Source signal |
+|---|---|---|---|
+| Moneyline | 2-way | Yes | V2 simulator's natural output (`team1_win_prob`, calibrated) |
+| Team Top Batter | 3-way (team1 / draw / team2) | Yes | New per-batter run distribution from V2 sim |
+| Most Sixes | 3-way (team1 / draw / team2) | Yes | New per-team six counter from V2 sim |
+| Toss Match Double | 4-way (toss x match) | Yes | Cross-product: model moneyline x 50% toss |
+| Toss Winner | 2-way | No | Genuinely 50/50; no edge |
+| Completed Match | 2-way (yes/no) | No | Weather event, not cricket-skill |
 
-The match-level backtest harness can run against either model architecture and the included compare script gives you a side-by-side diff with a promotion-gate verdict:
+Headline V2 metrics on the 44-match IPL 2025 holdout (vs always-50/50):
 
-```bash
-# Run a backtest with V1 (default; existing per-(format, gender) ball model)
-python scripts/backtest_simulator.py --tournament-pattern '%Indian Premier League%' \
-    --since-date 2025-01-01 --limit 50 --n-sims 500 --label baseline_ipl_2025
+| Metric | V2 | 50/50 baseline |
+|---|---|---|
+| Brier score | 0.252 | 0.250 |
+| Log loss | 0.696 | 0.693 |
+| MAE total runs | 29.62 | n/a |
 
-# Re-run the same holdout with V2 (multi-task model with extras + per-over head + calibration)
-python scripts/backtest_simulator.py --model-version v2 \
-    --tournament-pattern '%Indian Premier League%' \
-    --since-date 2025-01-01 --limit 50 --n-sims 500 --label v2_ipl_2025
+V2 is essentially at the calibration floor (50/50 NLL = 0.693). The headline:
+on IPL match-winner alone, T20 cricket is genuinely hard to beat — the value
+shows up on side markets (Top Batter, Most Sixes) and on per-fixture EV
+across hundreds of bets, which is what Wave 5 measures.
 
-# Diff + verdict
-python scripts/compare_backtests.py \
-    --baseline data/backtest/backtest_baseline_ipl_2025_summary.json \
-    --candidate data/backtest/backtest_v2_ipl_2025_summary.json
-```
-
-The promotion gate requires V2 to beat V1 on Brier AND log-loss AND not regress accuracy by more than 1pp on >=50 matches.
-
-### Environment Variables
-
-Copy the template and fill local secrets before running:
+## Setup
 
 ```bash
 cp .env.example .env
 ```
 
-Notes:
-- `.env` is ignored by git (`.gitignore`), so local API keys/secrets are not committed.
-- Keep real exchange/market credentials only in local `.env` or a secret manager.
-- `AUTO_INSTALL_PLAYWRIGHT_CHROMIUM=true` (default) auto-runs `python -m playwright install chromium` on app startup when the browser binary is missing.
-- Wave 2 integration readiness endpoint: `GET /api/integrations/credentials-status` (returns masked credential status only).
+`.env` is gitignored. Required for live runs:
 
-### Market Integration Environment Variables (Wave 2)
+| Variable | Required for | Notes |
+|---|---|---|
+| `SECRET_KEY` | Flask sessions | Any random string |
+| `CRICKET_DATA_API_KEY` | Cricket Data fallback | Optional |
+| `POLYMARKET_*` | Read-path | Public read works without keys; write needs L2 creds (set up in Wave 5 Phase 6a) |
+| `POLYGON_PRIVATE_KEY` | Write-path | Wave 5 Phase 6a; set after running `bootstrap_polymarket_wallet.py` |
+| `BETTING_*` | Write-path | Hard caps + mode + kill switch; defaults are conservative |
 
-Polymarket is the active Wave 2 focus and supports read-path usage without keys. Betfair is optional/parked for now (credentials can be added later without code changes).
+Betfair env vars are kept but flagged Deferred — leave blank.
+
+## Operator runbook
+
+End-to-end from a fresh checkout:
 
 ```bash
-# Polymarket
-POLYMARKET_ENABLED=false
-POLYMARKET_API_BASE_URL=https://gamma-api.polymarket.com
-POLYMARKET_CLOB_BASE_URL=https://clob.polymarket.com
-POLYMARKET_CHAIN_ID=137
-POLYMARKET_API_KEY=
-POLYMARKET_API_SECRET=
-POLYMARKET_PASSPHRASE=
-POLYMARKET_PRIVATE_KEY=
+# 1. Download + ingest Cricsheet data
+python -m src.data.downloader
+python -m src.data.ingest
 
-# Betfair
-BETFAIR_ENABLED=false
-BETFAIR_APP_KEY=
-BETFAIR_USERNAME=
-BETFAIR_PASSWORD=
-BETFAIR_SESSION_TOKEN=
-BETFAIR_CERT_FILE=
-BETFAIR_KEY_FILE=
-BETFAIR_SSO_BASE_URL=https://identitysso.betfair.com
-BETFAIR_LOGIN_PATH=/api/login
-BETFAIR_CERT_LOGIN_PATH=/api/certlogin
-BETFAIR_KEEP_ALIVE_PATH=/api/keepAlive
-BETFAIR_BETTING_API_BASE_URL=https://api.betfair.com/exchange/betting
+# 2. Calculate ELO ratings (tiered V3 + V4 franchise unification)
+python scripts/backfill_franchises.py            # Idempotent IPL franchise rebrands
+python scripts/dedupe_elo_history.py             # Backup + recalc + UNIQUE-index install (~5 min)
+
+# 3. Build V2 training data (joint, both genders, both formats)
+python scripts/build_ball_training_v2.py --gender both
+
+# 4. Train V2 with the Wave 4.5 winning recipe (~30-40 min)
+python scripts/train_cricket_model_v2.py \
+    --epochs 50 --batch-size 4096 --vocab-min-count 5 \
+    --early-stopping-patience 5 \
+    --class-weight-mode uniform --over-loss-weight 0.1 \
+    --hidden-units 512 --n-hidden-layers 3 \
+    --embedding-dim-batter 32 --embedding-dim-venue 24 --embedding-dim-team 12 \
+    --label v2_overnight
+
+# 5. Backtest V2 on a holdout
+python scripts/backtest_simulator.py --model-version v2 \
+    --tournament-pattern '%Indian Premier League%' \
+    --since-date 2025-01-01 --limit 50 --n-sims 500 --label v2_ipl_2025
+
+# 6. Fit calibration on the backtest CSV
+python scripts/fit_calibration.py \
+    --backtest-csv data/backtest/backtest_v2_ipl_2025.csv \
+    --output data/models/v2/calibration.json
+
+# 7. A/B compare V2 against the V1 baseline
+python scripts/compare_backtests.py \
+    --baseline data/backtest/backtest_baseline_ipl_2025_summary.json \
+    --candidate data/backtest/backtest_v2_ipl_2025_summary.json
+
+# 8. Run the web app
+python app/main.py
 ```
 
-## How It Works
+After any Team Explorer merge, re-run `python scripts/dedupe_elo_history.py --skip-backup`
+so ELOs recompute under the new groupings.
 
-1. **Data**: Ball-by-ball JSON data from [Cricsheet.org](https://cricsheet.org/)
-   - 16,700+ men's matches (IPL, BBL, T20I, PSL, CPL, etc.)
-   - 3,900+ women's matches (WBBL, WPL, WT20I, etc.)
-   - 600+ venues across 75+ countries
+### Wave 5 Phase 5 — Polymarket historical EV backtest (when ready)
 
-2. **Training**: Neural network learns ball outcome probabilities based on 34 features:
-   - **Match State (6)**: Innings, over, ball, runs, wickets, target
-   - **Phase (3)**: Powerplay, middle overs, death overs (one-hot)
-   - **Batter Stats (8)**: Historical outcome distribution (dot%, 1s%, 2s%, 3s%, 4s%, 6s%, wicket%, balls faced)
-   - **Bowler Stats (8)**: Historical outcome distribution (same breakdown)
-   - **Venue (4)**: Scoring factor, boundary rate, wicket rate, data reliability flag
-   - **Team ELO (3)**: Batting team ELO, bowling team ELO, ELO differential
-   - **Player ELO (2)**: Batter batting ELO, bowler bowling ELO
-
-   **Current Model Stats:**
-   | Model | Training Samples | Features | Validation Accuracy | Data Range |
-   |-------|------------------|----------|---------------------|------------|
-   | Men's T20 | 1,477,440 | 34 | 44.2% | 2019-2025 |
-   | Women's T20 | 571,659 | 34 | 51.1% | 2019-2025 |
-
-3. **Simulation**: Monte Carlo engine simulates full matches ball-by-ball
-
-4. **Prediction**: Aggregate simulation results into win probabilities
-
-### Ball prediction: Hyperband tuning (note for next time)
-
-When re-tuning the ball outcome models, use `scripts/tune_ball_predictor.py`. Each of the four models (T20 male/female, ODI male/female) is tuned separately; best hyperparameters are saved and then loaded automatically during `full_retrain.py`.
-
-**Run (per format/gender or all):**
 ```bash
-# Single combination
-python scripts/tune_ball_predictor.py --format T20 --gender male
-
-# All four (T20 M/F, ODI M/F)
-python scripts/tune_ball_predictor.py --all
-
-# Overwrite previous run and start fresh
-python scripts/tune_ball_predictor.py --format ODI --gender female --overwrite
+python scripts/backtest_polymarket_ev.py \
+    --tournament-pattern '%Indian Premier League%' \
+    --since-date 2024-06-01 \
+    --edge-thresholds 3,5,10 \
+    --bet-size 25 \
+    --output data/diagnostics/wave_5_polymarket_ev.md
 ```
 
-**Outputs:** `data/processed/best_hparams_{format}_{gender}.json` and `data/processed/tuner_{format}_{gender}/` (Keras Tuner checkpoints).
+### Wave 5 Phase 6 — Polymarket write-path bootstrap (when ready)
 
-**Hyperband run parameters (defaults):**
-| Parameter | Default | Description |
-|-----------|---------|-------------|
-| `max_epochs` | 30 | Max epochs per bracket |
-| `factor` | 3 | Successive halving factor |
-| `hyperband_iterations` | 1 | Number of full Hyperband brackets |
-| `batch_size` | 512 | Tuned for Apple Silicon Metal |
-| `val_fraction` | 0.2 | Chronological holdout for validation |
+```bash
+# 1. Generate a dedicated Polygon wallet (one-time)
+python scripts/bootstrap_polymarket_wallet.py --generate
 
-**Search space (same for all four models):**
-| Hyperparameter | Type | Values / range |
-|----------------|------|----------------|
-| `n_layers` | Int | 1–4 (Dense blocks) |
-| `units` | Choice | 64, 128, 256 |
-| `dropout` | Float | 0.1–0.4, step 0.1 |
-| `l2_reg` | Choice | 1e-4, 1e-3, 1e-2 |
-| `learning_rate` | Choice | 1e-4, 5e-4, 1e-3, 5e-3 |
+# 2. Fund printed wallet address with USDC on Polygon (~$200)
+# 3. Run on-chain approvals + derive L2 API creds
+python scripts/bootstrap_polymarket_wallet.py --approve
 
-Training (e.g. `full_retrain.py`) reads from `best_hparams_{format}_{gender}.json` when present; otherwise it uses built-in defaults in `src/models/ball_prediction_nn.py`.
+# 4. Add printed POLYGON_PRIVATE_KEY + POLYMARKET_API_* to .env
+# 5. Restart Flask, navigate to /live-betting; mode defaults to OFF
+```
 
-## Tech Stack
+## Data model
+
+Schema files live in [`src/data/`](src/data/):
+
+- `schema.sql` — base matches/teams/players/deliveries
+- `schema_v2.sql` — phase + outcome columns
+- `schema_v3_tiered_elo.sql` — tiered team ELO + cross-pool normalisation
+- `schema_v4_franchise.sql` — `team_groups`, `team_external_ids`, franchise unification
+- `schema_v5_betting.sql` — `bet_ledger` (Wave 5 Phase 6b)
+- `schema_model_versions.sql` — `model_versions`, training metadata
+
+See [`docs/DATABASE_SCHEMA.md`](docs/DATABASE_SCHEMA.md) for the full
+column-level reference.
+
+## Project journey
+
+[`docs/NEXT_OVERHAUL.md`](docs/NEXT_OVERHAUL.md) holds the running wave-by-wave
+backlog and history. Headline waves:
+
+| Wave | Theme | Status |
+|---|---|---|
+| 1 | CREX scraper hardening + venue tooling | Done |
+| 2 | Polymarket read path + Bulk Predict UI | Done |
+| 3 | Team franchise unification + ELO data repair | Done |
+| 3.5 | Match-level backtest harness | Done |
+| 4 | Cricket Model V2 strategic rewrite | Done |
+| 4.5 | V2 score-MAE fix (V2 now beats V1 on every metric) | Done |
+| **5** | **Multi-market simulator + Polymarket compare + guarded write-path** | **Current** |
+| 6 | Polymarket liquidity provision (LP) | Parking lot |
+| 7 | V2 productionisation (GUI integration, debug UI, etc.) | Parking lot |
+| 8 | Advanced model + new data sources | Parking lot |
+
+## Tech stack
 
 | Component | Technology |
-|-----------|------------|
-| ML Framework | TensorFlow/Keras (with Metal GPU on Apple Silicon) |
-| Python Version | 3.11 recommended (required for Metal GPU) |
+|---|---|
+| ML framework | TensorFlow / Keras (Metal GPU on Apple Silicon) |
+| Python | 3.11 (required for Metal GPU) |
 | Backend | Python, Flask |
 | Database | SQLite |
-| Historical Data | Cricsheet.org (16,700+ men's, 3,900+ women's matches) |
-| Live Fixtures | CREX (primary), ESPNcricinfo (fallback) |
-| Frontend | HTML, CSS, JavaScript |
-| Web Scraping | Playwright (dynamic content), BeautifulSoup (static HTML) |
-
-## Project Structure
-
-```
-├── app/                  # Flask web application
-│   ├── main.py          # API endpoints & server
-│   └── templates/       # HTML templates
-│       ├── base.html    # Base template with global navbar & timezone selector
-│       ├── index.html   # Home page
-│       ├── predict.html # Match prediction interface
-│       ├── rankings.html # ELO rankings
-│       └── training.html # Data & training management
-├── src/
-│   ├── api/             # External API clients
-│   │   ├── crex_scraper.py         # CREX scraper (primary) with Playwright support
-│   │   ├── espn_scraper.py         # ESPNcricinfo scraper (fallback)
-│   │   └── cricket_data_client.py  # Cricket Data API (legacy)
-│   ├── data/            # Data ingestion & management
-│   │   ├── downloader.py      # Cricsheet data downloader
-│   │   ├── ingest.py          # JSON to SQLite ingestion
-│   │   ├── database.py        # Database utilities & model versioning
-│   │   ├── venue_normalizer.py # Venue deduplication & cleanup
-│   │   └── schema_*.sql       # Database schemas
-│   ├── models/          # Neural network & simulators
-│   │   ├── ball_prediction_nn.py  # Main NN training (34 features)
-│   │   ├── vectorized_nn_sim.py   # Optimized Monte Carlo simulator with ELO
-│   │   ├── fast_lookup_sim.py     # Turbo mode simulator (distribution-based)
-│   │   └── nn_simulator.py        # Legacy simulator
-│   ├── features/        # Feature engineering
-│   │   ├── ball_training_data.py   # Training data generation (34 features with ELO)
-│   │   ├── player_distributions.py # Player stats & distributions
-│   │   ├── venue_stats.py          # Venue statistics
-│   │   ├── name_matcher.py         # Fuzzy player name matching
-│   │   └── lineup_service.py       # Recent lineup fetching
-│   ├── elo/             # ELO rating system
-│   │   ├── calculator_v2.py       # Legacy ELO calculator
-│   │   └── calculator_v3.py       # Tiered ELO calculator (V3)
-│   └── utils/
-│       └── job_manager.py         # Background job management
-├── scripts/
-│   ├── setup_apple_silicon.sh     # Apple Silicon setup (Python 3.11 + Metal GPU)
-│   ├── full_retrain.py            # Complete retraining pipeline (uses V3 ELO)
-│   ├── recalculate_tiered_elo.py  # Full tiered ELO recalculation
-│   ├── validate_tiered_elo.py     # Validation & sanity checks
-│   ├── capture_baseline.py        # Database metrics snapshot
-│   └── migrate_venues.py          # Venue schema migration
-├── data/
-│   ├── raw/             # Cricsheet JSON files
-│   ├── processed/       # Training data, models, distributions
-│   ├── backups/         # Database backups
-│   └── model_versions.json  # Model version metadata
-└── docs/
-    └── DATABASE_SCHEMA.md    # Database documentation
-```
-
-## API Endpoints
-
-### Match & Team Data
-| Endpoint | Method | Description |
-|----------|--------|-------------|
-| `/api/teams` | GET | List teams with ELO ratings (filtered by gender) |
-| `/api/players/{team}` | GET | Team players with ELO ratings |
-| `/api/players/details` | POST | Get player details by IDs |
-| `/api/team/<team_id>/recent-lineup` | GET | Fetch most recent playing XI for a team |
-| `/api/venues` | GET | Venues with hierarchical country grouping |
-
-### Match Discovery (CREX - Primary)
-| Endpoint | Method | Description |
-|----------|--------|-------------|
-| `/api/crex/upcoming` | GET | Upcoming T20 matches with squad data |
-| `/api/crex/match` | GET | Match details with squads, venue stats, and DB mappings (`?url=...`) |
-| `/api/crex/live` | GET | Live match with toss result and playing XI (`?url=...`) |
-
-### Match Discovery (ESPN - Fallback)
-| Endpoint | Method | Description |
-|----------|--------|-------------|
-| `/api/espn/upcoming` | GET | Upcoming T20 matches (3h ago to 24h ahead) |
-| `/api/espn/match/<match_id>` | GET | Match details with squads, venue, and DB mappings |
-
-### Integrations (Wave 2 Readiness)
-| Endpoint | Method | Description |
-|----------|--------|-------------|
-| `/api/integrations/credentials-status` | GET | Safe credential readiness status (Polymarket-first readiness + optional Betfair diagnostics, masked values only) |
-| `/api/integrations/polymarket/health` | GET | Polymarket CLOB health probe |
-| `/api/integrations/polymarket/markets` | GET | Polymarket public market list (`?limit=20&active=true&closed=false`) |
-| `/api/integrations/polymarket/orderbook` | GET | Polymarket CLOB orderbook by token (`?token_id=...`) |
-| `/api/integrations/polymarket/compare` | GET | Row-level fixture comparison (`team1`, `team2`, optional `start_utc`, `series`, model win % params) |
-| `/api/integrations/polymarket/compare/batch` | POST | Batch fixture comparison for bulk rows (`fixtures[]`) |
-| `/api/integrations/betfair/session/status` | GET | Betfair session status (masked token preview only) |
-| `/api/integrations/betfair/session/bootstrap` | POST | Bootstrap Betfair session via configured login path |
-| `/api/integrations/betfair/session/keep-alive` | POST | Refresh an existing Betfair session token |
-
-Bulk Predict row status mappings for Polymarket comparison:
-- `ok`: model %, market implied %, edge, freshness shown
-- `no_match`: "No market match"
-- `quote_unavailable`: "Quote unavailable"
-- `stale`: stale badge plus latest values where available
-
-### Simulation
-| Endpoint | Method | Description |
-|----------|--------|-------------|
-| `/api/simulate-stream` | POST | Run simulation with real-time progress stream |
-
-### Rankings (Tiered ELO System V3)
-| Endpoint | Method | Description |
-|----------|--------|-------------|
-| `/api/rankings/teams` | GET | Team ELO rankings with tier filtering (`?tier=1&format=T20&gender=male`) |
-| `/api/rankings/batting` | GET | Player batting ELO rankings |
-| `/api/rankings/bowling` | GET | Player bowling ELO rankings |
-| `/api/rankings/tier-stats` | GET | Team counts by tier and pending promotion flags |
-| `/api/rankings/months` | GET | Available historical months for rankings |
-
-### Admin (Tier Management)
-| Endpoint | Method | Description |
-|----------|--------|-------------|
-| `/api/admin/promotion-flags` | GET | List pending tier promotion/demotion reviews |
-| `/api/admin/promotion-flags/<id>/approve` | POST | Approve tier change for a team |
-| `/api/admin/promotion-flags/<id>/reject` | POST | Reject tier change request |
-
-### Data & Training Management
-| Endpoint | Method | Description |
-|----------|--------|-------------|
-| `/api/training/db-status` | GET | Database statistics (matches, players, data freshness) |
-| `/api/training/models` | GET | List all model versions and active models |
-| `/api/training/models/<id>/activate` | POST | Set a model version as active |
-| `/api/training/download` | POST | Trigger background data download job |
-| `/api/training/retrain` | POST | Trigger background model retraining job |
-| `/api/training/reset-rebuild` | POST | Reset database and rebuild from scratch (Day 0) |
-| `/api/training/job/<job_id>` | GET | Get status, progress, and logs of a background job |
+| Historical cricket data | Cricsheet.org (16,700+ men's, 3,900+ women's matches) |
+| Live fixtures | CREX (primary), ESPN Cricinfo (fallback) |
+| Polymarket SDK | `py-clob-client` (Wave 5 Phase 6a) |
+| Wallet chain | Polygon (chain_id 137) |
+| Frontend | HTML / CSS / vanilla JS |
+| Web scraping | Playwright (dynamic), BeautifulSoup (static) |
 
 ## Performance
 
-### Apple Silicon with Metal GPU (Recommended)
+| Setup | Sims/sec | 10k sims | 50k sims |
+|---|---|---|---|
+| M2 Pro + Metal GPU | ~400-600 | ~20s | ~1.5 min |
+| M2 Pro CPU only | ~100-150 | ~80s | ~7 min |
+| Intel Mac | ~60-80 | ~2 min | ~10 min |
 
-| Setup | Sims/Second | 10k Simulations | 50k Simulations |
-|-------|-------------|-----------------|-----------------|
-| M2 Pro + Metal GPU | ~400-600 | ~20 seconds | ~1.5 minutes |
-| M2 Pro CPU Only | ~100-150 | ~80 seconds | ~7 minutes |
-| Intel Mac | ~60-80 | ~2 minutes | ~10 minutes |
-
-**Requirements for Metal GPU acceleration:**
-- Apple Silicon Mac (M1/M2/M3)
-- Python 3.11 (not 3.12 or 3.13)
-- tensorflow-macos + tensorflow-metal
-
-Run `./scripts/setup_apple_silicon.sh` for automated setup.
-
-### Verify GPU is Active
+Verify GPU is active:
 
 ```python
 import tensorflow as tf
 print(tf.config.list_physical_devices('GPU'))
-# Should show: [PhysicalDevice(name='/physical_device:GPU:0', device_type='GPU')]
 ```
 
-### Other Optimizations
-- TensorFlow threading configured for multi-core
-- NumPy BLAS parallelization (vecLib on macOS)
-- Pre-allocated feature buffers for reduced memory churn
-- Background job management for long-running tasks
-- Efficient caching for API responses (30-minute TTL)
+## Running tests
 
-## Key Features by Branch
-
-### Main Features (Merged)
-- **CREX + ESPN Integration**: Dual scraper system with CREX as primary and ESPN as fallback
-- **Playwright Squad Extraction**: Dynamic JavaScript rendering for reliable squad data from tabbed interfaces
-- **Data & Training GUI**: Comprehensive management interface for downloads, retraining, and model versioning
-- **Timezone Support**: Global timezone selector with dynamic time conversion across all pages
-- **Model Versioning**: Track training history with metadata (samples, accuracy, data range, file size)
-- **Reset & Rebuild**: Day 0 functionality to start fresh with complete re-ingestion and training
-- **Real-time Progress**: Live progress bars and logs for background jobs
-- **Venue Cleanup**: Normalized and deduplicated 600+ venues with hierarchical grouping and aliases
-- **Unified Match List**: All upcoming T20 matches (M/W) in one view with countdown timers
-- **Fallback Lineups**: Auto-load recent lineups when API doesn't provide squads
-- **Smart Venue Matching**: Fuzzy matching with canonical aliases and gender-aware filtering
-
-### Recent Improvements
-- **CREX Integration**: Primary match discovery with Playwright-powered squad extraction from dynamic tabs
-- **Playwright-First Squad Path**: Match-detail squad loading now uses a direct Playwright path (no static-first squad fallback)
-- **Team Order Stabilization**: Added deterministic team1/team2 normalization using venue-country and domestic venue hints (reduces swapped home/away presentation)
-- **Player Affiliation Verification**: Authoritative team identity using database player history (fixes squad mislabeling)
-- **Team Abbreviation Matching**: Smart matching of tab labels (IRE, ITA, PRS) to team names with fallback resolution
-- **ELO Feature Integration**: 34-feature model with 5 ELO features (team ELO, player ELO, differentials)
-- **Temporal ELO Consistency**: Training uses historical ELOs at match date; simulations use current ELOs
-- **Tier-Adjusted K-Factors**: Stronger opponents yield larger ELO gains (Ireland vs Australia > Ireland vs Bhutan)
-- **Tiered ELO System (V3)**: Complete 5-tier classification with cross-pool normalization and automatic promotion review
-- **Realistic Rankings**: India (1929) >> Somerset (1407) now reflects actual team strength hierarchy
-- **Venue Alias System**: Canonical venue matching (e.g., "Optus Stadium" -> "Perth Stadium")
-- **Venue Quality Tooling (Foundation)**: Expanded alias coverage and added duplicate-candidate reporting script (`scripts/report_venue_duplicates.py`)
-- **Venue Data Explorer Tab**: Added an in-app venue quality view with `Country -> State -> Ground` hierarchy, fuzzy duplicate candidates, and alias-gap inspection panels
-- **CREX Prefetch Cache Flow**: Upcoming match cards now prefetch CREX match detail payloads and reuse cached data on single-select and bulk-predict handoff
-- **Conflict Resolution**: Handles edge cases where CREX mislabels both squads as the same team
-- **Validation Framework**: Automated sanity checks and validation reports for ELO system integrity
-
-## Data Sources
-
-- [Cricsheet.org](https://cricsheet.org/) - Historical ball-by-ball match data (16,700+ men's, 3,900+ women's matches)
-- [CREX](https://crex.com/) - Primary source for upcoming fixtures, squads, and venue statistics
-- [ESPNcricinfo](https://www.espncricinfo.com/) - Fallback for match schedules and squads
-
-## Development
-
-### Running Tests
 ```bash
 pytest tests/
 ```
 
-### Database Migrations
-```bash
-# Capture baseline before changes
-python scripts/capture_baseline.py
+Notable suites:
 
-# Run venue migration (example)
-python scripts/migrate_venues.py
-```
-
-### Full Retraining Pipeline
-```bash
-# CLI method
-python scripts/full_retrain.py
-
-# Or use the GUI at http://localhost:5001/training
-```
+- `tests/test_simulator_v2_extras.py` — V2 hierarchical sampling + extras handling
+- `tests/test_calibration.py` — per-format Platt scaling
+- `tests/test_player_batting_elo_actual.py` — Wave 3 player batting ELO formula
 
 ## Inspiration
 
-This project was inspired by Andrew Kuo's pioneering work on [ball-by-ball T20 cricket prediction using Monte Carlo simulation](https://towardsdatascience.com/predicting-t20-cricket-matches-with-a-ball-simulation-model-1e9cae5dea22/). In his 2021 article, Kuo demonstrated a bottom-up approach to cricket match prediction by training a neural network to predict individual ball outcomes (dot, single, boundary, wicket, etc.) and then simulating entire matches thousands of times to generate win probabilities. Working with 677,000+ balls from 3,651 T20 matches across 7 major leagues, he achieved 55.6% match prediction accuracy—outperforming bookmaker odds and revealing the inherent unpredictability of T20 cricket. His work highlighted the power of probabilistic simulation for capturing the nuanced, moment-to-moment dynamics that determine cricket match outcomes, providing the conceptual foundation for this implementation with expanded data coverage, model versioning, and real-time match integration.
+This project was inspired by Andrew Kuo's pioneering work on
+[ball-by-ball T20 cricket prediction using Monte Carlo simulation](https://towardsdatascience.com/predicting-t20-cricket-matches-with-a-ball-simulation-model-1e9cae5dea22/).
+Kuo achieved 55.6% match prediction accuracy on 3,651 T20 matches, demonstrating
+both the power of probabilistic simulation and the inherent unpredictability of
+T20 cricket. His ~25% top-batter accuracy reference is the bar we benchmark V2
+against in Wave 5 Phase 4.
 
 ## License
 
@@ -492,5 +292,6 @@ MIT License
 ## Acknowledgments
 
 - Cricsheet.org for comprehensive cricket data
-- ESPNcricinfo for live match schedules and squads
+- ESPN Cricinfo and CREX for live match schedules and squads
 - Andrew Kuo for the original ball-by-ball simulation methodology
+- Polymarket for an accessible CLOB API and a willing market for cricket signal

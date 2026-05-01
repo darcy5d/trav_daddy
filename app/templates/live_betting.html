@@ -1,0 +1,412 @@
+{% extends "base.html" %}
+{% block title %}Live Betting{% endblock %}
+{% block extra_head %}
+<style>
+    .lb-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 1rem; }
+    .lb-status-bar {
+        display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 0.6rem;
+        margin: 1rem 0; padding: 0.6rem; border: 1px solid var(--border); border-radius: 8px;
+        background: var(--bg-secondary);
+    }
+    .lb-status-cell { font-size: 0.8rem; }
+    .lb-status-cell .lb-label { color: var(--text-muted); font-size: 0.65rem; text-transform: uppercase; letter-spacing: 0.5px; }
+    .lb-status-cell .lb-value { font-weight: 700; font-size: 1.05rem; color: var(--text-primary); }
+    .lb-mode-toggle { display: inline-flex; gap: 0.25rem; }
+    .lb-mode-toggle button {
+        padding: 0.4rem 0.8rem; border-radius: 999px; border: 1px solid var(--border);
+        background: transparent; color: var(--text-secondary); cursor: pointer; font-weight: 600; font-size: 0.85rem;
+    }
+    .lb-mode-toggle button.active.OFF    { background: rgba(107, 114, 128, 0.2); color: var(--text-primary); border-color: rgba(107, 114, 128, 0.5); }
+    .lb-mode-toggle button.active.MANUAL { background: rgba(245, 158, 11, 0.2); color: var(--accent-warning); border-color: rgba(245, 158, 11, 0.5); }
+    .lb-mode-toggle button.active.AUTO   { background: rgba(16, 185, 129, 0.2); color: var(--accent-primary); border-color: rgba(16, 185, 129, 0.5); }
+    .lb-kill {
+        background: #ef4444; color: white; border: none; padding: 0.6rem 1.2rem; border-radius: 8px;
+        font-weight: 700; font-size: 0.95rem; cursor: pointer;
+    }
+    .lb-kill.engaged { background: #b91c1c; box-shadow: 0 0 0 3px rgba(239, 68, 68, 0.3); }
+    .lb-section { margin-top: 1.5rem; }
+    .lb-section h2 { font-size: 1rem; margin-bottom: 0.5rem; color: var(--text-primary); }
+    .lb-table { width: 100%; border-collapse: collapse; font-size: 0.78rem; }
+    .lb-table th, .lb-table td { padding: 0.4rem 0.5rem; border-bottom: 1px solid rgba(55,65,81,0.4); text-align: left; vertical-align: top; }
+    .lb-table th { color: var(--text-muted); font-weight: 600; text-transform: uppercase; letter-spacing: 0.4px; font-size: 0.65rem; }
+    .lb-pl-positive { color: var(--accent-primary); }
+    .lb-pl-negative { color: #ef4444; }
+    .lb-edge-badge {
+        display: inline-block; padding: 0.1rem 0.5rem; border-radius: 999px;
+        font-size: 0.7rem; font-weight: 700;
+    }
+    .lb-edge-high   { background: rgba(16, 185, 129, 0.15); color: var(--accent-primary); }
+    .lb-edge-medium { background: rgba(245, 158, 11, 0.18); color: var(--accent-warning); }
+    .lb-edge-low    { background: rgba(107, 114, 128, 0.2); color: var(--text-muted); }
+    .lb-actions button {
+        padding: 0.3rem 0.7rem; border-radius: 6px; border: 1px solid var(--border);
+        background: transparent; color: var(--text-secondary); cursor: pointer; font-size: 0.75rem;
+    }
+    .lb-actions button.primary { background: var(--accent-primary); color: white; border-color: var(--accent-primary); }
+    .lb-toast { padding: 0.5rem; margin-top: 0.4rem; border-radius: 6px; font-size: 0.8rem; }
+    .lb-toast.ok { background: rgba(16, 185, 129, 0.15); color: var(--accent-primary); }
+    .lb-toast.error { background: rgba(239, 68, 68, 0.15); color: #ef4444; }
+    .lb-cap-bar {
+        display: block; width: 100%; height: 6px; border-radius: 3px;
+        background: rgba(55, 65, 81, 0.5); margin-top: 0.3rem; overflow: hidden;
+    }
+    .lb-cap-bar-fill { display: block; height: 100%; background: var(--accent-primary); }
+    .lb-cap-bar-fill.warn { background: var(--accent-warning); }
+    .lb-cap-bar-fill.danger { background: #ef4444; }
+</style>
+{% endblock %}
+{% block content %}
+<div class="lb-header">
+    <h1>Live Betting</h1>
+    <div style="display: flex; gap: 0.6rem; align-items: center;">
+        <div class="lb-mode-toggle" id="mode-toggle">
+            <button data-mode="OFF">OFF</button>
+            <button data-mode="MANUAL">MANUAL</button>
+            <button data-mode="AUTO">AUTO</button>
+        </div>
+        <button class="lb-kill" id="kill-switch-btn">KILL SWITCH</button>
+    </div>
+</div>
+
+<div class="lb-status-bar" id="status-bar">
+    <div class="lb-status-cell"><div class="lb-label">Mode</div><div class="lb-value" id="status-mode">--</div></div>
+    <div class="lb-status-cell"><div class="lb-label">Today P&L</div><div class="lb-value" id="status-todays-pl">--</div></div>
+    <div class="lb-status-cell"><div class="lb-label">Today bets</div><div class="lb-value" id="status-todays-bets">--</div></div>
+    <div class="lb-status-cell"><div class="lb-label">Open exposure</div><div class="lb-value" id="status-exposure">--</div></div>
+    <div class="lb-status-cell"><div class="lb-label">Today stake cap left</div><div class="lb-value" id="status-cap-today">--</div><div class="lb-cap-bar"><span class="lb-cap-bar-fill" id="status-cap-today-bar"></span></div></div>
+    <div class="lb-status-cell"><div class="lb-label">Deposit cap left</div><div class="lb-value" id="status-cap-deposit">--</div><div class="lb-cap-bar"><span class="lb-cap-bar-fill" id="status-cap-deposit-bar"></span></div></div>
+    <div class="lb-status-cell"><div class="lb-label">Settled bets total</div><div class="lb-value" id="status-settled-total">--</div></div>
+    <div class="lb-status-cell"><div class="lb-label">Auto markets</div><div class="lb-value" id="status-auto-markets" style="font-size: 0.75rem;">--</div></div>
+</div>
+
+<div class="lb-section">
+    <h2>Today's bets</h2>
+    <table class="lb-table" id="todays-bets-table">
+        <thead><tr>
+            <th>Time</th><th>Market</th><th>Side</th><th>Size</th>
+            <th>Edge</th><th>Status</th><th>Fill</th><th>P&L</th>
+        </tr></thead>
+        <tbody id="todays-bets-body">
+            <tr><td colspan="8" style="text-align:center; color: var(--text-muted);">Loading...</td></tr>
+        </tbody>
+    </table>
+</div>
+
+<div class="lb-section">
+    <h2>Recent settled bets</h2>
+    <table class="lb-table" id="recent-settled-table">
+        <thead><tr>
+            <th>Date</th><th>Market</th><th>Side</th><th>Size</th>
+            <th>Edge</th><th>Settle</th><th>P&L</th>
+        </tr></thead>
+        <tbody id="recent-settled-body">
+            <tr><td colspan="7" style="text-align:center; color: var(--text-muted);">Loading...</td></tr>
+        </tbody>
+    </table>
+</div>
+
+<div class="lb-section">
+    <h2>Surfaced edges (manual placement)</h2>
+    <p style="color: var(--text-muted); font-size: 0.8rem;">
+        After running Bulk Predict, edges flagged above the auto-min-edge threshold appear here for manual approval.
+        AUTO mode places these automatically (subject to per-market gating).
+    </p>
+    <div id="surfaced-edges-list">
+        <em style="color: var(--text-muted); font-size: 0.85rem;">No surfaced edges yet. Run Bulk Predict to populate this list.</em>
+    </div>
+</div>
+
+<div class="lb-section">
+    <h2>Dashboard <small style="font-weight: 400; color: var(--text-muted); font-size: 0.7rem;">— Phase 7 live ops monitoring</small></h2>
+    <div id="dashboard-summary" style="display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 0.5rem; font-size: 0.78rem;">
+        <div class="lb-status-cell"><div class="lb-label">Settled bets</div><div class="lb-value" id="dash-n-settled">--</div></div>
+        <div class="lb-status-cell"><div class="lb-label">Cumulative P&L</div><div class="lb-value" id="dash-cum-pl">--</div></div>
+        <div class="lb-status-cell"><div class="lb-label">Brier (last 30)</div><div class="lb-value" id="dash-brier-30">--</div></div>
+        <div class="lb-status-cell"><div class="lb-label">Brier (all)</div><div class="lb-value" id="dash-brier-all">--</div></div>
+    </div>
+
+    <h3 style="margin-top: 1rem; font-size: 0.85rem;">Per-market realised ROI</h3>
+    <table class="lb-table" id="dash-per-market-table">
+        <thead><tr><th>Market</th><th>n bets</th><th>Win rate</th><th>ROI</th><th>P&L</th></tr></thead>
+        <tbody id="dash-per-market-body">
+            <tr><td colspan="5" style="text-align:center; color: var(--text-muted);">No settled bets yet.</td></tr>
+        </tbody>
+    </table>
+
+    <h3 style="margin-top: 1rem; font-size: 0.85rem;">Live calibration on settled bets</h3>
+    <p style="color: var(--text-muted); font-size: 0.7rem; margin: 0.2rem 0;">
+        Each row: predicted-probability bucket vs actual outcome win rate. Perfectly calibrated would have mean_pred ≈ actual_win_rate.
+    </p>
+    <table class="lb-table" id="dash-calibration-table">
+        <thead><tr><th>Bucket</th><th>n</th><th>Mean predicted</th><th>Actual win rate</th></tr></thead>
+        <tbody id="dash-calibration-body">
+            <tr><td colspan="4" style="text-align:center; color: var(--text-muted);">No settled bets yet.</td></tr>
+        </tbody>
+    </table>
+
+    <h3 style="margin-top: 1rem; font-size: 0.85rem;">Envelope graduation</h3>
+    <p style="color: var(--text-muted); font-size: 0.75rem;" id="scale-up-msg">
+        Need at least <span id="scale-up-min-bets">50</span> settled bets to enable graduation.
+    </p>
+    <div id="scale-up-actions" style="display:none;">
+        <button class="lb-actions" onclick="scaleUp('500')" style="margin-right: 0.5rem;">Graduate to $500 envelope</button>
+        <button class="lb-actions" onclick="scaleUp('1000')">Graduate to $1000 envelope</button>
+    </div>
+</div>
+
+<div id="toast-area"></div>
+
+<script>
+    let currentStatus = null;
+
+    function fmtUsd(v) {
+        if (v === null || v === undefined) return '--';
+        const n = Number(v);
+        return (n < 0 ? '-' : '') + '$' + Math.abs(n).toFixed(2);
+    }
+
+    function plClass(v) {
+        if (v === null || v === undefined) return '';
+        return v >= 0 ? 'lb-pl-positive' : 'lb-pl-negative';
+    }
+
+    function edgeBadge(edgePp) {
+        if (edgePp === null || edgePp === undefined) return '<span class="lb-edge-badge lb-edge-low">--</span>';
+        const v = Number(edgePp);
+        const cls = Math.abs(v) >= 10 ? 'lb-edge-high' : Math.abs(v) >= 5 ? 'lb-edge-medium' : 'lb-edge-low';
+        return `<span class="lb-edge-badge ${cls}">${v > 0 ? '+' : ''}${v.toFixed(1)} pp</span>`;
+    }
+
+    function showToast(msg, kind) {
+        const t = document.createElement('div');
+        t.className = 'lb-toast ' + (kind || 'ok');
+        t.textContent = msg;
+        document.getElementById('toast-area').appendChild(t);
+        setTimeout(() => t.remove(), 6000);
+    }
+
+    function updateStatusBar(status) {
+        currentStatus = status;
+        document.getElementById('status-mode').textContent = status.mode;
+        document.getElementById('status-todays-pl').textContent = fmtUsd(- (status.today_realised_loss_usdc || 0));
+        document.getElementById('status-todays-pl').className = 'lb-value ' + plClass(-(status.today_realised_loss_usdc || 0));
+        document.getElementById('status-todays-bets').textContent = status.today_bet_count;
+        document.getElementById('status-exposure').textContent = fmtUsd(status.open_exposure_usdc);
+        document.getElementById('status-cap-today').textContent = fmtUsd(status.today_remaining_cap_usdc);
+        document.getElementById('status-cap-deposit').textContent = fmtUsd(status.deposit_remaining_cap_usdc);
+        document.getElementById('status-settled-total').textContent = status.settled_bets_total;
+        document.getElementById('status-auto-markets').textContent = (status.auto_enabled_markets || []).join(', ') || '(none)';
+
+        // Cap bars
+        const todayPct = status.max_per_day_usdc > 0 ? (status.today_filled_stakes_usdc / status.max_per_day_usdc) * 100 : 0;
+        const todayBar = document.getElementById('status-cap-today-bar');
+        todayBar.style.width = `${Math.min(100, todayPct)}%`;
+        todayBar.className = 'lb-cap-bar-fill ' + (todayPct >= 90 ? 'danger' : todayPct >= 70 ? 'warn' : '');
+
+        const depositPct = status.max_deposit_usdc > 0 ? (status.open_exposure_usdc / status.max_deposit_usdc) * 100 : 0;
+        const depositBar = document.getElementById('status-cap-deposit-bar');
+        depositBar.style.width = `${Math.min(100, depositPct)}%`;
+        depositBar.className = 'lb-cap-bar-fill ' + (depositPct >= 90 ? 'danger' : depositPct >= 70 ? 'warn' : '');
+
+        // Mode toggle
+        document.querySelectorAll('#mode-toggle button').forEach(btn => {
+            btn.classList.remove('active', 'OFF', 'MANUAL', 'AUTO');
+            if (btn.dataset.mode === status.mode) {
+                btn.classList.add('active', status.mode);
+            }
+        });
+
+        // Kill switch button
+        const killBtn = document.getElementById('kill-switch-btn');
+        if (status.kill_switch) {
+            killBtn.textContent = 'KILL SWITCH ENGAGED — click to release';
+            killBtn.classList.add('engaged');
+        } else {
+            killBtn.textContent = 'KILL SWITCH';
+            killBtn.classList.remove('engaged');
+        }
+    }
+
+    async function fetchStatus() {
+        const r = await fetch('/api/betting/config');
+        const status = await r.json();
+        updateStatusBar(status);
+    }
+
+    async function fetchTodaysBets() {
+        const r = await fetch('/api/betting/today');
+        const data = await r.json();
+        const body = document.getElementById('todays-bets-body');
+        if (!data.success || !data.bets || data.bets.length === 0) {
+            body.innerHTML = '<tr><td colspan="8" style="text-align:center; color: var(--text-muted);">No bets placed today.</td></tr>';
+            return;
+        }
+        body.innerHTML = data.bets.map(b => `
+            <tr>
+                <td>${(b.proposed_at || '').slice(11, 16)}</td>
+                <td>${b.market_type}</td>
+                <td>${b.side_label || ''}<br/><span style="color: var(--text-muted); font-size:0.7rem;">${b.side}</span></td>
+                <td>${fmtUsd(b.size_usdc)}</td>
+                <td>${edgeBadge(b.edge_pp)}</td>
+                <td>${b.status}</td>
+                <td>${b.fill_price !== null ? Number(b.fill_price).toFixed(3) + ' / ' + fmtUsd(b.fill_size_usdc) : '--'}</td>
+                <td class="${plClass(b.pnl_realised_usdc)}">${b.pnl_realised_usdc !== null ? fmtUsd(b.pnl_realised_usdc) : '--'}</td>
+            </tr>
+        `).join('');
+    }
+
+    async function fetchRecentSettled() {
+        const r = await fetch('/api/betting/recent-settled');
+        const data = await r.json();
+        const body = document.getElementById('recent-settled-body');
+        if (!data.success || !data.bets || data.bets.length === 0) {
+            body.innerHTML = '<tr><td colspan="7" style="text-align:center; color: var(--text-muted);">No settled bets yet.</td></tr>';
+            return;
+        }
+        body.innerHTML = data.bets.map(b => `
+            <tr>
+                <td>${(b.settled_at || '').slice(0, 10)}</td>
+                <td>${b.market_type}</td>
+                <td>${b.side_label || ''} (${b.side})</td>
+                <td>${fmtUsd(b.size_usdc)}</td>
+                <td>${edgeBadge(b.edge_pp)}</td>
+                <td>${b.settle_outcome === 1 ? 'YES' : (b.settle_outcome === 0 ? 'NO' : '--')}</td>
+                <td class="${plClass(b.pnl_realised_usdc)}">${fmtUsd(b.pnl_realised_usdc)}</td>
+            </tr>
+        `).join('');
+    }
+
+    document.getElementById('mode-toggle').addEventListener('click', async (e) => {
+        if (e.target.tagName !== 'BUTTON') return;
+        const newMode = e.target.dataset.mode;
+        if (!newMode) return;
+        try {
+            const r = await fetch('/api/betting/mode', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({mode: newMode}),
+            });
+            const data = await r.json();
+            if (data.success) {
+                showToast(`Mode set to ${newMode}`, 'ok');
+                await fetchStatus();
+            } else {
+                showToast('Mode change failed: ' + (data.error || 'unknown'), 'error');
+            }
+        } catch (err) {
+            showToast('Mode change failed: ' + err.message, 'error');
+        }
+    });
+
+    document.getElementById('kill-switch-btn').addEventListener('click', async () => {
+        const action = currentStatus && currentStatus.kill_switch ? 'release' : 'engage';
+        const confirmText = action === 'engage'
+            ? 'Engage kill switch? All betting will be blocked until released.'
+            : 'Release kill switch? Betting will resume per BETTING_MODE.';
+        if (!confirm(confirmText)) return;
+        try {
+            const r = await fetch('/api/betting/kill-switch', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({action}),
+            });
+            const data = await r.json();
+            if (data.success) {
+                showToast(`Kill switch ${action}d`, 'ok');
+                await fetchStatus();
+            } else {
+                showToast('Kill switch toggle failed: ' + (data.error || 'unknown'), 'error');
+            }
+        } catch (err) {
+            showToast('Kill switch failed: ' + err.message, 'error');
+        }
+    });
+
+    async function fetchDashboard() {
+        const r = await fetch('/api/betting/dashboard');
+        const data = await r.json();
+        if (!data.success) return;
+        document.getElementById('dash-n-settled').textContent = data.n_settled;
+        const cum = data.cumulative_pnl_timeline.length
+            ? data.cumulative_pnl_timeline[data.cumulative_pnl_timeline.length - 1].cumulative_pnl_usdc
+            : 0;
+        document.getElementById('dash-cum-pl').textContent = fmtUsd(cum);
+        document.getElementById('dash-cum-pl').className = 'lb-value ' + plClass(cum);
+        document.getElementById('dash-brier-30').textContent = data.rolling_brier.last_30 ?? '--';
+        document.getElementById('dash-brier-all').textContent = data.rolling_brier.all ?? '--';
+
+        // Per-market table
+        const pmBody = document.getElementById('dash-per-market-body');
+        const pmEntries = Object.entries(data.per_market_summary || {});
+        if (!pmEntries.length) {
+            pmBody.innerHTML = '<tr><td colspan="5" style="text-align:center; color: var(--text-muted);">No settled bets yet.</td></tr>';
+        } else {
+            pmBody.innerHTML = pmEntries.map(([mt, s]) => `
+                <tr>
+                    <td>${mt}</td>
+                    <td>${s.n}</td>
+                    <td>${s.win_rate !== null ? (s.win_rate * 100).toFixed(1) + '%' : '--'}</td>
+                    <td class="${plClass(s.roi_pct)}">${s.roi_pct.toFixed(2)}%</td>
+                    <td class="${plClass(s.total_pnl_usdc)}">${fmtUsd(s.total_pnl_usdc)}</td>
+                </tr>
+            `).join('');
+        }
+
+        // Calibration
+        const cBody = document.getElementById('dash-calibration-body');
+        const cRows = (data.calibration_deciles || []).filter(c => c.n > 0);
+        if (!cRows.length) {
+            cBody.innerHTML = '<tr><td colspan="4" style="text-align:center; color: var(--text-muted);">No settled bets yet.</td></tr>';
+        } else {
+            cBody.innerHTML = cRows.map(c => `
+                <tr>
+                    <td>[${c.lo.toFixed(1)}, ${c.hi.toFixed(1)})</td>
+                    <td>${c.n}</td>
+                    <td>${c.mean_pred.toFixed(3)}</td>
+                    <td>${c.actual_win_rate.toFixed(3)}</td>
+                </tr>
+            `).join('');
+        }
+
+        // Scale-up
+        const scaleUpActions = document.getElementById('scale-up-actions');
+        const scaleUpMsg = document.getElementById('scale-up-msg');
+        if (data.scale_up_eligible) {
+            scaleUpActions.style.display = 'block';
+            scaleUpMsg.textContent = 'Eligible for envelope graduation. Bumping the envelope reads new caps from .env.';
+        } else {
+            scaleUpActions.style.display = 'none';
+            const need = currentStatus ? (currentStatus.scale_up_eligible ? 0 : 50 - data.n_settled) : '...';
+            scaleUpMsg.innerHTML = `Need <strong>${50 - data.n_settled}</strong> more settled bets before envelope graduation is unlocked.`;
+        }
+    }
+
+    async function scaleUp(target) {
+        if (!confirm(`Graduate envelope to $${target}? This bumps deposit/per-bet/per-day caps in .env.`)) return;
+        try {
+            const r = await fetch('/api/betting/scale-up', {
+                method: 'POST', headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({target}),
+            });
+            const data = await r.json();
+            if (data.success) {
+                showToast(`Envelope graduated to $${target}`, 'ok');
+                await fetchStatus();
+            } else {
+                showToast(`Scale-up failed: ${data.error}`, 'error');
+            }
+        } catch (err) {
+            showToast(`Scale-up failed: ${err.message}`, 'error');
+        }
+    }
+
+    fetchStatus();
+    fetchTodaysBets();
+    fetchRecentSettled();
+    fetchDashboard();
+    setInterval(fetchStatus, 10000);
+    setInterval(fetchTodaysBets, 30000);
+    setInterval(fetchRecentSettled, 60000);
+    setInterval(fetchDashboard, 60000);
+</script>
+{% endblock %}

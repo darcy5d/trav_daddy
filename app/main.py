@@ -23,7 +23,7 @@ import logging
 import subprocess
 import sys
 from pathlib import Path
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Optional, Dict, List, Any
 
 # Configure TensorFlow early (before any imports that might use it)
@@ -51,7 +51,6 @@ from src.features.toss_stats import TossSimulator
 from src.api.crex_scraper import format_type_to_model_format
 from src.integrations.credentials import get_market_credentials_status
 from src.integrations.polymarket import PolymarketClient
-from src.integrations.betfair import BetfairSessionManager
 from src.integrations.odds import PolymarketComparisonService
 
 # Initialize Flask app
@@ -78,6 +77,14 @@ try:
 except Exception as _exc:  # pragma: no cover - logged but non-fatal at import time
     logger.warning(f"Franchise schema init failed at startup: {_exc}")
 
+# Wave 5 Phase 6b: bet ledger schema (V5).
+try:
+    from src.data.database import init_betting_tables as _init_betting_tables
+
+    _init_betting_tables()
+except Exception as _exc:  # pragma: no cover - logged but non-fatal at import time
+    logger.warning(f"Betting schema init failed at startup: {_exc}")
+
 # Lazy load simulators (they take time to initialize)
 # Cache per gender to avoid re-initializing
 _fast_simulators = {}  # {'male': simulator, 'female': simulator}
@@ -89,7 +96,6 @@ _source_status_cache = None
 _source_status_cache_expires = None
 SOURCE_STATUS_CACHE_TTL_SECONDS = 20 * 60
 _polymarket_client = None
-_betfair_session_manager = None
 _polymarket_compare_service = None
 
 
@@ -130,15 +136,6 @@ def get_polymarket_client() -> PolymarketClient:
         _polymarket_client = PolymarketClient()
         logger.info("Polymarket client initialized")
     return _polymarket_client
-
-
-def get_betfair_session_manager() -> BetfairSessionManager:
-    """Get or initialize Betfair session manager."""
-    global _betfair_session_manager
-    if _betfair_session_manager is None:
-        _betfair_session_manager = BetfairSessionManager()
-        logger.info("Betfair session manager initialized")
-    return _betfair_session_manager
 
 
 def get_polymarket_compare_service() -> PolymarketComparisonService:
@@ -2379,6 +2376,21 @@ def simulate_match():
             'franchise_info': franchise_info,
         }
 
+        # Wave 5 Phase 1-2: surface multi-market probabilities when the V2
+        # simulator emits them. V1 results don't have team1_player_runs etc;
+        # we just skip in that case so the response shape stays a strict superset.
+        if 'team1_player_runs' in results:
+            try:
+                from src.models.market_outputs import (
+                    derive_polymarket_market_probs,
+                    market_summary_for_ui,
+                )
+                full_market_probs = derive_polymarket_market_probs(results)
+                response['market_probs'] = full_market_probs
+                response['market_probs_summary'] = market_summary_for_ui(full_market_probs)
+            except Exception as exc:
+                logger.warning(f"Failed to derive multi-market probs: {exc}")
+
         # Generate detailed scorecard for NN simulator
         if simulator_type == 'nn' and hasattr(simulator, 'simulate_detailed_match'):
             try:
@@ -2679,6 +2691,13 @@ def simulate_match_stream():
             
             all_team1_scores = []
             all_team2_scores = []
+            # Wave 5 Phase 1-2: per-chunk per-batter runs + per-team sixes,
+            # concatenated across chunks for downstream Polymarket sub-market
+            # probability extraction. Empty list when V1 simulator (no extras).
+            all_team1_player_runs = []
+            all_team2_player_runs = []
+            all_team1_sixes = []
+            all_team2_sixes = []
             total_team1_wins = 0  # Running count (avoid list sum)
             completed = 0
             last_progress_at = 0
@@ -2712,6 +2731,12 @@ def simulate_match_stream():
                 all_team2_scores.append(t2_scores)
                 chunk_wins = int((t1_scores > t2_scores).sum())
                 total_team1_wins += chunk_wins
+                # V2-only multi-market arrays (V1 simulator chunks won't have these keys)
+                if 'team1_player_runs' in chunk_results:
+                    all_team1_player_runs.append(chunk_results['team1_player_runs'])
+                    all_team2_player_runs.append(chunk_results['team2_player_runs'])
+                    all_team1_sixes.append(chunk_results['team1_sixes'])
+                    all_team2_sixes.append(chunk_results['team2_sixes'])
                 
                 # Accumulate toss stats
                 if use_toss and 'toss_stats' in chunk_results:
@@ -2803,6 +2828,28 @@ def simulate_match_stream():
                 'dist_quality': chunk_results.get('dist_quality'),
                 'franchise_info': franchise_info,
             }
+
+            # Wave 5 Phase 1-2: surface multi-market probabilities when V2 sim was used.
+            if all_team1_player_runs:
+                try:
+                    from src.models.market_outputs import (
+                        derive_polymarket_market_probs,
+                        market_summary_for_ui,
+                    )
+                    aggregated = {
+                        'team1_win_prob': team1_wins.mean(),
+                        'team1_player_runs': np.concatenate(all_team1_player_runs, axis=0),
+                        'team2_player_runs': np.concatenate(all_team2_player_runs, axis=0),
+                        'team1_sixes': np.concatenate(all_team1_sixes),
+                        'team2_sixes': np.concatenate(all_team2_sixes),
+                        'team1_batter_ids': chunk_results.get('team1_batter_ids', team1_batting_order),
+                        'team2_batter_ids': chunk_results.get('team2_batter_ids', team2_batting_order),
+                    }
+                    full_market_probs = derive_polymarket_market_probs(aggregated)
+                    result['market_probs'] = full_market_probs
+                    result['market_probs_summary'] = market_summary_for_ui(full_market_probs)
+                except Exception as exc:
+                    logger.warning(f"Bulk predict: failed to derive multi-market probs: {exc}")
 
             # Generate scorecard for NN simulator
             if simulator_type == 'nn' and hasattr(simulator, 'simulate_detailed_match'):
@@ -4676,41 +4723,1041 @@ def polymarket_compare_batch():
         return jsonify({'success': False, 'error': str(e)}), 500
 
 
-@app.route('/api/integrations/betfair/session/status', methods=['GET'])
-def betfair_session_status():
-    """Get Betfair session status (masked)."""
-    try:
-        manager = get_betfair_session_manager()
-        return jsonify(manager.status())
-    except Exception as e:
-        logger.error(f"Error getting Betfair session status: {e}")
-        return jsonify({'success': False, 'error': str(e)}), 500
+@app.route('/api/integrations/polymarket/compare/multi', methods=['POST'])
+def polymarket_compare_multi():
+    """Wave 5: multi-market Polymarket comparison for a single fixture.
 
+    Body:
+        {
+            "team1": str,
+            "team2": str,
+            "start_utc": str (optional),
+            "series": str (optional),
+            "market_probs": dict from derive_polymarket_market_probs (required)
+        }
 
-@app.route('/api/integrations/betfair/session/bootstrap', methods=['POST'])
-def betfair_session_bootstrap():
-    """Bootstrap Betfair session token using configured auth path."""
+    Returns the 4-market structure (moneyline, top_batter, most_sixes,
+    toss_match_double) with model probabilities, market prices, and edge
+    in percentage points per outcome.
+    """
     try:
         payload = request.get_json(silent=True) or {}
-        force_refresh = bool(payload.get('force_refresh', False))
-        prefer_cert_login = bool(payload.get('prefer_cert_login', False))
+        team1 = (payload.get('team1') or '').strip()
+        team2 = (payload.get('team2') or '').strip()
+        if not team1 or not team2:
+            return jsonify({'success': False, 'error': 'team1 and team2 required'}), 400
+        market_probs = payload.get('market_probs') or {}
+        if not market_probs:
+            return jsonify({
+                'success': False,
+                'error': 'market_probs is required (from derive_polymarket_market_probs)',
+            }), 400
 
-        manager = get_betfair_session_manager()
-        result = manager.bootstrap(force_refresh=force_refresh, prefer_cert_login=prefer_cert_login)
+        service = get_polymarket_compare_service()
+        result = service.compare_fixture_multi(
+            team1=team1,
+            team2=team2,
+            market_probs=market_probs,
+            start_utc=payload.get('start_utc'),
+            series=payload.get('series'),
+        )
         return jsonify(result)
     except Exception as e:
-        logger.error(f"Error bootstrapping Betfair session: {e}")
+        logger.error(f"Error in multi-market Polymarket comparison: {e}")
         return jsonify({'success': False, 'error': str(e)}), 500
 
 
-@app.route('/api/integrations/betfair/session/keep-alive', methods=['POST'])
-def betfair_session_keep_alive():
-    """Keep Betfair session alive."""
+@app.route('/api/integrations/polymarket/compare/multi/batch', methods=['POST'])
+def polymarket_compare_multi_batch():
+    """Wave 5: batch multi-market Polymarket comparison.
+
+    Body:
+        {
+            "fixtures": [
+                {
+                    "team1": str, "team2": str,
+                    "start_utc": str?, "series": str?,
+                    "market_probs": {moneyline:..., top_batter:..., most_sixes:..., toss_match_double:...},
+                    "row_key": str?,
+                },
+                ...
+            ]
+        }
+    """
     try:
-        manager = get_betfair_session_manager()
-        return jsonify(manager.keep_alive())
+        payload = request.get_json(silent=True) or {}
+        fixtures = payload.get('fixtures') or []
+        if not isinstance(fixtures, list):
+            return jsonify({'success': False, 'error': 'fixtures must be an array'}), 400
+
+        service = get_polymarket_compare_service()
+        result = service.compare_batch_multi(fixtures)
+        return jsonify(result)
     except Exception as e:
-        logger.error(f"Error keeping Betfair session alive: {e}")
+        logger.error(f"Error in multi-market batch comparison: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+# ============================================================================
+# Wave 5 Phase 6c-d: Live Betting routes
+# ============================================================================
+
+@app.route('/live-betting')
+def live_betting_page():
+    """Wave 5 Phase 6d: Live Betting tab."""
+    return render_template('live_betting.html')
+
+
+@app.route('/api/betting/config', methods=['GET'])
+def betting_config():
+    """Current betting risk-gate state + caps + remaining-cap snapshot."""
+    try:
+        from src.integrations.polymarket.risk_gate import get_risk_status
+        return jsonify(get_risk_status())
+    except Exception as e:
+        logger.error(f"Error getting betting config: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/betting/today', methods=['GET'])
+def betting_today():
+    """Today's bets (UTC) for the Live Betting tab."""
+    try:
+        from src.data.database import get_connection
+        from datetime import datetime, timezone
+        today_iso = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0).isoformat()
+        with get_connection() as conn:
+            cur = conn.cursor()
+            cur.execute(
+                """
+                SELECT * FROM bet_ledger
+                WHERE proposed_at >= ?
+                ORDER BY proposed_at DESC
+                LIMIT 100
+                """,
+                (today_iso,),
+            )
+            bets = [dict(r) for r in cur.fetchall()]
+        return jsonify({'success': True, 'bets': bets})
+    except Exception as e:
+        logger.error(f"Error fetching today's bets: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/betting/recent-settled', methods=['GET'])
+def betting_recent_settled():
+    """Last 50 settled bets."""
+    try:
+        from src.data.database import get_connection
+        with get_connection() as conn:
+            cur = conn.cursor()
+            cur.execute(
+                """
+                SELECT * FROM bet_ledger
+                WHERE settled_at IS NOT NULL
+                ORDER BY settled_at DESC
+                LIMIT 50
+                """
+            )
+            bets = [dict(r) for r in cur.fetchall()]
+        return jsonify({'success': True, 'bets': bets})
+    except Exception as e:
+        logger.error(f"Error fetching recent settled bets: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/betting/place', methods=['POST'])
+def betting_place():
+    """Manual bet placement endpoint.
+
+    Body:
+        {
+            "fixture_key": str,
+            "match_id": int (optional),
+            "market_type": "moneyline" | "top_batter" | "most_sixes" | "toss_match_double",
+            "polymarket_market_id": str,
+            "polymarket_token_id": str,
+            "side_label": str,
+            "model_prob": float [0,1],
+            "market_price_at_proposal": float [0,1],
+            "side": "BUY" | "SELL",
+            "size_usdc": float,
+            "mode": "manual" | "auto" (default "manual")
+        }
+    """
+    try:
+        from src.integrations.polymarket.bet_placement import place_bet
+        payload = request.get_json(silent=True) or {}
+        result = place_bet(
+            fixture_key=str(payload.get('fixture_key', '')),
+            match_id=payload.get('match_id'),
+            market_type=str(payload.get('market_type', '')),
+            polymarket_market_id=str(payload.get('polymarket_market_id', '')),
+            polymarket_token_id=str(payload.get('polymarket_token_id', '')),
+            side_label=str(payload.get('side_label', '')),
+            model_prob=float(payload.get('model_prob', 0)),
+            market_price_at_proposal=float(payload.get('market_price_at_proposal', 0)),
+            side=str(payload.get('side', 'BUY')),
+            size_usdc=float(payload.get('size_usdc', 0)),
+            requested_mode=str(payload.get('mode', 'manual')),
+        )
+        return jsonify(result)
+    except Exception as e:
+        logger.error(f"Error placing bet: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/betting/kill-switch', methods=['POST'])
+def betting_kill_switch():
+    """Engage / release the kill switch."""
+    try:
+        from src.integrations.polymarket.risk_gate import (
+            engage_kill_switch, disengage_kill_switch,
+        )
+        payload = request.get_json(silent=True) or {}
+        action = (payload.get('action') or 'engage').lower()
+        if action == 'engage':
+            result = engage_kill_switch()
+        elif action == 'release':
+            result = disengage_kill_switch()
+        else:
+            return jsonify({'success': False, 'error': f'Invalid action: {action}'}), 400
+        return jsonify({'success': True, **result})
+    except Exception as e:
+        logger.error(f"Error toggling kill switch: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/betting/mode', methods=['POST'])
+def betting_mode():
+    """Toggle BETTING_MODE between OFF / MANUAL / AUTO."""
+    try:
+        from src.integrations.polymarket.risk_gate import set_mode
+        payload = request.get_json(silent=True) or {}
+        new_mode = (payload.get('mode') or 'OFF').upper()
+        return jsonify(set_mode(new_mode))
+    except Exception as e:
+        logger.error(f"Error setting mode: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/betting/reconcile', methods=['POST'])
+def betting_reconcile():
+    """Trigger reconciliation: settle any matured bets via Polymarket prices-history."""
+    try:
+        from src.integrations.polymarket.reconcile import reconcile_pending_bets
+        summary = reconcile_pending_bets()
+        return jsonify({'success': True, **summary})
+    except Exception as e:
+        logger.error(f"Error reconciling bets: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/betting/dashboard', methods=['GET'])
+def betting_dashboard():
+    """Wave 5 Phase 7: live ops dashboard data.
+
+    Returns:
+        - cumulative P&L timeline (one point per settled bet)
+        - 10-bin calibration on settled bets (model_prob bucket vs actual win rate)
+        - per-market-type realised ROI
+        - rolling Brier on bets-placed (last 30, 60, all)
+        - scale-up gate eligibility flag
+    """
+    try:
+        import math
+        from src.data.database import get_connection
+        with get_connection() as conn:
+            cur = conn.cursor()
+            cur.execute(
+                """
+                SELECT settled_at, market_type, model_prob, settle_outcome,
+                       fill_size_usdc, pnl_realised_usdc
+                FROM bet_ledger
+                WHERE settled_at IS NOT NULL
+                ORDER BY settled_at ASC
+                """
+            )
+            settled = [dict(r) for r in cur.fetchall()]
+
+        # Cumulative P&L timeline
+        cum = 0.0
+        timeline = []
+        for b in settled:
+            cum += float(b.get('pnl_realised_usdc') or 0)
+            timeline.append({
+                'settled_at': b['settled_at'],
+                'cumulative_pnl_usdc': round(cum, 4),
+            })
+
+        # 10-bin calibration
+        buckets = [(i / 10.0, (i + 1) / 10.0) for i in range(10)]
+        calibration = []
+        for lo, hi in buckets:
+            in_bucket = [
+                b for b in settled
+                if b.get('model_prob') is not None and b.get('settle_outcome') is not None
+                and lo <= float(b['model_prob']) < (hi if hi < 1.0 else hi + 1e-9)
+            ]
+            if not in_bucket:
+                calibration.append({'lo': lo, 'hi': hi, 'n': 0, 'mean_pred': None, 'actual_win_rate': None})
+                continue
+            mean_pred = sum(float(b['model_prob']) for b in in_bucket) / len(in_bucket)
+            wr = sum(int(b['settle_outcome']) for b in in_bucket) / len(in_bucket)
+            calibration.append({
+                'lo': lo, 'hi': hi, 'n': len(in_bucket),
+                'mean_pred': round(mean_pred, 4), 'actual_win_rate': round(wr, 4),
+            })
+
+        # Per-market realised ROI
+        per_market: dict = {}
+        for b in settled:
+            mt = b.get('market_type') or 'unknown'
+            if mt not in per_market:
+                per_market[mt] = {'n': 0, 'staked': 0.0, 'pnl': 0.0, 'wins': 0}
+            per_market[mt]['n'] += 1
+            per_market[mt]['staked'] += float(b.get('fill_size_usdc') or 0)
+            per_market[mt]['pnl'] += float(b.get('pnl_realised_usdc') or 0)
+            if (b.get('pnl_realised_usdc') or 0) > 0:
+                per_market[mt]['wins'] += 1
+        per_market_summary = {}
+        for mt, d in per_market.items():
+            per_market_summary[mt] = {
+                'n': d['n'],
+                'win_rate': round(d['wins'] / d['n'], 3) if d['n'] else None,
+                'roi_pct': round(d['pnl'] / d['staked'] * 100, 2) if d['staked'] > 0 else 0.0,
+                'total_pnl_usdc': round(d['pnl'], 2),
+            }
+
+        # Rolling Brier
+        def _safe_log(p, eps=1e-6):
+            import math as _m
+            return _m.log(min(max(p, eps), 1.0 - eps))
+
+        def _brier_window(items):
+            terms = []
+            for b in items:
+                if b.get('model_prob') is None or b.get('settle_outcome') is None:
+                    continue
+                terms.append((float(b['model_prob']) - float(b['settle_outcome'])) ** 2)
+            return round(sum(terms) / len(terms), 4) if terms else None
+
+        rolling_brier = {
+            'last_30': _brier_window(settled[-30:]),
+            'last_60': _brier_window(settled[-60:]),
+            'all': _brier_window(settled),
+        }
+
+        # Scale-up gate eligibility
+        from src.integrations.polymarket.risk_gate import _is_scale_up_eligible
+        scale_up_eligible = _is_scale_up_eligible(len(settled))
+
+        return jsonify({
+            'success': True,
+            'n_settled': len(settled),
+            'cumulative_pnl_timeline': timeline,
+            'calibration_deciles': calibration,
+            'per_market_summary': per_market_summary,
+            'rolling_brier': rolling_brier,
+            'scale_up_eligible': scale_up_eligible,
+        })
+    except Exception as e:
+        logger.error(f"Error generating betting dashboard: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/paper-trades')
+def paper_trades_page():
+    """Wave 5.7: Paper trades dashboard."""
+    return render_template('paper_trades.html')
+
+
+@app.route('/api/paper/strategies', methods=['GET'])
+def paper_strategies():
+    """Per-strategy summary: bankroll, P&L, win rate, bet counts."""
+    try:
+        from src.data.database import get_connection
+        from src.integrations.polymarket.paper_strategies import STRATEGIES
+        starting_by_name = {s.name: s.starting_bankroll_usdc for s in STRATEGIES}
+        descriptions = {s.name: s.description for s in STRATEGIES}
+        enabled = {s.name: s.enabled for s in STRATEGIES}
+
+        with get_connection() as conn:
+            cur = conn.cursor()
+            cur.execute(
+                """
+                SELECT strategy_label,
+                       COUNT(*) AS n_bets,
+                       SUM(CASE WHEN status = 'settled' THEN 1 ELSE 0 END) AS n_settled,
+                       SUM(CASE WHEN status = 'settled' AND settle_outcome = 1 THEN 1 ELSE 0 END) AS n_won,
+                       SUM(CASE WHEN status = 'settled' THEN pnl_realised_usdc ELSE 0 END) AS realised_pnl,
+                       SUM(CASE WHEN status NOT IN ('settled', 'cancelled', 'errored') THEN size_usdc ELSE 0 END) AS open_size,
+                       MIN(proposed_at) AS first_bet_at,
+                       MAX(proposed_at) AS last_bet_at
+                FROM bet_ledger
+                WHERE bet_kind = 'paper'
+                GROUP BY strategy_label
+                """
+            )
+            rows = {r["strategy_label"]: dict(r) for r in cur.fetchall()}
+
+        out = []
+        for s in STRATEGIES:
+            r = rows.get(s.name, {})
+            n_bets = int(r.get("n_bets") or 0)
+            n_settled = int(r.get("n_settled") or 0)
+            n_won = int(r.get("n_won") or 0)
+            realised = float(r.get("realised_pnl") or 0.0)
+            open_size = float(r.get("open_size") or 0.0)
+            bankroll = s.starting_bankroll_usdc + realised
+            win_rate = (n_won / n_settled) if n_settled else None
+            roi_pct = (realised / s.starting_bankroll_usdc * 100) if s.starting_bankroll_usdc else None
+            out.append({
+                "name":          s.name,
+                "description":   s.description,
+                "enabled":       s.enabled,
+                "model_version": s.model_version,
+                "min_edge_pp":   s.min_edge_pp,
+                "starting":      s.starting_bankroll_usdc,
+                "bankroll":      round(bankroll, 2),
+                "realised_pnl":  round(realised, 2),
+                "open_size":     round(open_size, 2),
+                "roi_pct":       round(roi_pct, 2) if roi_pct is not None else None,
+                "n_bets":        n_bets,
+                "n_settled":     n_settled,
+                "n_won":         n_won,
+                "win_rate":      win_rate,
+                "first_bet_at":  r.get("first_bet_at"),
+                "last_bet_at":   r.get("last_bet_at"),
+            })
+        # Totals row
+        total_starting = sum(x["starting"] for x in out)
+        total_realised = sum(x["realised_pnl"] for x in out)
+        total_bankroll = sum(x["bankroll"] for x in out)
+        total_open = sum(x["open_size"] for x in out)
+        return jsonify({
+            "success": True,
+            "strategies": out,
+            "totals": {
+                "starting": total_starting,
+                "realised_pnl": round(total_realised, 2),
+                "bankroll": round(total_bankroll, 2),
+                "open_size": round(total_open, 2),
+                "roi_pct": round((total_realised / total_starting * 100) if total_starting else 0, 2),
+            },
+        })
+    except Exception as e:
+        logger.error(f"Error in /api/paper/strategies: {e}")
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
+@app.route('/api/paper/bets', methods=['GET'])
+def paper_bets():
+    """Open + recent paper bets, ordered by proposed_at desc.
+
+    Query: ?status=open|settled|all (default 'all'), ?limit=50, ?strategy=name
+    """
+    try:
+        from src.data.database import get_connection
+        status = (request.args.get('status') or 'all').lower()
+        strategy = request.args.get('strategy')
+        try:
+            limit = max(1, min(int(request.args.get('limit') or 100), 500))
+        except ValueError:
+            limit = 100
+
+        where = ["bet_kind = 'paper'"]
+        params = []
+        if status == 'open':
+            where.append("status NOT IN ('settled', 'cancelled', 'errored')")
+        elif status == 'settled':
+            where.append("status = 'settled'")
+        if strategy:
+            where.append("strategy_label = ?")
+            params.append(strategy)
+
+        sql = f"""
+            SELECT *
+            FROM bet_ledger
+            WHERE {' AND '.join(where)}
+            ORDER BY proposed_at DESC
+            LIMIT ?
+        """
+        params.append(limit)
+
+        with get_connection() as conn:
+            cur = conn.cursor()
+            cur.execute(sql, params)
+            bets = [dict(r) for r in cur.fetchall()]
+        return jsonify({"success": True, "bets": bets, "n": len(bets)})
+    except Exception as e:
+        logger.error(f"Error in /api/paper/bets: {e}")
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
+@app.route('/api/paper/bankroll-history', methods=['GET'])
+def paper_bankroll_history():
+    """Bankroll-over-time per strategy.
+
+    Computes the running bankroll CHRONOLOGICALLY: starting + cumsum(pnl)
+    ordered by settled_at. The stored `bankroll_after_settle` column is
+    NOT used because it was sometimes filled in using the frozen
+    bankroll_at_proposal (which can be stale if bets settle in a
+    different order than they were placed); cumulative-sum is the
+    canonical bankroll over time.
+    """
+    try:
+        from src.data.database import get_connection
+        from src.integrations.polymarket.paper_strategies import STRATEGIES
+        starting = {s.name: s.starting_bankroll_usdc for s in STRATEGIES}
+
+        with get_connection() as conn:
+            cur = conn.cursor()
+            cur.execute(
+                """
+                SELECT strategy_label, settled_at, pnl_realised_usdc, side_label, fixture_key
+                FROM bet_ledger
+                WHERE bet_kind = 'paper' AND status = 'settled'
+                ORDER BY strategy_label, settled_at ASC
+                """
+            )
+            rows = [dict(r) for r in cur.fetchall()]
+
+        by_strategy = {}
+        for s in STRATEGIES:
+            by_strategy[s.name] = [{
+                "timestamp": None, "bankroll": s.starting_bankroll_usdc,
+                "side_label": "starting", "fixture_key": "",
+                "pnl": 0.0,
+            }]
+        # Group rows by strategy
+        from collections import defaultdict
+        grouped = defaultdict(list)
+        for r in rows:
+            grouped[r["strategy_label"] or "(none)"].append(r)
+
+        for name, lst in grouped.items():
+            base = starting.get(name, 1000.0)
+            running = base
+            if name not in by_strategy:
+                by_strategy[name] = [{
+                    "timestamp": None, "bankroll": base,
+                    "side_label": "starting", "fixture_key": "",
+                    "pnl": 0.0,
+                }]
+            for r in lst:
+                pnl = float(r.get("pnl_realised_usdc") or 0.0)
+                running += pnl
+                by_strategy[name].append({
+                    "timestamp":   r["settled_at"],
+                    "bankroll":    round(running, 2),
+                    "side_label":  r.get("side_label"),
+                    "fixture_key": r.get("fixture_key"),
+                    "pnl":         round(pnl, 2),
+                })
+        return jsonify({"success": True, "history": by_strategy})
+    except Exception as e:
+        logger.error(f"Error in /api/paper/bankroll-history: {e}")
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
+@app.route('/api/paper/upcoming', methods=['GET'])
+def paper_upcoming():
+    """Upcoming Polymarket cricket fixtures we'll consider for paper bets."""
+    try:
+        from src.integrations.polymarket import PolymarketClient
+        from src.integrations.polymarket.upcoming import (
+            find_upcoming_cricket_events, attach_db_team_ids,
+        )
+        try:
+            hours_ahead = float(request.args.get('hours_ahead') or 96.0)
+        except ValueError:
+            hours_ahead = 96.0
+        c = PolymarketClient()
+        events = find_upcoming_cricket_events(c, hours_ahead=hours_ahead)
+        mapped = attach_db_team_ids(events)
+        out = []
+        for ev in mapped:
+            ml = ev.get("moneyline") or {}
+            out.append({
+                "fixture_key": ev["fixture_key"],
+                "tournament_name": ev["tournament_name"],
+                "format": ev["format"],
+                "gender": ev["gender"],
+                "team1": ev.get("team1_db_name") or ev.get("team1_label"),
+                "team2": ev.get("team2_db_name") or ev.get("team2_label"),
+                "team1_id": ev.get("team1_id"),
+                "team2_id": ev.get("team2_id"),
+                "scheduled_start_utc": ev["scheduled_start_estimate"].isoformat(),
+                "has_moneyline": bool(ev.get("moneyline")),
+                "moneyline_outcomes": [
+                    {"label": o.get("label"), "last_price": o.get("last_price")}
+                    for o in (ml.get("outcomes") or [])
+                ] if ml else [],
+            })
+        return jsonify({"success": True, "fixtures": out, "n": len(out)})
+    except Exception as e:
+        logger.error(f"Error in /api/paper/upcoming: {e}")
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
+@app.route('/api/paper/reconcile-only', methods=['POST'])
+def paper_reconcile_only():
+    """Lightweight: just reconcile settled markets, no expensive sim. Safe
+    to call on every dashboard auto-refresh - hits Polymarket Gamma+CLOB
+    only for unsettled bets and returns in 1-3 seconds."""
+    try:
+        from src.integrations.polymarket.reconcile import reconcile_pending_bets
+        summary = reconcile_pending_bets()
+        summary["errors"] = [
+            {"bet_id": b, "msg": str(m)} for b, m in summary.get("errors", [])
+        ]
+        return jsonify({"success": True, "reconcile": summary})
+    except Exception as e:
+        logger.error(f"Error in /api/paper/reconcile-only: {e}")
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
+@app.route('/api/paper/scan-now', methods=['POST'])
+def paper_scan_now():
+    """Trigger a manual paper-bet scan + reconcile.
+
+    Spawned as a SUBPROCESS so Flask's request thread isn't blocked by
+    TensorFlow init / 3-minute sim run. Returns immediately with a
+    'started' status; client should re-poll /api/paper/strategies (or
+    just call refreshAll on a timer) to see results when the subprocess
+    finishes.
+
+    Latest subprocess log goes to logs/paper_scan_now.log. Latest scan
+    summary is appended to data/paper_trading/daily_reports/*.json.
+    """
+    try:
+        import subprocess
+        from pathlib import Path
+        payload = request.get_json(silent=True) or {}
+        hours_ahead = float(payload.get("hours_ahead") or 96.0)
+
+        repo_root = Path(__file__).resolve().parent.parent
+        log_dir = repo_root / "logs"
+        log_dir.mkdir(parents=True, exist_ok=True)
+        log_path = log_dir / "paper_scan_now.log"
+        venv_python = repo_root / "venv311" / "bin" / "python"
+        script_path = repo_root / "scripts" / "paper_bet_daily.py"
+
+        cmd = [
+            str(venv_python), str(script_path),
+            "--hours-ahead", str(hours_ahead),
+        ]
+        # Detach: don't wait, redirect stdout/stderr to log file so the
+        # parent doesn't keep a pipe open which would tether the child.
+        with log_path.open("a") as logf:
+            logf.write(f"\n\n=== scan-now spawn at {datetime.now(timezone.utc).isoformat()} ===\n")
+            logf.flush()
+            proc = subprocess.Popen(
+                cmd,
+                cwd=str(repo_root),
+                stdout=logf,
+                stderr=subprocess.STDOUT,
+                start_new_session=True,
+            )
+
+        return jsonify({
+            "success": True,
+            "started": True,
+            "pid": proc.pid,
+            "log_path": str(log_path),
+            "message": (
+                "Scan started in background. The dashboard auto-refreshes "
+                "every 60 seconds; new bets will appear when the scan finishes "
+                "(typically 2-4 minutes)."
+            ),
+        })
+    except Exception as e:
+        logger.error(f"Error in /api/paper/scan-now: {e}")
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
+@app.route('/api/paper/resolve-xi', methods=['POST'])
+def paper_resolve_xi():
+    """Resolve a list of player names to DB player_ids, scoped to a team's
+    recent appearances. Used by the post-toss UI form so operators can paste
+    raw names ('V Kohli\\nF du Plessis\\n...') and get back resolved IDs.
+
+    Body: {team_id: int, format: 'T20'|'ODI', gender: 'male'|'female',
+           names: [str, str, ...]}
+    """
+    try:
+        from src.data.database import get_connection
+        from src.utils.name_matcher import match_abbreviated_name
+        payload = request.get_json(silent=True) or {}
+        team_id = int(payload.get("team_id") or 0)
+        fmt = str(payload.get("format") or "T20")
+        gender = str(payload.get("gender") or "male")
+        names = payload.get("names") or []
+        if not team_id or not names:
+            return jsonify({"success": False, "error": "team_id and names required"}), 400
+
+        with get_connection() as conn:
+            cur = conn.cursor()
+            cur.execute(
+                """
+                SELECT DISTINCT pms.player_id, p.name
+                FROM player_match_stats pms
+                JOIN players p ON p.player_id = pms.player_id
+                JOIN matches m ON m.match_id = pms.match_id
+                WHERE pms.team_id = ?
+                  AND m.match_type = ? AND m.gender = ?
+                  AND m.date >= '2023-01-01'
+                """,
+                (team_id, fmt, gender),
+            )
+            candidates = [(r["player_id"], r["name"]) for r in cur.fetchall()]
+
+        results = []
+        for raw in names:
+            raw = (raw or "").strip()
+            if not raw:
+                results.append({"input": raw, "matched": False, "player_id": None, "name": None, "score": 0})
+                continue
+            match = match_abbreviated_name(raw, candidates, threshold=0.55)
+            if match:
+                pid, full_name, score = match
+                results.append({
+                    "input": raw, "matched": True, "player_id": pid,
+                    "name": full_name, "score": round(score, 3),
+                })
+            else:
+                results.append({
+                    "input": raw, "matched": False, "player_id": None,
+                    "name": None, "score": 0,
+                })
+        return jsonify({"success": True, "resolved": results})
+    except Exception as e:
+        logger.error(f"Error in /api/paper/resolve-xi: {e}")
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
+@app.route('/api/paper/auto-poller/status', methods=['GET'])
+def paper_auto_poller_status():
+    """Status of the auto-toss-detection daemon."""
+    try:
+        from pathlib import Path
+        import json
+        repo_root = Path(__file__).resolve().parent.parent
+        status_file = repo_root / "logs" / "paper_auto_post_toss_status.json"
+        pid_file = repo_root / "logs" / "paper_auto_post_toss.pid"
+
+        # Check if PID is alive
+        running = False
+        live_pid = None
+        if pid_file.exists():
+            try:
+                live_pid = int(pid_file.read_text().strip())
+                import os as _os
+                _os.kill(live_pid, 0)
+                running = True
+            except (ValueError, OSError):
+                running = False
+                live_pid = None
+
+        status: dict = {"running": running, "pid": live_pid, "status_data": None}
+        if status_file.exists():
+            try:
+                with status_file.open() as f:
+                    status["status_data"] = json.load(f)
+            except Exception:
+                status["status_data"] = {"error": "could not parse status file"}
+        return jsonify({"success": True, **status})
+    except Exception as e:
+        logger.error(f"Error in /api/paper/auto-poller/status: {e}")
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
+@app.route('/api/paper/auto-poller/start', methods=['POST'])
+def paper_auto_poller_start():
+    """Start the auto-toss-detection daemon as a detached subprocess.
+    No-op if already running."""
+    try:
+        import subprocess
+        from pathlib import Path
+        import os as _os
+        repo_root = Path(__file__).resolve().parent.parent
+        pid_file = repo_root / "logs" / "paper_auto_post_toss.pid"
+        log_dir = repo_root / "logs"
+        log_dir.mkdir(parents=True, exist_ok=True)
+        venv_python = repo_root / "venv311" / "bin" / "python"
+        script_path = repo_root / "scripts" / "paper_bet_auto_post_toss.py"
+
+        if pid_file.exists():
+            try:
+                old_pid = int(pid_file.read_text().strip())
+                _os.kill(old_pid, 0)
+                return jsonify({"success": True, "already_running": True, "pid": old_pid})
+            except (ValueError, OSError):
+                pid_file.unlink(missing_ok=True)
+
+        payload = request.get_json(silent=True) or {}
+        poll_interval = int(payload.get("poll_interval") or 90)
+        lookback_min = int(payload.get("lookback_min") or 45)
+        lookahead_min = int(payload.get("lookahead_min") or 30)
+        dry_run = bool(payload.get("dry_run") or False)
+
+        cmd = [
+            str(venv_python), str(script_path),
+            "--poll-interval", str(poll_interval),
+            "--lookback-min", str(lookback_min),
+            "--lookahead-min", str(lookahead_min),
+        ]
+        if dry_run:
+            cmd.append("--dry-run")
+
+        # Detach: redirect stdout/stderr so parent doesn't keep pipes open
+        bootstrap_log = log_dir / "paper_auto_post_toss_bootstrap.log"
+        with bootstrap_log.open("a") as logf:
+            logf.write(f"\n=== boot at {datetime.now(timezone.utc).isoformat()} via Flask ===\n")
+            logf.flush()
+            proc = subprocess.Popen(
+                cmd, cwd=str(repo_root), stdout=logf, stderr=subprocess.STDOUT,
+                start_new_session=True,
+            )
+        return jsonify({
+            "success": True, "started": True, "pid": proc.pid,
+            "config": {
+                "poll_interval": poll_interval, "lookback_min": lookback_min,
+                "lookahead_min": lookahead_min, "dry_run": dry_run,
+            },
+        })
+    except Exception as e:
+        logger.error(f"Error in /api/paper/auto-poller/start: {e}", exc_info=True)
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
+@app.route('/api/paper/auto-poller/stop', methods=['POST'])
+def paper_auto_poller_stop():
+    """Send SIGTERM to the running daemon. No-op if not running."""
+    try:
+        from pathlib import Path
+        import os as _os
+        import signal as _signal
+        repo_root = Path(__file__).resolve().parent.parent
+        pid_file = repo_root / "logs" / "paper_auto_post_toss.pid"
+        if not pid_file.exists():
+            return jsonify({"success": True, "stopped": False, "reason": "not running"})
+        try:
+            pid = int(pid_file.read_text().strip())
+        except (ValueError, OSError):
+            pid_file.unlink(missing_ok=True)
+            return jsonify({"success": True, "stopped": False, "reason": "stale-pid-file"})
+        try:
+            _os.kill(pid, _signal.SIGTERM)
+            return jsonify({"success": True, "stopped": True, "pid": pid})
+        except OSError as exc:
+            return jsonify({"success": True, "stopped": False, "reason": f"kill failed: {exc}"})
+    except Exception as e:
+        logger.error(f"Error in /api/paper/auto-poller/stop: {e}", exc_info=True)
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
+@app.route('/api/paper/fetch-crex-xi', methods=['POST'])
+def paper_fetch_crex_xi():
+    """Pull the current Playing XI from CREX for a given fixture.
+
+    This is the Wave 5.7 wiring of the existing CREX scraper: it locates
+    the matching CREX schedule entry by team-pair + date, then calls
+    fetch_squads_with_playwright() to click the playingxi-button tabs and
+    extract the XI per team. Names returned are CREX-format raw strings;
+    the caller should follow up with /api/paper/resolve-xi to convert
+    them to DB player_ids.
+
+    Body: {fixture_key: str}
+
+    Note: takes 5-15 seconds (Playwright + 2x tab clicks). Caller should
+    show a loading spinner.
+    """
+    try:
+        from src.integrations.polymarket import PolymarketClient
+        from src.integrations.polymarket.upcoming import (
+            find_upcoming_cricket_events, attach_db_team_ids,
+        )
+        from src.integrations.polymarket.crex_xi import fetch_xi_from_crex
+
+        payload = request.get_json(silent=True) or {}
+        fixture_key = str(payload.get("fixture_key") or "")
+        if not fixture_key:
+            return jsonify({"success": False, "error": "fixture_key required"}), 400
+
+        c = PolymarketClient()
+        events = find_upcoming_cricket_events(c, hours_ahead=168, include_started=True)
+        mapped = attach_db_team_ids(events)
+        fix = next((e for e in mapped if e["fixture_key"] == fixture_key), None)
+        if fix is None:
+            return jsonify({"success": False, "error": f"fixture {fixture_key} not found on Polymarket"}), 404
+
+        crex_data = fetch_xi_from_crex(fix)
+        if crex_data is None:
+            return jsonify({
+                "success": False,
+                "error": (
+                    "Could not locate a matching CREX entry for this fixture. "
+                    "Either the match isn't in CREX's schedule yet (try again closer "
+                    "to kickoff) or the team names didn't match. Use the manual "
+                    "XI textareas instead."
+                ),
+            }), 404
+
+        return jsonify({"success": True, "crex": crex_data})
+    except Exception as e:
+        logger.error(f"Error in /api/paper/fetch-crex-xi: {e}", exc_info=True)
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
+@app.route('/api/paper/post-toss-scan', methods=['POST'])
+def paper_post_toss_scan():
+    """Trigger a post-toss re-scan for one fixture in the background.
+
+    Body: {fixture_key: str, toss_winner: 'team1'|'team2',
+           chose_to: 'bat'|'field',
+           team1_xi: [int,...] (optional), team2_xi: [int,...] (optional)}
+    """
+    try:
+        import subprocess
+        from pathlib import Path
+        payload = request.get_json(silent=True) or {}
+        fixture_key = str(payload.get("fixture_key") or "")
+        toss_winner = str(payload.get("toss_winner") or "")
+        chose_to = str(payload.get("chose_to") or "")
+        if not fixture_key or toss_winner not in ("team1", "team2") or chose_to not in ("bat", "field"):
+            return jsonify({"success": False, "error": "fixture_key + toss_winner (team1|team2) + chose_to (bat|field) required"}), 400
+
+        repo_root = Path(__file__).resolve().parent.parent
+        log_dir = repo_root / "logs"
+        log_dir.mkdir(parents=True, exist_ok=True)
+        log_path = log_dir / "paper_post_toss.log"
+        venv_python = repo_root / "venv311" / "bin" / "python"
+        script_path = repo_root / "scripts" / "paper_bet_post_toss_scan.py"
+
+        cmd = [
+            str(venv_python), str(script_path),
+            "--fixture-key", fixture_key,
+            "--toss-winner", toss_winner,
+            "--chose-to", chose_to,
+        ]
+        t1_xi = payload.get("team1_xi") or []
+        t2_xi = payload.get("team2_xi") or []
+        if t1_xi:
+            cmd.extend(["--team1-xi", ",".join(str(int(x)) for x in t1_xi)])
+        if t2_xi:
+            cmd.extend(["--team2-xi", ",".join(str(int(x)) for x in t2_xi)])
+
+        with log_path.open("a") as logf:
+            logf.write(f"\n\n=== post-toss spawn at {datetime.now(timezone.utc).isoformat()} ===\n")
+            logf.write(f"=== cmd: {' '.join(cmd)} ===\n")
+            logf.flush()
+            proc = subprocess.Popen(
+                cmd, cwd=str(repo_root), stdout=logf, stderr=subprocess.STDOUT,
+                start_new_session=True,
+            )
+
+        return jsonify({
+            "success": True, "started": True, "pid": proc.pid,
+            "log_path": str(log_path),
+            "message": "Post-toss scan started in background. Polls /api/paper/post-toss-scan/status to track progress; new bets appear when finished (~60s).",
+        })
+    except Exception as e:
+        logger.error(f"Error in /api/paper/post-toss-scan: {e}")
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
+@app.route('/api/paper/post-toss-scan/status', methods=['GET'])
+def paper_post_toss_scan_status():
+    """Tail of the latest post-toss scan log."""
+    try:
+        from pathlib import Path
+        repo_root = Path(__file__).resolve().parent.parent
+        log_path = repo_root / "logs" / "paper_post_toss.log"
+        if not log_path.exists():
+            return jsonify({"success": True, "running": False, "tail": ""})
+        with log_path.open("rb") as f:
+            f.seek(0, 2)
+            size = f.tell()
+            f.seek(max(0, size - 4096))
+            tail_bytes = f.read()
+        tail = tail_bytes.decode("utf-8", errors="replace")
+        running = "POST-TOSS SCAN SUMMARY" not in tail.split("=== post-toss spawn")[-1]
+        return jsonify({"success": True, "running": running, "tail": tail[-2000:]})
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
+@app.route('/api/paper/scan-now/status', methods=['GET'])
+def paper_scan_now_status():
+    """Tail of the latest scan-now subprocess log so the UI can show
+    progress without blocking Flask."""
+    try:
+        from pathlib import Path
+        repo_root = Path(__file__).resolve().parent.parent
+        log_path = repo_root / "logs" / "paper_scan_now.log"
+        if not log_path.exists():
+            return jsonify({"success": True, "running": False, "tail": ""})
+        # Read last 4 KB
+        with log_path.open("rb") as f:
+            f.seek(0, 2)
+            size = f.tell()
+            f.seek(max(0, size - 4096))
+            tail_bytes = f.read()
+        tail = tail_bytes.decode("utf-8", errors="replace")
+        running = "PAPER TRADING - PER-STRATEGY SUMMARY" not in tail.split("=== scan-now spawn")[-1]
+        return jsonify({"success": True, "running": running, "tail": tail[-2000:]})
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
+@app.route('/api/betting/scale-up', methods=['POST'])
+def betting_scale_up():
+    """Wave 5 Phase 7: graduate the envelope ($200 -> $500 -> $1000).
+
+    Body:
+        {"target": "500" | "1000"}
+    Reads the dashboard scale_up_eligible flag; only allows graduation
+    if eligible. Updates BETTING_MAX_DEPOSIT, BETTING_MAX_PER_BET,
+    BETTING_MAX_PER_DAY in .env.
+    """
+    try:
+        from src.integrations.polymarket.risk_gate import write_env_var, _is_scale_up_eligible
+        from src.data.database import get_connection
+        from config import BETTING_CONFIG
+        payload = request.get_json(silent=True) or {}
+        target = str(payload.get('target', '500'))
+        envelopes = {
+            '500': {'deposit': 500, 'per_bet': 50, 'per_day': 100, 'max_loss_per_day': 75},
+            '1000': {'deposit': 1000, 'per_bet': 100, 'per_day': 250, 'max_loss_per_day': 200},
+        }
+        if target not in envelopes:
+            return jsonify({'success': False, 'error': f"Invalid target {target}; use '500' or '1000'."}), 400
+
+        # Recompute eligibility live to avoid stale UI
+        with get_connection() as conn:
+            cur = conn.cursor()
+            cur.execute("SELECT COUNT(*) AS n FROM bet_ledger WHERE settled_at IS NOT NULL")
+            settled_count = int((cur.fetchone() or {'n': 0})['n'])
+        if not _is_scale_up_eligible(settled_count):
+            return jsonify({
+                'success': False,
+                'error': f"Not yet eligible: only {settled_count} settled bets.",
+            }), 403
+
+        env = envelopes[target]
+        write_env_var('BETTING_MAX_DEPOSIT', str(env['deposit']))
+        write_env_var('BETTING_MAX_PER_BET', str(env['per_bet']))
+        write_env_var('BETTING_MAX_PER_DAY', str(env['per_day']))
+        write_env_var('BETTING_MAX_LOSS_PER_DAY', str(env['max_loss_per_day']))
+        BETTING_CONFIG['max_deposit_usdc'] = float(env['deposit'])
+        BETTING_CONFIG['max_per_bet_usdc'] = float(env['per_bet'])
+        BETTING_CONFIG['max_per_day_usdc'] = float(env['per_day'])
+        BETTING_CONFIG['max_loss_per_day_usdc'] = float(env['max_loss_per_day'])
+        return jsonify({'success': True, 'envelope': target, 'caps': env})
+    except Exception as e:
+        logger.error(f"Error in scale-up: {e}")
         return jsonify({'success': False, 'error': str(e)}), 500
 
 

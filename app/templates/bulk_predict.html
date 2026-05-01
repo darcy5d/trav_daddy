@@ -246,6 +246,49 @@
         color: var(--text-muted);
         border: 1px solid rgba(107, 114, 128, 0.32);
     }
+    /* Wave 5 Phase 2: multi-market card styles */
+    .market-multi-wrapper {
+        display: flex;
+        flex-direction: column;
+        gap: 0.3rem;
+    }
+    .market-row-multi {
+        padding: 0.25rem 0;
+        border-top: 1px dashed rgba(55, 65, 81, 0.5);
+    }
+    .market-row-multi:first-of-type {
+        border-top: none;
+    }
+    .market-row-multi strong {
+        font-size: 0.7rem;
+        text-transform: uppercase;
+        letter-spacing: 0.4px;
+        color: var(--text-primary);
+    }
+    .market-outcome-list {
+        margin-top: 0.18rem;
+        display: flex;
+        flex-direction: column;
+        gap: 0.18rem;
+    }
+    .market-outcome-row {
+        display: grid;
+        grid-template-columns: minmax(70px, 1.4fr) auto auto auto;
+        align-items: center;
+        gap: 0.4rem;
+        font-size: 0.68rem;
+    }
+    .market-outcome-row .outcome-label {
+        color: var(--text-secondary);
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+    }
+    .market-outcome-row .outcome-model,
+    .market-outcome-row .outcome-market {
+        color: var(--text-muted);
+        font-variant-numeric: tabular-nums;
+    }
 </style>
 {% endblock %}
 
@@ -1478,10 +1521,122 @@
         return '<span class="market-badge market-badge-muted">Unavailable</span>';
     }
 
+    // Wave 5 Phase 2: render all 4 Polymarket cricket markets stacked,
+    // with edge badges on per-outcome rows.
+    function edgeBadgeClass(edgePp) {
+        if (edgePp === null || edgePp === undefined) return 'market-badge-muted';
+        const abs = Math.abs(edgePp);
+        if (abs >= 10) return 'market-badge-ok';     // green: high edge
+        if (abs >= 5)  return 'market-badge-warn';   // amber: moderate edge
+        return 'market-badge-muted';
+    }
+
+    function formatPct(value) {
+        if (value === null || value === undefined) return '--';
+        return Number(value).toFixed(1) + '%';
+    }
+
+    function formatEdgePp(value) {
+        if (value === null || value === undefined) return '--';
+        const sign = value > 0 ? '+' : '';
+        return `${sign}${Number(value).toFixed(1)} pp`;
+    }
+
+    function renderMultiMarketCard(market, marketLabel) {
+        const status = market?.status || 'no_match';
+        if (status === 'no_match') {
+            return `
+                <div class="market-row-multi">
+                    <strong>${marketLabel}</strong>
+                    <span class="market-badge market-badge-muted">No market</span>
+                </div>
+            `;
+        }
+        if (status === 'quote_unavailable') {
+            return `
+                <div class="market-row-multi">
+                    <strong>${marketLabel}</strong>
+                    <span class="market-badge market-badge-warn">Quote unavailable</span>
+                </div>
+            `;
+        }
+        const outcomes = market.outcomes || [];
+        if (!outcomes.length) {
+            return `
+                <div class="market-row-multi">
+                    <strong>${marketLabel}</strong>
+                    <span class="market-badge market-badge-muted">No outcomes</span>
+                </div>
+            `;
+        }
+        const outcomeRows = outcomes.map(o => {
+            const badgeCls = edgeBadgeClass(o.edge_pp);
+            return `
+                <div class="market-outcome-row">
+                    <span class="outcome-label">${o.label || '?'}</span>
+                    <span class="outcome-model">M ${formatPct(o.model_pct)}</span>
+                    <span class="outcome-market">P ${formatPct(o.market_implied_pct)}</span>
+                    <span class="market-badge ${badgeCls}">${formatEdgePp(o.edge_pp)}</span>
+                </div>
+            `;
+        }).join('');
+        return `
+            <div class="market-row-multi">
+                <strong>${marketLabel}</strong>
+                <div class="market-outcome-list">${outcomeRows}</div>
+            </div>
+        `;
+    }
+
+    function renderMarketMiniMultiHtml(comparePayload) {
+        const top = comparePayload?.markets || {};
+        const sections = [
+            ['Moneyline', top.moneyline],
+            ['Top Batter', top.top_batter],
+            ['Most Sixes', top.most_sixes],
+            ['Toss x Match', top.toss_match_double],
+        ];
+        const blocks = sections.map(([label, market]) => renderMultiMarketCard(market, label)).join('');
+        return `
+            <div class="market-multi-wrapper">
+                <div style="display:flex; align-items:center; gap:0.4rem; margin-bottom:0.25rem;">
+                    <span class="market-badge market-badge-ok">Polymarket</span>
+                    <span style="font-size:0.7rem; color: var(--text-muted);">4 markets</span>
+                </div>
+                ${blocks}
+            </div>
+        `;
+    }
+
     async function enrichRowWithPolymarket(idx, info, entry, finalResult) {
         const marketEl = document.getElementById(`market-mini-${idx}`);
         if (!marketEl) return;
         try {
+            // V2-only multi-market path: requires market_probs from the simulator.
+            if (finalResult?.market_probs) {
+                const startUtc = buildStartUtcForCompare(entry);
+                const body = {
+                    team1: info.team1Name || 'Team 1',
+                    team2: info.team2Name || 'Team 2',
+                    market_probs: finalResult.market_probs,
+                };
+                if (info.seriesName) body.series = info.seriesName;
+                if (startUtc) body.start_utc = startUtc;
+                const resp = await fetch('/api/integrations/polymarket/compare/multi', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify(body),
+                });
+                const payload = await resp.json();
+                if (!payload?.success) {
+                    marketEl.innerHTML = '<span class="market-badge market-badge-warn">Quote unavailable</span>';
+                    return;
+                }
+                marketEl.innerHTML = renderMarketMiniMultiHtml(payload);
+                return;
+            }
+
+            // V1 fallback path: moneyline-only.
             const params = new URLSearchParams();
             params.set('team1', info.team1Name || 'Team 1');
             params.set('team2', info.team2Name || 'Team 2');

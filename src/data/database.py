@@ -459,6 +459,63 @@ def init_franchise_tables(db_path: Optional[Path] = None) -> bool:
         return False
 
 
+def init_betting_tables(db_path: Optional[Path] = None) -> bool:
+    """Wave 5 Phase 6b + Wave 5.7: bet_ledger schema (V5 + V6 paper-bet columns).
+
+    Idempotent. Safe to call on every app startup. Creates `bet_ledger` from
+    schema_v5_betting.sql, then adds Wave 5.7 paper-bet columns (bet_kind,
+    strategy_label, bankroll_at_proposal, bankroll_after_settle) via
+    ALTER TABLE ADD COLUMN if they don't already exist.
+    """
+    if db_path is None:
+        db_path = DATABASE_PATH
+
+    schema_path = Path(__file__).parent / "schema_v5_betting.sql"
+    if not schema_path.exists():
+        logger.error(f"Schema file not found: {schema_path}")
+        return False
+    v6_path = Path(__file__).parent / "schema_v6_paper_betting.sql"
+
+    try:
+        schema_sql = schema_path.read_text()
+        with get_db_connection(db_path) as conn:
+            conn.executescript(schema_sql)
+
+            # Wave 5.7: add paper-bet columns idempotently
+            paper_columns = [
+                ("bet_kind",              "TEXT DEFAULT 'real'"),
+                ("strategy_label",        "TEXT"),
+                ("bankroll_at_proposal",  "REAL"),
+                ("bankroll_after_settle", "REAL"),
+                # Wave 5.7b: phase tag - 'pre_toss' (default) or 'post_toss'
+                # for bets placed AFTER the toss outcome was known. Lets
+                # us A/B-compare pre-toss vs post-toss strategy ROI.
+                ("phase",                 "TEXT DEFAULT 'pre_toss'"),
+                # Confirmed XI hash at bet time (when post-toss). Helps
+                # debugging which lineup the model used.
+                ("xi_signature",          "TEXT"),
+                # Toss outcome captured at bet time (post-toss only).
+                ("toss_winner_team_id",   "INTEGER"),
+                ("toss_chose_to",         "TEXT"),
+            ]
+            for col_name, col_type in paper_columns:
+                if not _column_exists(conn, "bet_ledger", col_name):
+                    conn.execute(f"ALTER TABLE bet_ledger ADD COLUMN {col_name} {col_type}")
+                    logger.info(f"Added bet_ledger.{col_name} column")
+
+            # V6 schema script (just CREATE INDEX IF NOT EXISTS lines)
+            if v6_path.exists():
+                conn.executescript(v6_path.read_text())
+
+            logger.info("Betting schema (V5 + V6 paper) initialized")
+        return True
+    except Exception as e:
+        logger.error(f"Failed to initialize betting schema: {e}")
+        import traceback
+        traceback.print_exc()
+        return False
+
+
 def init_model_versions_table(db_path: Optional[Path] = None) -> bool:
     """
     Initialize the model_versions table.

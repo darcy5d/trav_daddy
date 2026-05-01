@@ -94,6 +94,25 @@ class BacktestRow:
     score_mae_team1: Optional[float]
     score_mae_team2: Optional[float]
     dist_quality_overall_pct: Optional[float]
+    # Wave 5 Phase 3: Polymarket sub-market predictions (V2 simulator only;
+    # left as None for V1 runs).
+    sim_team1_top_batter_id: Optional[int] = None
+    sim_team1_top_batter_prob: Optional[float] = None
+    sim_team1_top_3_batter_ids: Optional[str] = None  # comma-separated for CSV
+    sim_team2_top_batter_id: Optional[int] = None
+    sim_team2_top_batter_prob: Optional[float] = None
+    sim_team2_top_3_batter_ids: Optional[str] = None
+    actual_team1_top_batter_id: Optional[int] = None
+    actual_team1_top_batter_runs: Optional[int] = None
+    actual_team2_top_batter_id: Optional[int] = None
+    actual_team2_top_batter_runs: Optional[int] = None
+    sim_most_sixes_team1_prob: Optional[float] = None
+    sim_most_sixes_draw_prob: Optional[float] = None
+    sim_most_sixes_team2_prob: Optional[float] = None
+    sim_team1_avg_sixes: Optional[float] = None
+    sim_team2_avg_sixes: Optional[float] = None
+    actual_team1_sixes: Optional[int] = None
+    actual_team2_sixes: Optional[int] = None
 
 
 # ============================================================================
@@ -357,6 +376,56 @@ def _override_simulator_elos(
 
 
 # ============================================================================
+# Wave 5 Phase 3: actual top-batter + actual sixes lookup
+# ============================================================================
+
+
+def _actual_top_batter(
+    conn: sqlite3.Connection, match_id: int, team_id: int
+) -> Tuple[Optional[int], Optional[int]]:
+    """Return (player_id, runs_scored) of the actual top scorer for a team.
+
+    Returns (None, None) if no batter recorded a positive score (e.g. data
+    quality issue).
+    """
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT player_id, runs_scored
+        FROM player_match_stats
+        WHERE match_id = ? AND team_id = ?
+        ORDER BY runs_scored DESC, balls_faced DESC
+        LIMIT 1
+        """,
+        (match_id, team_id),
+    )
+    row = cur.fetchone()
+    if not row or (row["runs_scored"] or 0) <= 0:
+        return None, None
+    return int(row["player_id"]), int(row["runs_scored"])
+
+
+def _actual_sixes(
+    conn: sqlite3.Connection, match_id: int, team_id: int
+) -> Optional[int]:
+    """Return the count of actual sixes hit by `team_id` in `match_id`."""
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT COUNT(*) AS sixes
+        FROM deliveries d
+        JOIN innings i ON i.innings_id = d.innings_id
+        WHERE i.match_id = ? AND i.batting_team_id = ? AND d.runs_batter = 6
+        """,
+        (match_id, team_id),
+    )
+    row = cur.fetchone()
+    if row is None:
+        return None
+    return int(row["sixes"] or 0)
+
+
+# ============================================================================
 # Per-match simulation
 # ============================================================================
 
@@ -458,6 +527,46 @@ def simulate_match(
         else None
     )
 
+    # Wave 5 Phase 3: derive sub-market predictions when V2 simulator emits them.
+    sub_market_fields: Dict = {}
+    if "team1_player_runs" in results:
+        try:
+            from src.models.market_outputs import derive_polymarket_market_probs
+            market_probs = derive_polymarket_market_probs(results)
+            tb = market_probs.get("top_batter", {})
+            ms = market_probs.get("most_sixes", {})
+
+            def _top_one_three(distribution: Dict[int, float]) -> Tuple[Optional[int], Optional[float], Optional[str]]:
+                if not distribution:
+                    return None, None, None
+                ranked = sorted(distribution.items(), key=lambda kv: -kv[1])
+                top_id, top_prob = ranked[0]
+                top_3_ids = ",".join(str(pid) for pid, _ in ranked[:3])
+                return int(top_id), float(top_prob), top_3_ids
+
+            t1_id, t1_p, t1_3 = _top_one_three(tb.get("team1_top_batter_distribution", {}))
+            t2_id, t2_p, t2_3 = _top_one_three(tb.get("team2_top_batter_distribution", {}))
+            sub_market_fields = {
+                "sim_team1_top_batter_id": t1_id,
+                "sim_team1_top_batter_prob": t1_p,
+                "sim_team1_top_3_batter_ids": t1_3,
+                "sim_team2_top_batter_id": t2_id,
+                "sim_team2_top_batter_prob": t2_p,
+                "sim_team2_top_3_batter_ids": t2_3,
+                "sim_most_sixes_team1_prob": float(ms.get("team1") or 0.0),
+                "sim_most_sixes_draw_prob": float(ms.get("draw") or 0.0),
+                "sim_most_sixes_team2_prob": float(ms.get("team2") or 0.0),
+                "sim_team1_avg_sixes": float(ms.get("team1_avg_sixes") or 0.0),
+                "sim_team2_avg_sixes": float(ms.get("team2_avg_sixes") or 0.0),
+            }
+        except Exception as exc:
+            logger.debug(f"match {match.match_id}: failed to derive market probs: {exc}")
+
+    actual_t1_top_id, actual_t1_top_runs = _actual_top_batter(conn, match.match_id, match.team1_id)
+    actual_t2_top_id, actual_t2_top_runs = _actual_top_batter(conn, match.match_id, match.team2_id)
+    actual_t1_sixes = _actual_sixes(conn, match.match_id, match.team1_id)
+    actual_t2_sixes = _actual_sixes(conn, match.match_id, match.team2_id)
+
     return BacktestRow(
         match_id=match.match_id,
         date=match.date.isoformat(),
@@ -482,6 +591,13 @@ def simulate_match(
         score_mae_team1=score_mae_t1,
         score_mae_team2=score_mae_t2,
         dist_quality_overall_pct=dist_quality.get("overall_pct"),
+        actual_team1_top_batter_id=actual_t1_top_id,
+        actual_team1_top_batter_runs=actual_t1_top_runs,
+        actual_team2_top_batter_id=actual_t2_top_id,
+        actual_team2_top_batter_runs=actual_t2_top_runs,
+        actual_team1_sixes=actual_t1_sixes,
+        actual_team2_sixes=actual_t2_sixes,
+        **sub_market_fields,
     )
 
 
@@ -557,6 +673,71 @@ def compute_metrics(rows: List[BacktestRow]) -> Dict:
     ]
     mae_margin = sum(margin_diffs) / len(margin_diffs) if margin_diffs else None
 
+    # Wave 5 Phase 3: top-batter and most-sixes accuracy / Brier.
+    # Only computed when V2 simulator was used (field is non-None).
+    sub_market_metrics: Dict = {}
+
+    # Top batter accuracy
+    tb1_pairs = [
+        (r.sim_team1_top_batter_id, r.sim_team1_top_3_batter_ids, r.actual_team1_top_batter_id)
+        for r in decisive
+        if r.sim_team1_top_batter_id is not None and r.actual_team1_top_batter_id is not None
+    ]
+    tb2_pairs = [
+        (r.sim_team2_top_batter_id, r.sim_team2_top_3_batter_ids, r.actual_team2_top_batter_id)
+        for r in decisive
+        if r.sim_team2_top_batter_id is not None and r.actual_team2_top_batter_id is not None
+    ]
+    all_tb_pairs = tb1_pairs + tb2_pairs
+    if all_tb_pairs:
+        top_1_hits = sum(1 for sim, _top3, actual in all_tb_pairs if sim == actual)
+        top_3_hits = 0
+        for _sim, top3_str, actual in all_tb_pairs:
+            top3_ids = set()
+            if top3_str:
+                top3_ids = {int(x) for x in top3_str.split(",") if x.strip().isdigit()}
+            if actual in top3_ids:
+                top_3_hits += 1
+        sub_market_metrics["n_top_batter_pairs"] = len(all_tb_pairs)
+        sub_market_metrics["top_batter_accuracy_top_1"] = round(top_1_hits / len(all_tb_pairs), 4)
+        sub_market_metrics["top_batter_accuracy_top_3"] = round(top_3_hits / len(all_tb_pairs), 4)
+
+    # Most sixes accuracy: compare sim's argmax of (team1, draw, team2) to actual outcome
+    sixes_pairs = []
+    for r in decisive:
+        if (
+            r.sim_most_sixes_team1_prob is None
+            or r.actual_team1_sixes is None
+            or r.actual_team2_sixes is None
+        ):
+            continue
+        if r.actual_team1_sixes > r.actual_team2_sixes:
+            actual = "team1"
+        elif r.actual_team1_sixes < r.actual_team2_sixes:
+            actual = "team2"
+        else:
+            actual = "draw"
+        # Sim pick = argmax across 3 outcomes
+        probs = {
+            "team1": r.sim_most_sixes_team1_prob,
+            "draw": r.sim_most_sixes_draw_prob or 0.0,
+            "team2": r.sim_most_sixes_team2_prob,
+        }
+        sim_pick = max(probs, key=probs.get)
+        sixes_pairs.append((sim_pick, actual, probs))
+    if sixes_pairs:
+        most_sixes_hit = sum(1 for sim_pick, actual, _ in sixes_pairs if sim_pick == actual)
+        # 3-way Brier: sum of squared diffs across the 3 outcome probs
+        ms_brier_total = 0.0
+        for _sim_pick, actual, probs in sixes_pairs:
+            for outcome, p in probs.items():
+                truth = 1.0 if outcome == actual else 0.0
+                ms_brier_total += (p - truth) ** 2
+        ms_brier = ms_brier_total / len(sixes_pairs)
+        sub_market_metrics["n_most_sixes_pairs"] = len(sixes_pairs)
+        sub_market_metrics["most_sixes_accuracy"] = round(most_sixes_hit / len(sixes_pairs), 4)
+        sub_market_metrics["most_sixes_brier"] = round(ms_brier, 4)
+
     return {
         "n_matches": len(rows),
         "n_decisive": n,
@@ -567,6 +748,7 @@ def compute_metrics(rows: List[BacktestRow]) -> Dict:
         "mae_score_runs": round(mae_score, 2) if mae_score is not None else None,
         "mae_margin_runs": round(mae_margin, 2) if mae_margin is not None else None,
         "calibration_deciles": calibration,
+        **sub_market_metrics,
     }
 
 

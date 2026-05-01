@@ -1,0 +1,1011 @@
+{% extends "base.html" %}
+{% block title %}Paper Trades{% endblock %}
+{% block extra_head %}
+<style>
+    .pt-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 1rem; flex-wrap: wrap; gap: 0.5rem; }
+    .pt-header h1 { margin: 0; }
+    .pt-actions { display: inline-flex; gap: 0.5rem; }
+    .pt-actions button {
+        padding: 0.5rem 1rem; border-radius: 8px; border: 1px solid var(--border);
+        background: transparent; color: var(--text-primary); cursor: pointer; font-weight: 600;
+    }
+    .pt-actions button.primary {
+        background: var(--accent-primary); color: white; border-color: var(--accent-primary);
+    }
+    .pt-actions button:disabled { opacity: 0.5; cursor: not-allowed; }
+    .pt-totals {
+        display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+        gap: 0.6rem; margin-bottom: 1rem;
+    }
+    .pt-total-cell {
+        padding: 0.7rem 0.9rem; border: 1px solid var(--border); border-radius: 8px;
+        background: var(--bg-secondary);
+    }
+    .pt-total-label { color: var(--text-muted); font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.5px; }
+    .pt-total-value { font-size: 1.5rem; font-weight: 700; margin-top: 0.2rem; }
+    .pt-total-value.positive { color: var(--accent-primary); }
+    .pt-total-value.negative { color: #ef4444; }
+
+    .pt-section { margin-top: 1.5rem; }
+    .pt-section h2 { font-size: 1rem; color: var(--text-primary); margin: 0 0 0.5rem 0; }
+
+    .pt-table { width: 100%; border-collapse: collapse; font-size: 0.78rem; }
+    .pt-table th, .pt-table td { padding: 0.4rem 0.5rem; border-bottom: 1px solid rgba(55,65,81,0.4); text-align: left; vertical-align: top; }
+    .pt-table th { color: var(--text-muted); font-weight: 600; text-transform: uppercase; letter-spacing: 0.4px; font-size: 0.65rem; }
+    .pt-table tr.disabled { opacity: 0.5; }
+    .pt-pl-positive { color: var(--accent-primary); }
+    .pt-pl-negative { color: #ef4444; }
+
+    .pt-edge-badge {
+        display: inline-block; padding: 0.1rem 0.5rem; border-radius: 999px;
+        font-size: 0.7rem; font-weight: 700;
+    }
+    .pt-edge-high   { background: rgba(16, 185, 129, 0.15); color: var(--accent-primary); }
+    .pt-edge-medium { background: rgba(245, 158, 11, 0.18); color: var(--accent-warning); }
+    .pt-edge-low    { background: rgba(107, 114, 128, 0.2); color: var(--text-muted); }
+    .pt-status-badge {
+        display: inline-block; padding: 0.1rem 0.5rem; border-radius: 999px;
+        font-size: 0.65rem; font-weight: 700; text-transform: uppercase;
+    }
+    .pt-status-filled   { background: rgba(99, 102, 241, 0.18); color: #a5b4fc; }
+    .pt-status-settled  { background: rgba(16, 185, 129, 0.15); color: var(--accent-primary); }
+    .pt-status-lost     { background: rgba(239, 68, 68, 0.15); color: #ef4444; }
+
+    .pt-chart-card {
+        padding: 0.6rem; border: 1px solid var(--border); border-radius: 8px;
+        background: var(--bg-secondary);
+    }
+    canvas.pt-chart { display: block; max-width: 100%; height: 220px; background: rgba(0,0,0,0.05); border-radius: 6px; }
+
+    .pt-toast { padding: 0.6rem 0.8rem; margin-top: 0.6rem; border-radius: 6px; font-size: 0.85rem; }
+    .pt-toast.ok    { background: rgba(16, 185, 129, 0.15); color: var(--accent-primary); }
+    .pt-toast.error { background: rgba(239, 68, 68, 0.15); color: #ef4444; }
+    /* Toss modal buttons */
+    .pt-toss-trigger, .pt-winner-btn, .pt-chose-btn {
+        padding: 0.4rem 0.8rem; border-radius: 6px; border: 1px solid var(--border);
+        background: transparent; color: var(--text-primary); cursor: pointer; font-weight: 600; font-size: 0.85rem;
+    }
+    .pt-toss-trigger:hover, .pt-winner-btn:hover, .pt-chose-btn:hover { border-color: var(--accent-primary); }
+    .pt-poller-badge {
+        display: inline-flex; align-items: center;
+        padding: 0.35rem 0.7rem; border-radius: 999px; font-size: 0.75rem; font-weight: 600;
+        cursor: default;
+    }
+    .pt-poller-on   { background: rgba(16, 185, 129, 0.18); color: var(--accent-primary); }
+    .pt-poller-off  { background: rgba(107, 114, 128, 0.18); color: var(--text-muted); }
+    .pt-poller-stale { background: rgba(245, 158, 11, 0.18); color: var(--accent-warning); }
+    .pt-winner-btn.primary, .pt-chose-btn.primary {
+        background: var(--accent-primary); color: white; border-color: var(--accent-primary);
+    }
+    #pt-toss-modal-cancel, #pt-toss-modal-resolve, #pt-toss-modal-submit {
+        padding: 0.5rem 1rem; border-radius: 6px; border: 1px solid var(--border);
+        background: transparent; color: var(--text-primary); cursor: pointer; font-weight: 600; font-size: 0.85rem;
+    }
+    #pt-toss-modal-submit.primary { background: var(--accent-primary); color: white; border-color: var(--accent-primary); }
+</style>
+{% endblock %}
+{% block content %}
+<div class="pt-header">
+    <h1>Paper Trades</h1>
+    <div class="pt-actions">
+        <span id="pt-poller-badge" class="pt-poller-badge pt-poller-off" title="Auto-toss-detection daemon status">Auto-toss: --</span>
+        <button id="pt-poller-toggle" title="Start/stop the auto-toss-detection daemon">Start auto-toss</button>
+        <button id="pt-refresh">Refresh</button>
+        <button id="pt-reconcile-now">Reconcile Now (fast)</button>
+        <button id="pt-scan-now" class="primary">Run Scan + Reconcile (slow ~3min)</button>
+    </div>
+</div>
+
+<p style="color: var(--text-muted); font-size: 0.85rem; margin-top: -0.3rem;">
+    Forward-test logging with $1000 per strategy. The scanner runs sims for upcoming Polymarket cricket fixtures
+    and logs paper bets when model edge passes each strategy's threshold. No real funds are at risk.
+</p>
+
+<div id="pt-toast"></div>
+
+<div class="pt-totals" id="pt-totals">
+    <div class="pt-total-cell">
+        <div class="pt-total-label">Total Bankroll</div>
+        <div class="pt-total-value" id="pt-total-bankroll">--</div>
+    </div>
+    <div class="pt-total-cell">
+        <div class="pt-total-label">Realised P&amp;L</div>
+        <div class="pt-total-value" id="pt-total-pnl">--</div>
+    </div>
+    <div class="pt-total-cell">
+        <div class="pt-total-label">ROI</div>
+        <div class="pt-total-value" id="pt-total-roi">--</div>
+    </div>
+    <div class="pt-total-cell">
+        <div class="pt-total-label">Open Stakes</div>
+        <div class="pt-total-value" id="pt-total-open">--</div>
+    </div>
+</div>
+
+<div class="pt-section">
+    <h2>Strategies</h2>
+    <table class="pt-table" id="pt-strat-table">
+        <thead>
+            <tr>
+                <th>Strategy</th>
+                <th>Model</th>
+                <th>Edge</th>
+                <th style="text-align:right">Bankroll</th>
+                <th style="text-align:right">P&amp;L</th>
+                <th style="text-align:right">ROI</th>
+                <th style="text-align:right">Bets</th>
+                <th style="text-align:right">Settled</th>
+                <th style="text-align:right">Win%</th>
+                <th style="text-align:right">Open</th>
+            </tr>
+        </thead>
+        <tbody id="pt-strat-body"><tr><td colspan="10" style="color:var(--text-muted);text-align:center;padding:1rem">Loading...</td></tr></tbody>
+    </table>
+</div>
+
+<div class="pt-section">
+    <h2>Bankroll Over Time</h2>
+    <div class="pt-chart-card">
+        <canvas id="pt-bankroll-chart" class="pt-chart" width="900" height="220"></canvas>
+        <div id="pt-chart-legend" style="margin-top:0.5rem; font-size:0.75rem; display:flex; gap:0.8rem; flex-wrap:wrap;"></div>
+    </div>
+</div>
+
+<div class="pt-section">
+    <h2>Upcoming Fixtures - Post-Toss Re-scan <span style="color:var(--text-muted);font-weight:400;font-size:0.85rem;">(triggers V3 in PINNED toss mode + optional XI override)</span></h2>
+    <p style="color:var(--text-muted);font-size:0.8rem;margin:0 0 0.5rem 0;">
+        Once the toss happens (and ideally the playing XI is announced), click "Toss + Re-scan" to re-sim that fixture
+        with the actual toss outcome. Bets placed via this path are tagged <code>phase='post_toss'</code> so they're
+        analytically distinct from pre-toss bets.
+    </p>
+    <table class="pt-table" id="pt-fixtures-table">
+        <thead>
+            <tr>
+                <th>Match</th>
+                <th>Format</th>
+                <th>Kickoff (UTC)</th>
+                <th>Market (T1 / T2)</th>
+                <th>Pre-toss bets</th>
+                <th>Post-toss bets</th>
+                <th></th>
+            </tr>
+        </thead>
+        <tbody id="pt-fixtures-body"><tr><td colspan="7" style="color:var(--text-muted);text-align:center;padding:1rem">Loading...</td></tr></tbody>
+    </table>
+</div>
+
+<!-- Modal for post-toss form -->
+<div id="pt-toss-modal" style="display:none; position:fixed; inset:0; background:rgba(0,0,0,0.6); z-index:1000; align-items:center; justify-content:center;">
+    <div style="background:var(--bg-secondary); border:1px solid var(--border); border-radius:8px; padding:1.2rem; width:680px; max-width:96vw; max-height:90vh; overflow-y:auto;">
+        <h3 style="margin:0 0 0.5rem 0;">Post-Toss Re-scan</h3>
+        <p style="color:var(--text-muted); font-size:0.85rem; margin:0 0 0.8rem 0;" id="pt-toss-modal-fixture">--</p>
+
+        <div style="margin-bottom:0.8rem;">
+            <label style="display:block; font-weight:600; font-size:0.85rem; margin-bottom:0.3rem;">Who won the toss?</label>
+            <div id="pt-toss-winner-group" style="display:inline-flex; gap:0.4rem;"></div>
+        </div>
+
+        <div style="margin-bottom:0.8rem;">
+            <label style="display:block; font-weight:600; font-size:0.85rem; margin-bottom:0.3rem;">And chose to:</label>
+            <div style="display:inline-flex; gap:0.4rem;">
+                <button type="button" class="pt-chose-btn" data-value="bat">Bat</button>
+                <button type="button" class="pt-chose-btn" data-value="field">Field</button>
+            </div>
+        </div>
+
+        <details style="margin-bottom:0.8rem; border:1px solid var(--border); border-radius:6px; padding:0.5rem;" open>
+            <summary style="cursor:pointer; font-weight:600; font-size:0.85rem; color:var(--text-secondary);">
+                Confirmed Playing XI (one name per line, batting order)
+            </summary>
+            <p style="color:var(--text-muted); font-size:0.75rem; margin:0.5rem 0;">
+                Names will be fuzzy-matched against the team's recent appearances (handles "V Kohli" or "Virat Kohli").
+                Click "Fetch from CREX" to auto-populate from cric.crex.com (~10s render). Or paste manually.
+                If left blank, the simulator falls back to the team's last-3-matches average XI.
+            </p>
+            <div style="margin-bottom:0.5rem;">
+                <button type="button" id="pt-fetch-crex-xi">Fetch XI from CREX</button>
+                <span id="pt-fetch-crex-status" style="margin-left:0.5rem; font-size:0.75rem; color:var(--text-muted);"></span>
+            </div>
+            <div style="display:grid; grid-template-columns:1fr 1fr; gap:0.6rem;">
+                <div>
+                    <label id="pt-xi1-label" style="display:block; font-weight:600; font-size:0.8rem; margin-bottom:0.2rem;">Team 1 XI</label>
+                    <textarea id="pt-xi1-input" rows="11" placeholder="V Kohli&#10;F du Plessis&#10;..." style="width:100%; box-sizing:border-box; background:var(--bg-primary); color:var(--text-primary); border:1px solid var(--border); border-radius:4px; padding:0.4rem; font-family:monospace; font-size:0.78rem;"></textarea>
+                </div>
+                <div>
+                    <label id="pt-xi2-label" style="display:block; font-weight:600; font-size:0.8rem; margin-bottom:0.2rem;">Team 2 XI</label>
+                    <textarea id="pt-xi2-input" rows="11" placeholder="" style="width:100%; box-sizing:border-box; background:var(--bg-primary); color:var(--text-primary); border:1px solid var(--border); border-radius:4px; padding:0.4rem; font-family:monospace; font-size:0.78rem;"></textarea>
+                </div>
+            </div>
+            <div id="pt-xi-resolved" style="margin-top:0.5rem; font-size:0.75rem;"></div>
+        </details>
+
+        <div id="pt-toss-modal-toast"></div>
+
+        <div style="display:flex; justify-content:flex-end; gap:0.4rem; margin-top:1rem;">
+            <button type="button" id="pt-toss-modal-cancel">Cancel</button>
+            <button type="button" id="pt-toss-modal-resolve">Resolve XI Names</button>
+            <button type="button" id="pt-toss-modal-submit" class="primary">Submit Post-Toss Scan</button>
+        </div>
+    </div>
+</div>
+
+<div class="pt-section">
+    <h2>Open Paper Bets <span style="color:var(--text-muted);font-weight:400;font-size:0.85rem;" id="pt-open-count"></span></h2>
+    <table class="pt-table">
+        <thead>
+            <tr>
+                <th>Placed</th>
+                <th>Strategy</th>
+                <th>Fixture</th>
+                <th>Side</th>
+                <th style="text-align:right">Model</th>
+                <th style="text-align:right">Market</th>
+                <th style="text-align:right">Edge</th>
+                <th style="text-align:right">Stake</th>
+                <th style="text-align:right">Bankroll@Bet</th>
+            </tr>
+        </thead>
+        <tbody id="pt-open-body"><tr><td colspan="9" style="color:var(--text-muted);text-align:center;padding:1rem">No open paper bets</td></tr></tbody>
+    </table>
+</div>
+
+<div class="pt-section">
+    <h2>Recent Settled <span style="color:var(--text-muted);font-weight:400;font-size:0.85rem;" id="pt-settled-count"></span></h2>
+    <table class="pt-table">
+        <thead>
+            <tr>
+                <th>Settled</th>
+                <th>Strategy</th>
+                <th>Fixture</th>
+                <th>Side</th>
+                <th style="text-align:right">Model</th>
+                <th style="text-align:right">Market</th>
+                <th style="text-align:right">Edge</th>
+                <th style="text-align:right">Stake</th>
+                <th style="text-align:right">P&amp;L</th>
+                <th>Outcome</th>
+            </tr>
+        </thead>
+        <tbody id="pt-settled-body"><tr><td colspan="10" style="color:var(--text-muted);text-align:center;padding:1rem">No settled bets yet</td></tr></tbody>
+    </table>
+</div>
+
+<script>
+(function() {
+    const strategiesUrl = '/api/paper/strategies';
+    const betsUrl = '/api/paper/bets';
+    const historyUrl = '/api/paper/bankroll-history';
+    const scanUrl = '/api/paper/scan-now';
+    const reconcileUrl = '/api/paper/reconcile-only';
+    const upcomingUrl = '/api/paper/upcoming?hours_ahead=72';
+    const resolveXiUrl = '/api/paper/resolve-xi';
+    const fetchCrexXiUrl = '/api/paper/fetch-crex-xi';
+    const postTossUrl = '/api/paper/post-toss-scan';
+    const postTossStatusUrl = '/api/paper/post-toss-scan/status';
+    const pollerStatusUrl = '/api/paper/auto-poller/status';
+    const pollerStartUrl = '/api/paper/auto-poller/start';
+    const pollerStopUrl = '/api/paper/auto-poller/stop';
+
+    function fmtMoney(v) {
+        if (v === null || v === undefined) return '--';
+        const sign = v < 0 ? '-' : '';
+        return sign + '$' + Math.abs(Number(v)).toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2});
+    }
+    function fmtPct(v, places) {
+        if (v === null || v === undefined) return '--';
+        return Number(v).toFixed(places || 1) + '%';
+    }
+    function fmtDate(iso) {
+        if (!iso) return '--';
+        try { return new Date(iso).toLocaleString(); } catch (e) { return iso; }
+    }
+    function pnlClass(v) { return v >= 0 ? 'pt-pl-positive' : 'pt-pl-negative'; }
+    function edgeBadge(pp) {
+        const c = pp >= 5 ? 'pt-edge-high' : pp >= 2 ? 'pt-edge-medium' : 'pt-edge-low';
+        return `<span class="pt-edge-badge ${c}">+${Number(pp).toFixed(1)}pp</span>`;
+    }
+    function showToast(msg, kind) {
+        const t = document.getElementById('pt-toast');
+        t.innerHTML = `<div class="pt-toast ${kind || 'ok'}">${msg}</div>`;
+        setTimeout(() => { t.innerHTML = ''; }, 8000);
+    }
+
+    async function loadStrategies() {
+        const r = await fetch(strategiesUrl);
+        const d = await r.json();
+        if (!d.success) throw new Error(d.error || 'failed');
+        const tbody = document.getElementById('pt-strat-body');
+        tbody.innerHTML = '';
+        for (const s of d.strategies) {
+            const tr = document.createElement('tr');
+            if (!s.enabled) tr.className = 'disabled';
+            tr.innerHTML = `
+                <td><strong>${s.name}</strong><br><span style="color:var(--text-muted);font-size:0.7rem">${s.description}</span></td>
+                <td>${s.model_version}</td>
+                <td>${s.min_edge_pp}pp</td>
+                <td style="text-align:right" class="${pnlClass(s.bankroll - s.starting)}">${fmtMoney(s.bankroll)}</td>
+                <td style="text-align:right" class="${pnlClass(s.realised_pnl)}">${fmtMoney(s.realised_pnl)}</td>
+                <td style="text-align:right" class="${pnlClass(s.roi_pct || 0)}">${fmtPct(s.roi_pct, 2)}</td>
+                <td style="text-align:right">${s.n_bets}</td>
+                <td style="text-align:right">${s.n_settled}</td>
+                <td style="text-align:right">${s.win_rate !== null ? fmtPct(s.win_rate * 100, 1) : '--'}</td>
+                <td style="text-align:right">${fmtMoney(s.open_size)}</td>`;
+            tbody.appendChild(tr);
+        }
+        const totals = d.totals || {};
+        document.getElementById('pt-total-bankroll').textContent = fmtMoney(totals.bankroll);
+        document.getElementById('pt-total-pnl').textContent = fmtMoney(totals.realised_pnl);
+        document.getElementById('pt-total-pnl').className = 'pt-total-value ' + (totals.realised_pnl >= 0 ? 'positive' : 'negative');
+        document.getElementById('pt-total-roi').textContent = fmtPct(totals.roi_pct, 2);
+        document.getElementById('pt-total-roi').className = 'pt-total-value ' + (totals.roi_pct >= 0 ? 'positive' : 'negative');
+        document.getElementById('pt-total-open').textContent = fmtMoney(totals.open_size);
+    }
+
+    async function loadOpenBets() {
+        const r = await fetch(betsUrl + '?status=open&limit=50');
+        const d = await r.json();
+        const tbody = document.getElementById('pt-open-body');
+        tbody.innerHTML = '';
+        document.getElementById('pt-open-count').textContent = `(${d.n})`;
+        if (!d.bets || !d.bets.length) {
+            tbody.innerHTML = '<tr><td colspan="9" style="color:var(--text-muted);text-align:center;padding:1rem">No open paper bets</td></tr>';
+            return;
+        }
+        for (const b of d.bets) {
+            const tr = document.createElement('tr');
+            const fixture = b.fixture_key || '';
+            tr.innerHTML = `
+                <td>${fmtDate(b.proposed_at)}</td>
+                <td><strong>${b.strategy_label}</strong></td>
+                <td><span style="font-size:0.7rem;color:var(--text-muted)">${fixture}</span></td>
+                <td>${b.side_label || '--'}</td>
+                <td style="text-align:right">${(b.model_prob*100).toFixed(1)}%</td>
+                <td style="text-align:right">${(b.market_price_at_proposal*100).toFixed(1)}%</td>
+                <td style="text-align:right">${edgeBadge(b.edge_pp)}</td>
+                <td style="text-align:right">${fmtMoney(b.size_usdc)}</td>
+                <td style="text-align:right">${fmtMoney(b.bankroll_at_proposal)}</td>`;
+            tbody.appendChild(tr);
+        }
+    }
+
+    async function loadSettledBets() {
+        const r = await fetch(betsUrl + '?status=settled&limit=50');
+        const d = await r.json();
+        const tbody = document.getElementById('pt-settled-body');
+        tbody.innerHTML = '';
+        document.getElementById('pt-settled-count').textContent = `(${d.n})`;
+        if (!d.bets || !d.bets.length) {
+            tbody.innerHTML = '<tr><td colspan="10" style="color:var(--text-muted);text-align:center;padding:1rem">No settled bets yet</td></tr>';
+            return;
+        }
+        for (const b of d.bets) {
+            const tr = document.createElement('tr');
+            const won = b.settle_outcome === 1;
+            const outcomeBadge = won
+                ? '<span class="pt-status-badge pt-status-settled">WON</span>'
+                : '<span class="pt-status-badge pt-status-lost">LOST</span>';
+            tr.innerHTML = `
+                <td>${fmtDate(b.settled_at)}</td>
+                <td><strong>${b.strategy_label}</strong></td>
+                <td><span style="font-size:0.7rem;color:var(--text-muted)">${b.fixture_key || ''}</span></td>
+                <td>${b.side_label || '--'}</td>
+                <td style="text-align:right">${(b.model_prob*100).toFixed(1)}%</td>
+                <td style="text-align:right">${(b.market_price_at_proposal*100).toFixed(1)}%</td>
+                <td style="text-align:right">${edgeBadge(b.edge_pp)}</td>
+                <td style="text-align:right">${fmtMoney(b.size_usdc)}</td>
+                <td style="text-align:right" class="${pnlClass(b.pnl_realised_usdc || 0)}">${fmtMoney(b.pnl_realised_usdc)}</td>
+                <td>${outcomeBadge}</td>`;
+            tbody.appendChild(tr);
+        }
+    }
+
+    // Time-based bankroll-over-time chart. ALL strategies are plotted on
+    // the same horizontal time axis so a strategy with 1 settled bet and
+    // one with 5 are directly comparable. Strategies with no settlements
+    // show as a flat line at their starting bankroll across the whole
+    // chart so they're never invisible.
+    async function loadBankrollChart() {
+        const r = await fetch(historyUrl);
+        const d = await r.json();
+        if (!d.success) return;
+        const history = d.history || {};
+        const canvas = document.getElementById('pt-bankroll-chart');
+        const ctx = canvas.getContext('2d');
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+        const seriesAll = Object.entries(history);
+
+        // Find the global time range from settled bets (timestamps present)
+        let tMinMs = Infinity, tMaxMs = -Infinity;
+        let yMin = Infinity, yMax = -Infinity;
+        let nSettledTotal = 0;
+        for (const [, pts] of seriesAll) {
+            for (const p of pts) {
+                if (p.bankroll < yMin) yMin = p.bankroll;
+                if (p.bankroll > yMax) yMax = p.bankroll;
+                if (p.timestamp) {
+                    nSettledTotal++;
+                    const t = Date.parse(p.timestamp);
+                    if (!isNaN(t)) {
+                        if (t < tMinMs) tMinMs = t;
+                        if (t > tMaxMs) tMaxMs = t;
+                    }
+                }
+            }
+        }
+        if (nSettledTotal === 0) {
+            ctx.fillStyle = 'rgba(150,150,150,0.7)';
+            ctx.font = '12px sans-serif';
+            ctx.fillText('No settled paper bets yet (bankroll = $1000 across all strategies)',
+                         12, canvas.height / 2);
+            return;
+        }
+        // Round to 12-hour boundaries so X-axis ticks line up with sensible
+        // wall-clock times (00:00 UTC and 12:00 UTC). Extend tMax forward
+        // to "now" so flat-liners are visible across the whole chart.
+        const tNowMs = Date.now();
+        if (tMaxMs < tNowMs) tMaxMs = tNowMs;
+        const TWELVE_H_MS = 12 * 60 * 60 * 1000;
+        tMinMs = Math.floor(tMinMs / TWELVE_H_MS) * TWELVE_H_MS;
+        tMaxMs = Math.ceil(tMaxMs / TWELVE_H_MS) * TWELVE_H_MS;
+        // Ensure we have at least one full bucket to plot
+        if (tMaxMs - tMinMs < TWELVE_H_MS) tMaxMs = tMinMs + TWELVE_H_MS;
+
+        // Y range padded
+        if (yMin === yMax) { yMin -= 50; yMax += 50; }
+        const yPad = (yMax - yMin) * 0.15;
+        yMin -= yPad; yMax += yPad;
+
+        const colors = ['#10b981', '#f59e0b', '#a5b4fc', '#ef4444', '#06b6d4', '#fbbf24', '#8b5cf6'];
+        const padL = 56, padR = 80, padT = 14, padB = 30;
+        const W = canvas.width, H = canvas.height;
+        const plotW = W - padL - padR;
+        const plotH = H - padT - padB;
+
+        const xOf = (tMs) => padL + ((tMs - tMinMs) / (tMaxMs - tMinMs)) * plotW;
+        const yOf = (v) => padT + plotH - ((v - yMin) / (yMax - yMin)) * plotH;
+
+        // Y gridlines + $ labels
+        ctx.strokeStyle = 'rgba(120,120,120,0.2)';
+        ctx.fillStyle = 'rgba(120,120,120,0.75)';
+        ctx.font = '10px sans-serif';
+        ctx.lineWidth = 1;
+        for (let i = 0; i <= 4; i++) {
+            const y = padT + (plotH / 4) * i;
+            ctx.beginPath();
+            ctx.moveTo(padL, y);
+            ctx.lineTo(W - padR, y);
+            ctx.stroke();
+            const v = yMax - ((yMax - yMin) / 4) * i;
+            ctx.fillText('$' + v.toFixed(0), 6, y + 3);
+        }
+
+        // X tick labels - one tick per 12-hour boundary across the range.
+        // If the range is very long we thin the labels to keep them legible
+        // (max ~8 visible labels), but the gridlines stay at every boundary.
+        const nBuckets = Math.round((tMaxMs - tMinMs) / TWELVE_H_MS);
+        const labelEvery = Math.max(1, Math.ceil(nBuckets / 8));
+        for (let i = 0; i <= nBuckets; i++) {
+            const tMs = tMinMs + i * TWELVE_H_MS;
+            const x = padL + ((tMs - tMinMs) / (tMaxMs - tMinMs)) * plotW;
+            // Vertical gridline at every 12h boundary
+            ctx.strokeStyle = 'rgba(120,120,120,0.12)';
+            ctx.lineWidth = 1;
+            ctx.beginPath();
+            ctx.moveTo(x, padT);
+            ctx.lineTo(x, padT + plotH);
+            ctx.stroke();
+            // Label only every Nth tick
+            if (i % labelEvery !== 0) continue;
+            const date = new Date(tMs);
+            const lbl = date.toLocaleString(undefined, {
+                month: 'short', day: 'numeric',
+                hour: '2-digit', minute: '2-digit', hour12: false
+            });
+            ctx.fillStyle = 'rgba(120,120,120,0.7)';
+            ctx.font = '10px sans-serif';
+            ctx.fillText(lbl, x - 32, H - 6);
+        }
+
+        // Reference line at $1000 (starting bankroll)
+        ctx.strokeStyle = 'rgba(120,120,120,0.5)';
+        ctx.setLineDash([4, 4]);
+        ctx.beginPath();
+        const y1k = yOf(1000);
+        ctx.moveTo(padL, y1k);
+        ctx.lineTo(W - padR, y1k);
+        ctx.stroke();
+        ctx.setLineDash([]);
+
+        // Build one continuous line per strategy.
+        // For each strategy, x positions are timestamp-based:
+        //   - the synthetic "starting" point sits at tMinMs
+        //   - each settled bet is plotted at its settled_at time
+        //   - the line extends rightward to "now" at the last bankroll
+        //     so a strategy with no recent activity stays visible across
+        //     the full chart
+        const legend = document.getElementById('pt-chart-legend');
+        legend.innerHTML = '';
+        seriesAll.forEach(([name, pts], idx) => {
+            if (!pts.length) return;
+            const color = colors[idx % colors.length];
+            ctx.strokeStyle = color;
+            ctx.fillStyle = color;
+            ctx.lineWidth = 2;
+
+            // Build (xMs, bankroll) points: starting at tMinMs, then each
+            // settled point at its actual timestamp. Append a final segment
+            // at tMaxMs holding the latest bankroll (so flat-liners are visible).
+            const plotPts = [{xMs: tMinMs, b: pts[0].bankroll}];
+            for (let i = 1; i < pts.length; i++) {
+                const t = Date.parse(pts[i].timestamp);
+                if (isNaN(t)) continue;
+                plotPts.push({xMs: t, b: pts[i].bankroll, raw: pts[i]});
+            }
+            // Final extend to "now"
+            const lastBankroll = pts[pts.length - 1].bankroll;
+            plotPts.push({xMs: tMaxMs, b: lastBankroll});
+
+            ctx.beginPath();
+            plotPts.forEach((p, i) => {
+                const x = xOf(p.xMs);
+                const y = yOf(p.b);
+                if (i === 0) ctx.moveTo(x, y);
+                else ctx.lineTo(x, y);
+            });
+            ctx.stroke();
+
+            // Dots on each settled-bet point (skip the synthetic endpoints)
+            for (const p of plotPts) {
+                if (!p.raw) continue;
+                ctx.beginPath();
+                ctx.arc(xOf(p.xMs), yOf(p.b), 3, 0, Math.PI * 2);
+                ctx.fill();
+            }
+
+            // Right-edge label so users can read the strategy off the chart
+            const labelY = yOf(lastBankroll);
+            ctx.fillStyle = color;
+            ctx.font = '10px sans-serif';
+            ctx.fillText(name, W - padR + 4, labelY + 3);
+
+            // Legend chip
+            const chip = document.createElement('span');
+            chip.innerHTML = `<span style="display:inline-block;width:12px;height:12px;background:${color};border-radius:3px;vertical-align:middle"></span> <span style="vertical-align:middle">${name} ($${lastBankroll.toFixed(2)})</span>`;
+            chip.style.color = 'var(--text-secondary)';
+            legend.appendChild(chip);
+        });
+
+        // X-axis title
+        ctx.fillStyle = 'rgba(120,120,120,0.5)';
+        ctx.fillText('time →', W / 2 - 16, H - 18);
+    }
+
+    // ----- Upcoming Fixtures (post-toss re-scan) -----
+    let upcomingFixtures = [];
+
+    async function loadUpcomingFixtures() {
+        const r = await fetch(upcomingUrl);
+        const d = await r.json();
+        const tbody = document.getElementById('pt-fixtures-body');
+        if (!d.success || !d.fixtures) {
+            tbody.innerHTML = '<tr><td colspan="7" style="color:var(--text-muted);text-align:center;padding:1rem">No upcoming fixtures</td></tr>';
+            return;
+        }
+        upcomingFixtures = d.fixtures.filter(f => f.team1_id && f.team2_id && f.has_moneyline);
+        if (!upcomingFixtures.length) {
+            tbody.innerHTML = '<tr><td colspan="7" style="color:var(--text-muted);text-align:center;padding:1rem">No mappable upcoming fixtures with moneyline</td></tr>';
+            return;
+        }
+
+        // Get bet counts per fixture (pre/post-toss)
+        const betsAll = await fetch(betsUrl + '?limit=300').then(r => r.json()).then(d => d.bets || []);
+        const counts = {};
+        for (const b of betsAll) {
+            const k = b.fixture_key || '';
+            if (!counts[k]) counts[k] = {pre: 0, post: 0};
+            const ph = (b.phase || 'pre_toss');
+            if (ph === 'post_toss') counts[k].post++;
+            else counts[k].pre++;
+        }
+
+        tbody.innerHTML = '';
+        for (const fx of upcomingFixtures) {
+            const c = counts[fx.fixture_key] || {pre: 0, post: 0};
+            const t1Px = fx.moneyline_outcomes?.find(o => o.label === fx.team1)?.last_price ?? '-';
+            const t2Px = fx.moneyline_outcomes?.find(o => o.label === fx.team2)?.last_price ?? '-';
+            const start = fx.scheduled_start_utc?.replace('T', ' ').substring(0, 16) || '?';
+            const tr = document.createElement('tr');
+            tr.innerHTML = `
+                <td><strong>${fx.team1}</strong> vs <strong>${fx.team2}</strong>
+                    <br><span style="color:var(--text-muted);font-size:0.7rem">${fx.tournament_name}</span></td>
+                <td>${fx.format} ${fx.gender}</td>
+                <td>${start}</td>
+                <td>${typeof t1Px === 'number' ? (t1Px*100).toFixed(1)+'c' : '--'} / ${typeof t2Px === 'number' ? (t2Px*100).toFixed(1)+'c' : '--'}</td>
+                <td>${c.pre}</td>
+                <td>${c.post}</td>
+                <td><button class="pt-toss-trigger" data-fixture-key="${fx.fixture_key}">Toss + Re-scan</button></td>
+            `;
+            tbody.appendChild(tr);
+        }
+        document.querySelectorAll('.pt-toss-trigger').forEach(btn => {
+            btn.addEventListener('click', () => openTossModal(btn.dataset.fixtureKey));
+        });
+    }
+
+    // ----- Toss Modal -----
+    let modalState = {
+        fixture: null,
+        tossWinner: null,    // 'team1' | 'team2'
+        choseTo: null,       // 'bat' | 'field'
+        team1XiResolved: [], // list of {input, matched, player_id, name}
+        team2XiResolved: [],
+    };
+
+    function openTossModal(fixtureKey) {
+        const fx = upcomingFixtures.find(f => f.fixture_key === fixtureKey);
+        if (!fx) return;
+        modalState = {fixture: fx, tossWinner: null, choseTo: null, team1XiResolved: [], team2XiResolved: []};
+        document.getElementById('pt-toss-modal-fixture').textContent =
+            `${fx.team1} vs ${fx.team2} (${fx.format} ${fx.gender}, ${fx.tournament_name})`;
+        // Render winner buttons
+        const wg = document.getElementById('pt-toss-winner-group');
+        wg.innerHTML = `
+            <button type="button" class="pt-winner-btn" data-value="team1">${fx.team1}</button>
+            <button type="button" class="pt-winner-btn" data-value="team2">${fx.team2}</button>
+        `;
+        wg.querySelectorAll('.pt-winner-btn').forEach(b => b.addEventListener('click', () => {
+            modalState.tossWinner = b.dataset.value;
+            wg.querySelectorAll('.pt-winner-btn').forEach(x => x.classList.toggle('primary', x === b));
+        }));
+        document.querySelectorAll('.pt-chose-btn').forEach(b => {
+            b.classList.remove('primary');
+            b.onclick = () => {
+                modalState.choseTo = b.dataset.value;
+                document.querySelectorAll('.pt-chose-btn').forEach(x => x.classList.toggle('primary', x === b));
+            };
+        });
+        document.getElementById('pt-xi1-label').textContent = `${fx.team1} XI (paste names)`;
+        document.getElementById('pt-xi2-label').textContent = `${fx.team2} XI (paste names)`;
+        document.getElementById('pt-xi1-input').value = '';
+        document.getElementById('pt-xi2-input').value = '';
+        document.getElementById('pt-xi-resolved').innerHTML = '';
+        document.getElementById('pt-toss-modal-toast').innerHTML = '';
+        document.getElementById('pt-toss-modal').style.display = 'flex';
+    }
+
+    function closeTossModal() {
+        document.getElementById('pt-toss-modal').style.display = 'none';
+    }
+
+    async function resolveXiNames() {
+        const fx = modalState.fixture;
+        if (!fx) return;
+        const t1Names = document.getElementById('pt-xi1-input').value.split('\n').map(s => s.trim()).filter(Boolean);
+        const t2Names = document.getElementById('pt-xi2-input').value.split('\n').map(s => s.trim()).filter(Boolean);
+        if (!t1Names.length && !t2Names.length) {
+            document.getElementById('pt-xi-resolved').innerHTML =
+                '<span style="color:var(--text-muted)">No XI names entered. Submit will use recent-XI proxy.</span>';
+            return;
+        }
+        const fetchOne = async (teamId, names) => {
+            if (!names.length) return [];
+            const r = await fetch(resolveXiUrl, {
+                method: 'POST', headers: {'Content-Type':'application/json'},
+                body: JSON.stringify({team_id: teamId, format: fx.format, gender: fx.gender, names: names}),
+            });
+            const d = await r.json();
+            return d.resolved || [];
+        };
+        const [t1r, t2r] = await Promise.all([
+            fetchOne(fx.team1_id, t1Names),
+            fetchOne(fx.team2_id, t2Names),
+        ]);
+        modalState.team1XiResolved = t1r;
+        modalState.team2XiResolved = t2r;
+        const renderResolved = (label, lst) => {
+            if (!lst.length) return '';
+            const matched = lst.filter(x => x.matched).length;
+            const rows = lst.map(x => x.matched
+                ? `<span style="color:var(--accent-primary)">\u2713 ${x.input} \u2192 ${x.name} (id ${x.player_id})</span>`
+                : `<span style="color:#ef4444">\u2717 ${x.input} - no match</span>`
+            ).join('<br>');
+            return `<div style="margin:0.4rem 0;"><strong>${label}</strong> (${matched}/${lst.length} matched):<br>${rows}</div>`;
+        };
+        document.getElementById('pt-xi-resolved').innerHTML =
+            renderResolved(fx.team1, t1r) + renderResolved(fx.team2, t2r);
+    }
+
+    async function submitTossScan() {
+        const fx = modalState.fixture;
+        const toast = document.getElementById('pt-toss-modal-toast');
+        toast.innerHTML = '';
+        if (!fx) return;
+        if (!modalState.tossWinner || !modalState.choseTo) {
+            toast.innerHTML = '<div class="pt-toast error">Pick toss winner and chose-to first.</div>';
+            return;
+        }
+        // Auto-resolve if user typed names but didn't click Resolve
+        const t1Names = document.getElementById('pt-xi1-input').value.split('\n').map(s => s.trim()).filter(Boolean);
+        const t2Names = document.getElementById('pt-xi2-input').value.split('\n').map(s => s.trim()).filter(Boolean);
+        if ((t1Names.length || t2Names.length) && !modalState.team1XiResolved.length && !modalState.team2XiResolved.length) {
+            await resolveXiNames();
+        }
+        const t1Ids = modalState.team1XiResolved.filter(x => x.matched).map(x => x.player_id);
+        const t2Ids = modalState.team2XiResolved.filter(x => x.matched).map(x => x.player_id);
+        if ((t1Names.length && t1Ids.length < 11) || (t2Names.length && t2Ids.length < 11)) {
+            toast.innerHTML = `<div class="pt-toast error">Need 11 matched names per team to override (got ${t1Ids.length}/${t1Names.length} for ${fx.team1}, ${t2Ids.length}/${t2Names.length} for ${fx.team2}). Fix names or leave blank to use recent-XI proxy.</div>`;
+            return;
+        }
+        const body = {
+            fixture_key: fx.fixture_key,
+            toss_winner: modalState.tossWinner,
+            chose_to: modalState.choseTo,
+        };
+        if (t1Ids.length === 11) body.team1_xi = t1Ids;
+        if (t2Ids.length === 11) body.team2_xi = t2Ids;
+
+        toast.innerHTML = '<div class="pt-toast ok">Submitting post-toss scan...</div>';
+        try {
+            const r = await fetch(postTossUrl, {
+                method: 'POST', headers: {'Content-Type':'application/json'},
+                body: JSON.stringify(body),
+            });
+            const d = await r.json();
+            if (!d.success) throw new Error(d.error || 'submit failed');
+            toast.innerHTML = `<div class="pt-toast ok">Started in background (pid ${d.pid}). Polling for completion...</div>`;
+            // Poll until done
+            let polls = 0;
+            const interval = setInterval(async () => {
+                polls++;
+                if (polls > 24) {  // 24 * 5s = 2 min
+                    clearInterval(interval);
+                    toast.innerHTML += '<div class="pt-toast error">Timed out waiting for completion. Check logs/paper_post_toss.log.</div>';
+                    return;
+                }
+                const sr = await fetch(postTossStatusUrl).then(r => r.json()).catch(() => null);
+                if (sr && !sr.running) {
+                    clearInterval(interval);
+                    const summaryMatch = (sr.tail || '').match(/POST-TOSS SCAN SUMMARY[\s\S]*$/);
+                    toast.innerHTML += `<div class="pt-toast ok">Done. Refreshing dashboard.<br><pre style="font-size:0.7rem;color:var(--text-muted);max-height:200px;overflow:auto">${(summaryMatch?.[0] || '').replace(/[<>]/g, '')}</pre></div>`;
+                    await refreshAll({skipReconcile: true});
+                }
+            }, 5000);
+        } catch (e) {
+            toast.innerHTML = `<div class="pt-toast error">${e.message}</div>`;
+        }
+    }
+
+    async function fetchCrexXi() {
+        const fx = modalState.fixture;
+        if (!fx) return;
+        const btn = document.getElementById('pt-fetch-crex-xi');
+        const status = document.getElementById('pt-fetch-crex-status');
+        btn.disabled = true;
+        const startedAt = Date.now();
+        const tick = setInterval(() => {
+            const sec = Math.round((Date.now() - startedAt) / 1000);
+            status.textContent = `Rendering CREX page... ${sec}s`;
+        }, 1000);
+        try {
+            const r = await fetch(fetchCrexXiUrl, {
+                method: 'POST', headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({fixture_key: fx.fixture_key}),
+            });
+            const d = await r.json();
+            if (!d.success) throw new Error(d.error || 'CREX fetch failed');
+            const c = d.crex || {};
+            document.getElementById('pt-xi1-input').value = (c.team1_xi || []).join('\n');
+            document.getElementById('pt-xi2-input').value = (c.team2_xi || []).join('\n');
+            const t1n = (c.team1_xi || []).length;
+            const t2n = (c.team2_xi || []).length;
+            status.innerHTML = `<span style="color:var(--accent-primary)">\u2713 CREX returned ${t1n} player(s) for ${fx.team1} and ${t2n} for ${fx.team2}.</span> Auto-resolving names...`;
+            // Auto-resolve so user can see ✓/✗ immediately
+            await resolveXiNames();
+        } catch (e) {
+            status.innerHTML = `<span style="color:#ef4444">${e.message}</span>`;
+        } finally {
+            clearInterval(tick);
+            btn.disabled = false;
+        }
+    }
+
+    document.getElementById('pt-toss-modal-cancel').addEventListener('click', closeTossModal);
+    document.getElementById('pt-toss-modal-resolve').addEventListener('click', resolveXiNames);
+    document.getElementById('pt-toss-modal-submit').addEventListener('click', submitTossScan);
+    document.getElementById('pt-fetch-crex-xi').addEventListener('click', fetchCrexXi);
+
+    // ----- Auto-toss poller status + control -----
+    let pollerCurrentlyRunning = false;
+    function timeAgo(isoStr) {
+        if (!isoStr) return '';
+        const ms = Date.now() - new Date(isoStr).getTime();
+        if (ms < 0 || isNaN(ms)) return '';
+        const s = Math.round(ms / 1000);
+        if (s < 60) return s + 's ago';
+        if (s < 3600) return Math.round(s/60) + 'm ago';
+        return Math.round(s/3600) + 'h ago';
+    }
+    async function loadPollerStatus() {
+        try {
+            const r = await fetch(pollerStatusUrl);
+            const d = await r.json();
+            const badge = document.getElementById('pt-poller-badge');
+            const btn = document.getElementById('pt-poller-toggle');
+            if (!d.success) {
+                badge.className = 'pt-poller-badge pt-poller-off';
+                badge.textContent = 'Auto-toss: ?';
+                pollerCurrentlyRunning = false;
+                btn.textContent = 'Start auto-toss';
+                return;
+            }
+            pollerCurrentlyRunning = d.running;
+            const sd = d.status_data || {};
+            const lastWritten = sd.written_at_utc;
+            const ago = lastWritten ? timeAgo(lastWritten) : '';
+            const stale = lastWritten && (Date.now() - new Date(lastWritten).getTime() > 5 * 60 * 1000);
+            if (d.running && !stale) {
+                badge.className = 'pt-poller-badge pt-poller-on';
+                const spawns = sd.spawns_total != null ? sd.spawns_total : 0;
+                badge.textContent = `Auto-toss: ON (iter ${sd.iter_count||0}, ${spawns} spawned, last ${ago})`;
+                btn.textContent = 'Stop auto-toss';
+            } else if (d.running && stale) {
+                badge.className = 'pt-poller-badge pt-poller-stale';
+                badge.textContent = `Auto-toss: stale (last ${ago})`;
+                btn.textContent = 'Stop auto-toss';
+            } else {
+                badge.className = 'pt-poller-badge pt-poller-off';
+                badge.textContent = 'Auto-toss: OFF';
+                btn.textContent = 'Start auto-toss';
+            }
+        } catch (e) {
+            // Silent failure - keep prior state
+        }
+    }
+
+    document.getElementById('pt-poller-toggle').addEventListener('click', async (ev) => {
+        const btn = ev.target;
+        btn.disabled = true;
+        try {
+            if (pollerCurrentlyRunning) {
+                const r = await fetch(pollerStopUrl, {method: 'POST'});
+                const d = await r.json();
+                if (d.success && d.stopped) {
+                    showToast(`Auto-toss daemon stopped (pid ${d.pid}).`, 'ok');
+                } else {
+                    showToast(`Stop returned: ${d.reason || JSON.stringify(d)}`, 'error');
+                }
+            } else {
+                const r = await fetch(pollerStartUrl, {
+                    method: 'POST', headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({poll_interval: 90, lookback_min: 45, lookahead_min: 30}),
+                });
+                const d = await r.json();
+                if (d.success) {
+                    if (d.already_running) {
+                        showToast(`Daemon already running (pid ${d.pid}).`, 'ok');
+                    } else {
+                        showToast(`Auto-toss daemon started (pid ${d.pid}).`, 'ok');
+                    }
+                } else {
+                    showToast(`Start failed: ${d.error}`, 'error');
+                }
+            }
+            await loadPollerStatus();
+        } catch (e) {
+            showToast(e.message, 'error');
+        } finally {
+            btn.disabled = false;
+        }
+    });
+
+    async function refreshAll(opts) {
+        opts = opts || {};
+        try {
+            // Run reconcile in background unless explicitly disabled. It's
+            // fast (1-3s) so it's safe to bake into refresh and callers
+            // never need to click "Reconcile Now" themselves.
+            const reconcilePromise = opts.skipReconcile
+                ? Promise.resolve()
+                : fetch(reconcileUrl, {method: 'POST', headers: {'Content-Type':'application/json'}})
+                    .then(r => r.json())
+                    .catch(() => null);
+            await Promise.all([loadStrategies(), loadOpenBets(), loadSettledBets(), loadBankrollChart(), loadUpcomingFixtures()]);
+            const r = await reconcilePromise;
+            if (r && r.success && r.reconcile && r.reconcile.n_settled > 0) {
+                showToast(`Reconciled ${r.reconcile.n_settled} bet(s) - reloading...`, 'ok');
+                await Promise.all([loadStrategies(), loadOpenBets(), loadSettledBets(), loadBankrollChart(), loadUpcomingFixtures()]);
+            }
+        } catch (e) {
+            showToast('Failed to load: ' + e.message, 'error');
+        }
+    }
+
+    document.getElementById('pt-refresh').addEventListener('click', () => refreshAll());
+
+    document.getElementById('pt-reconcile-now').addEventListener('click', async (ev) => {
+        const btn = ev.target;
+        btn.disabled = true;
+        btn.textContent = 'Reconciling...';
+        try {
+            const r = await fetch(reconcileUrl, {method: 'POST', headers: {'Content-Type':'application/json'}});
+            const d = await r.json();
+            if (!d.success) throw new Error(d.error || 'reconcile failed');
+            const settled = d.reconcile?.n_settled || 0;
+            const checked = d.reconcile?.n_checked || 0;
+            showToast(`Reconcile complete: ${settled} of ${checked} bets settled this run.`, 'ok');
+            await refreshAll({skipReconcile: true});
+        } catch (e) {
+            showToast('Reconcile failed: ' + e.message, 'error');
+        } finally {
+            btn.disabled = false;
+            btn.textContent = 'Reconcile Now (fast)';
+        }
+    });
+
+    document.getElementById('pt-scan-now').addEventListener('click', async (ev) => {
+        const btn = ev.target;
+        btn.disabled = true;
+        const startedAt = Date.now();
+        btn.textContent = 'Starting scan...';
+        try {
+            const r = await fetch(scanUrl, {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({hours_ahead: 168}),
+            });
+            const d = await r.json();
+            if (!d.success) throw new Error(d.error || 'scan failed');
+            showToast(
+                `Scan started in background (pid ${d.pid}). Dashboard will ` +
+                `auto-refresh as new bets appear (typically 2-4 min).`,
+                'ok'
+            );
+
+            // Poll status endpoint until done, refreshing dashboard along the way
+            const statusUrl = '/api/paper/scan-now/status';
+            const finishedRe = /PAPER TRADING - PER-STRATEGY SUMMARY/;
+            const errorRe = /Traceback|Error/;
+            let pollCount = 0;
+            const maxPolls = 90;  // 90 * 5s = 7.5 minutes hard cap
+            await new Promise((resolve) => {
+                const interval = setInterval(async () => {
+                    pollCount++;
+                    const elapsed = Math.round((Date.now() - startedAt) / 1000);
+                    btn.textContent = `Scanning... ${elapsed}s`;
+                    try {
+                        const sr = await fetch(statusUrl);
+                        const sd = await sr.json();
+                        if (!sd.running || finishedRe.test(sd.tail || '')) {
+                            clearInterval(interval);
+                            showToast(`Scan finished after ${elapsed}s. Refreshing dashboard...`, 'ok');
+                            await refreshAll();
+                            resolve();
+                        } else if (errorRe.test(sd.tail || '')) {
+                            clearInterval(interval);
+                            showToast('Scan errored - check logs/paper_scan_now.log', 'error');
+                            resolve();
+                        }
+                    } catch (e) { /* keep polling */ }
+                    if (pollCount >= maxPolls) {
+                        clearInterval(interval);
+                        showToast('Scan polling timed out. Check logs/paper_scan_now.log', 'error');
+                        resolve();
+                    }
+                }, 5000);
+            });
+        } catch (e) {
+            showToast('Scan failed: ' + e.message, 'error');
+        } finally {
+            btn.disabled = false;
+            btn.textContent = 'Run Scan + Reconcile (slow ~3min)';
+        }
+    });
+
+    refreshAll();
+    loadPollerStatus();
+    setInterval(() => refreshAll(), 60000);
+    setInterval(loadPollerStatus, 15000);
+})();
+</script>
+{% endblock %}

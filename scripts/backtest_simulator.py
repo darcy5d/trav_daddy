@@ -71,12 +71,12 @@ def main() -> int:
     parser.add_argument(
         "--model-version",
         default="v1",
-        choices=["v1", "v2"],
+        choices=["v1", "v2", "v3"],
         help=(
-            "Which model architecture to use: v1 = legacy ball_prediction_model_*.keras "
-            "(per-format/gender histograms, 7-class softmax) or v2 = cricket_model_v2 "
-            "(joint multi-task with embeddings + per-over head, 9-class extras-aware, "
-            "with optional Platt calibration). Default v1 for backwards compatibility."
+            "Which model architecture to use. v1 = legacy ball_prediction_model_*.keras. "
+            "v2 = cricket_model_v2 (multi-task joint, 9-class extras, per-over head). "
+            "v3 = cricket_model_v3 (V2 + toss + lineup-stability features). "
+            "Default v1 for backwards compatibility."
         ),
     )
     parser.add_argument(
@@ -128,9 +128,12 @@ def main() -> int:
         if args.model_version == "v1":
             from src.models.vectorized_nn_sim import VectorizedNNSimulator
             simulator = VectorizedNNSimulator(gender=args.gender, format_type=args.format)
-        else:  # v2
+        elif args.model_version == "v2":
             from src.models.vectorized_nn_sim_v2 import V2Simulator, V2SimulatorConfig
             simulator = V2Simulator(V2SimulatorConfig(format_type=args.format, gender=args.gender))
+        else:  # v3
+            from src.models.vectorized_nn_sim_v3 import V3Simulator, V3SimulatorConfig
+            simulator = V3Simulator(V3SimulatorConfig(format_type=args.format, gender=args.gender))
     else:
         raise SystemExit(f"Unsupported simulator: {args.simulator}")
 

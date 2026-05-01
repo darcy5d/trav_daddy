@@ -10,14 +10,34 @@ history.
 | Wave | Status | Theme |
 |---|---|---|
 | 1 | DONE | CREX scraper hardening + venue tooling + data explorer |
-| 2 | DONE | Polymarket / Betfair read paths + Bulk Predict UI polish |
+| 2 | DONE | Polymarket read path + Bulk Predict UI polish (Betfair scaffolding deferred indefinitely) |
 | 3 | DONE | Team franchise unification + ELO data repair |
 | 3.5 | DONE | Match-level backtest harness (item 16) |
 | 4 | DONE | Cricket Model v2 — strategic rewrite (build + first train) |
-| **4.5** | **DONE** | **V2 second-pass training: closed score-MAE gap, V2 now beats V1 on every probabilistic metric** |
-| 5 | PARKING LOT | ELO modelling refinements + market integration write-paths |
-| 6 | PARKING LOT | Advanced model features + new data sources |
-| 7 | NEW PARKING LOT | V2 productionisation (GUI integration, calibration refit at scale, expanded backtests) |
+| 4.5 | DONE | V2 second-pass training: closed score-MAE gap, V2 now beats V1 on every probabilistic metric |
+| 5 | DONE | Multi-market simulator + Polymarket compare + guarded write-path (build complete; verdict deferred to Wave 5.5) |
+| **5.5** | **DONE — V3 ships, calibration improves on internationals + WPL but no auto-eligible combos at n>=50** | **V3 toss + lineup-aware model + wide multi-format sweep across 9 tournament-format-gender combos** |
+| 6 | PARKING LOT | Polymarket liquidity provision (LP) on thin sub-markets |
+| 7 | PARKING LOT | V2/V3 productionisation (GUI integration, debug UI, structural wicket fix, era investigation) |
+| 8 | PARKING LOT | Advanced model features + new data sources (rejection sampling, matchup history, pitch/dew, time-conditional embeddings) |
+| 5.6 | NEW PARKING LOT | Per-tournament calibration + larger holdouts to firm up V3 long-lookback edge findings |
+
+## Polymarket cricket market types we model (Wave 5)
+
+Polymarket lists ~6 market types per cricket fixture; only 4 carry meaningful cricket signal we can edge.
+
+| Market | Outcomes | Modellable? | Notes |
+|---|---|---|---|
+| **Moneyline** | 2-way (team1 / team2) | YES | Traditional match-winner. Our V2 simulator natively outputs this. |
+| **Team Top Batter** | 3-way (team1 / draw / team2) | YES | Requires per-batter run distribution from sim. New in Wave 5. |
+| **Most Sixes** | 3-way (team1 / draw / team2) | YES | Requires per-team six counter from sim. New in Wave 5. |
+| **Toss Match Double** | 4-way (toss x match cross-product) | YES | Cross-multiplies model moneyline by 50% toss prob; toss is genuinely random. |
+| Toss Winner | 2-way | NO | Genuinely 50/50; no edge possible from cricket modelling. |
+| Completed Match | 2-way (yes / no) | NO | Weather / cancellation event, not a cricket-skill prediction. |
+
+Side markets (Top Batter, Most Sixes) currently sit at $0-$80 volume with prices like
+"TEAM_A 91¢ / Draw 9¢ / TEAM_B 91¢" — sums to $1.91, ~50% spread. Unpriced markets
+waiting for a calibrated quote. Genuine LP opportunity here once Wave 5 ships.
 
 ## Wave 4 — Cricket Model v2 strategic rewrite (DONE)
 
@@ -348,45 +368,309 @@ inference.
 - Per-over head replacing the per-ball head entirely (option C from
   planning; explicitly rejected because it loses the ball-by-ball DNA).
 
-## Wave 5 (parking lot) — ELO + market integrations follow-ups
+## Wave 5.5 — V3 toss-aware model + wide multi-format sweep (DONE)
 
-ELO modelling improvements that v2 does **not** subsume (because they sit
-at the ELO layer, not the simulator):
+**Build complete:**
+- `src/features/ball_training_data_v3.py` adds 3 new continuous features
+  (toss_won_by_batting_team, chose_to_bat, xi_overlap_recent_3) on top of
+  V2's 22-column state vector. Toss data 100% covered in `matches` table
+  since 2024.
+- `src/models/cricket_model_v3.py` is a thin factory over V2 with
+  `n_continuous=25`. Same architecture, same per-(format,gender) heads.
+- V3 trained 39 epochs in 40 min, best val_loss **1.0152** (V2 overnight
+  was 1.015 - effectively matched, with 3 extra features included).
+- `src/models/vectorized_nn_sim_v3.py` extends V2Simulator with toss_pinned
+  + toss_marginalised (uncertain, scalar-broadcast) modes.
+- Per-(format, gender) Platt calibration fit:
+  - T20 male n=26  a=0.210 b=+0.202  NLL 0.742 -> 0.687
+  - T20 female n=8 a=0.475 b=+1.104  NLL 0.706 -> 0.515
+  - ODI male n=25  a=0.050 b=-0.568  NLL 0.722 -> 0.654
+  - ODI female n=27 a=0.538 b=-0.152 NLL 0.679 -> 0.637
 
-- **ELO margin-of-victory term.** Replace binary `actual ∈ {0, 0.5, 1}`
-  in `update_team_ratings` with a continuous score scaled by margin
-  (NRR-equivalent or capped log function). A 100-run win should move more
-  rating than a Super Over. v2 uses ELO as an input feature, so improving
-  ELO improves v2 too.
-- **ELO recency decay / half-life.** Either an exponential decay on
-  contribution to `elo_change`, or a rolling-window companion "form ELO"
-  the simulator blends with the long-term rating. v2's training-sample
-  recency weighting is a different mechanism (training-time only) — this
-  fixes the ELO calculation itself.
-- **Populate `team_external_ids` for Cricinfo / CREX / Cricsheet at
-  scale.** Schema landed Wave 3. Pairs naturally with item 17 (Cricsheet
-  Register) on the player side — both should be done together so the Team
-  Explorer's external-id chips become real cross-source links.
+**Wide sweep:** 18 backtests (V2 + V3 across IPL/PSL/BBL/WPL/CPL/T20I men/women + ODI men/women), 40 matches per combo, 200 sims/match, 8 lookbacks (T-30min to T-3d), 4 edge thresholds (3/5/10/20pp). Total 3,186 bet rows + 741 calibration rows in 207 min.
 
-ELO items **subsumed by Wave 4** (no longer needed as separate work):
+### Empirical verdict
 
-- ~~Venue / home advantage in ELO.~~ v2's learned venue embedding can
-  encode home advantage in any direction the data supports.
-- ~~Team-specific scoring dispersion in the simulator.~~ v2's team
-  embedding + per-over head + extras handling addresses this.
-- ~~`FIRST_INNINGS_SCORE_BONUS` calibration.~~ v2's calibration layer
-  subsumes this; the constant gets removed in Phase 4.
+**Calibration table (V2 vs V3 per tournament, smaller Brier is better):**
 
-Market integration write-path / autonomous runner (deferred from Wave 2):
+| Tournament | V2 Brier | V3-pinned Brier | V3-marginalised Brier | V3 helps? |
+|---|---|---|---|---|
+| IPL T20 men | 0.252 | 0.265 | 0.262 | NO (slightly worse) |
+| PSL T20 men | 0.250 | 0.251 | 0.251 | tied |
+| BBL T20 men | 0.248 | 0.259 | 0.261 | NO |
+| WPL T20 women | 0.323 | 0.271 | 0.273 | YES (substantial) |
+| CPL T20 men | 0.247 | 0.247 | 0.247 | tied |
+| T20I men | 0.237 | 0.217 | 0.218 | YES |
+| T20I women | 0.199 | 0.236 | 0.224 | NO (slightly worse) |
+| ODI men | 0.246 | 0.227 | 0.226 | YES |
+| ODI women | 0.211 | 0.221 | 0.217 | tied |
 
-- 8b. Polymarket write-path (order placement) — pending API keys + compliance.
-- 9b. Betfair write-path including back/lay execution.
-- 10. Autonomous runner: discover → simulate → bet (risk matrix).
-- 11. Bet ledger / audit trail (DB or append-only).
-- 12. Cross-venue true-arb pathway.
-- 13. Liquidity depth research + position sizing.
+**EV verdict:** ZERO combos passed the auto-eligibility gate
+(n_bets >= 50 AND bootstrap CI95-lower > 0). The "top combos by ROI*sqrt(n)"
+are dominated by 1-2 lottery-ticket bets that hit at very long odds
+(market price ~$0.005, win pays $5000 from $25 stake -> ROI 199,898%).
+These are not robust signals.
 
-## Wave 6 (parking lot) — Advanced model + new data sources
+V3 outperforms V2 on the long-tail tournaments (T20I, ODI men, WPL) where
+the market is least efficient and V3's toss/lineup features matter most.
+But none reaches statistical confidence at this sample size.
+
+### Recommendation (Phase D deferred)
+
+- Stay BETTING_MODE=OFF.
+- Do NOT bootstrap a Polygon wallet yet - no combo has confident +ROI.
+- Best near-term action: Wave 5.6 (per-tournament calibration + larger
+  holdouts on the tournaments where V3 already showed lift).
+- V3 sim is ready for live use as soon as edge is confirmed; the
+  Live Betting UI / risk gate / bet ledger / dashboard from Wave 5
+  Phase 6-7 are all in place.
+
+### Files added in Wave 5.5
+
+- `src/features/ball_training_data_v3.py` - V3 training data builder
+- `src/models/cricket_model_v3.py` - V3 model factory
+- `src/models/vectorized_nn_sim_v3.py` - V3Simulator with toss-aware modes
+- `scripts/build_ball_training_v3.py` - V3 npz builder CLI
+- `scripts/train_cricket_model_v3.py` - V3 trainer (Wave 4.5 winning recipe)
+- `scripts/fit_v3_calibration.py` - per-route Platt fit
+- `scripts/run_wave_5_5_wide_sweep.py` - 18-run orchestrator
+- `scripts/analyse_wave_5_5_master.py` - bootstrap-CI aggregator
+- `tests/test_simulator_v3.py` - 6 unit tests
+- `data/models/v3/cricket_model_v3.keras` - trained weights (1.23M params)
+- `data/models/v3/calibration.json` - per-route Platt scalars
+- `data/diagnostics/wave_5_5_master_summary.md` - the verdict report
+
+## Wave 5 — Multi-market simulator + Polymarket compare + guarded write-path (DONE)
+
+Theme: pivot wholesale to Polymarket-only (drop Betfair from active scope).
+Extend the V2 simulator to emit per-batter run distributions and per-team
+six counts so we can model all four useful Polymarket cricket markets.
+Validate on the wider holdout, run a historical-prices EV backtest, then
+ship a guarded semi-auto write-path with a graduating $200 -> $1000
+envelope. Liquidity provision (Wave 6) stays parked.
+
+Phases (executed in this wave):
+
+- **Phase 0 — Doc reset.** This rewrite. Drops Betfair from active scope,
+  removes Betfair Flask routes from `app/main.py`, rewrites `README.md`
+  for Polymarket-only direction. `.env.example` BETFAIR_* entries kept but
+  flagged "Deferred". `src/integrations/betfair/` source code preserved
+  in repo for optionality.
+
+- **Phase 1 — Simulator extensions.** `src/models/vectorized_nn_sim_v2.py`
+  per-ball loop now tracks per-batter cumulative runs and per-team six
+  counts. `src/models/market_outputs.py` derives per-market probabilities
+  for all 4 Polymarket cricket market types (moneyline, top_batter,
+  most_sixes, toss_match_double).
+
+- **Phase 2 — Polymarket compare service extension.** Existing
+  moneyline-only service in `src/integrations/odds/polymarket_compare.py`
+  extended to handle all 4 market types. Bulk Predict UI surfaces 4
+  market cards per fixture with edge badges (amber > 5pp, green > 10pp).
+
+- **Phase 3 — Wider holdout backtests.** 12 backtests across V1/V2 x
+  T20I men/women / ODI men / PSL / BBL / WPL. Per-match rows now capture
+  predicted top batter and most-sixes outcome alongside moneyline.
+
+- **Phase 4 — Per-market validation report.** Per-tournament calibration
+  matrix per market type, with Andrew Kuo's 25% top-batter accuracy as
+  the reference bar. "Polymarket exploit potential" section surfaces
+  rough EV estimates per market type.
+
+- **Phase 5 — Polymarket historical EV backtest.** New
+  `src/integrations/polymarket/historical.py` + `scripts/backtest_polymarket_ev.py`
+  pull `/prices-history` per market per match, compute realised P&L if
+  we'd bet at edge>N% threshold over 6-12 months of cricket coverage.
+  Output drives Phase 6 envelope sizing — markets with `n_settled >= 50
+  AND realised_roi > 0` are eligible for AUTO mode; the rest are
+  MANUAL-only.
+
+- **Phase 6 — Guarded write-path live.**
+  - 6a: `py-clob-client` integration; write methods on `PolymarketClient`
+    (place_order, cancel_order, get_open_orders, get_positions).
+    `scripts/bootstrap_polymarket_wallet.py` for one-time wallet + USDC
+    approval setup.
+  - 6b: `bet_ledger` SQLite table + reconciliation job after each settled
+    match.
+  - 6c: Server-side risk gate (`risk_gate.py`); env-driven hard caps
+    ($200 deposit / $25 per bet / $50 per day / $30 max daily loss).
+    Mode toggle OFF/MANUAL/AUTO defaulting OFF. Kill switch survives
+    Flask restart.
+  - 6d: Live Betting UI tab with mode toggle, kill switch, surfaced
+    edges, today's bets, recent settled bets.
+
+- **Phase 7 — Live ops + first-week monitoring.** Per-bet calibration
+  diagram on actual settled bets, scale-up gate logic (50+ settled
+  bets + Brier under threshold lets envelope graduate $200 -> $500 ->
+  $1000). Daily rollup script.
+
+### Empirical verdict (Apr 2026, after Sittings 1+2 ran)
+
+**Sitting 1 (Phase 3-4, V2 wider holdout):**
+
+| Tournament | n | Brier | vs 50/50 | Top batter top-1 | Most sixes acc |
+|---|---|---|---|---|---|
+| IPL T20 men 2025 | 18 | 0.253 | tied | 8.3% | 55.6% |
+| PSL T20 men | 17 | 0.250 | tied | 8.8% | 23.5% |
+| BBL T20 men | 15 | 0.249 | slightly better | 20.0% | 53.3% |
+| WPL T20 women | 8 | 0.322 | overconfident | 12.5% | 50.0% |
+| T20I men | 10 | 0.239 | better | 25.0% | 40.0% |
+| ODI men | 17 | 0.307 | overconfident | 23.5% | 64.7% |
+
+V2 mean top-batter top-1 across 6 tournaments: **18.4%** (Andrew Kuo bar 25%) — V2 is BELOW reference.
+V2 mean most-sixes accuracy: **48.2%** (random 33%) — V2 beats random meaningfully.
+ODI and WPL have Brier > 0.30 — calibration broken on those formats; needs separate refit.
+
+**Sitting 2 (Phase 5, EV backtest on IPL 2025 across 8 lookback timings):**
+
+499 bet rows captured across 80 IPL 2025 matches, 8 lookbacks (T-30min, T-1h, T-3h, T-6h, T-12h, T-1d, T-2d, T-3d), 4 edge thresholds (3/5/10/20 pp). Headline ROI by entry timing (best threshold per lookback):
+
+| Lookback | n | Win rate | ROI |
+|---|---|---|---|
+| T-30min | 33 | 21% | -33.8% (money pit) |
+| T-1h | 28 | 25% | +15.0% |
+| T-3h | 17 | 35% | -21.3% |
+| T-6h | 22 | 41% | -5.4% |
+| T-12h | 22 | 41% | -7.3% |
+| T-1d | 20 | 45% | +0.2% |
+| T-2d | 8 | 50% | +16.9% |
+| T-3d | 6 | 50% | +20.9% |
+
+**Mechanism:** At T-30min the market is fully informed (toss + lineup are known by then), V2's pre-match 50/50 prior loses systematically. Going earlier, the market is still uncertain and V2's 50/50 prior is closer to truth — T-2d and T-3d show 50% win rates and positive ROI.
+
+**Caveat:** sample sizes at the early lookbacks are tiny (n=6 at T-3d, n=8 at T-2d). Cannot confidently call this real edge from this single tournament alone. Many IPL 2025 matches' markets only opened ~30h before tip-off, so deep lookbacks are uncovered.
+
+**Conclusion:**
+- Do NOT bet at T-30min entry. That's a confirmed money pit.
+- Early-lookback (T-1d to T-3d) shows promising signs but n is too small.
+- **Before graduating the envelope: re-run Sitting 2 on PSL + BBL + IPL 2024 + IPL 2026 to multiply the sample at early lookbacks. Need ~200 bets per lookback to be confident.**
+- Side markets (Top Batter, Most Sixes) didn't appear in Polymarket's `closed=true` Gamma events for IPL — separate live-event probe needed.
+
+Most-sixes market doesn't exist on closed IPL events on Polymarket Gamma; side markets need separate exploration on live events.
+
+### Wave 5.5 path (recommended next, consolidates the V3 work)
+
+1. Investigate cricket events with thinner late-info compression: PSL, BBL, women's leagues, smaller-tournament T20Is. Re-run Phase 5 on each; some may have markets that move less on toss.
+2. Build a toss-aware feature path into V2 inference: when toss outcome is known live, override `use_toss=False` and pass `toss_winner_team_id` + `chose_field=True/False` as model inputs. Requires adding 2 features to the v2 input vector + small retraining.
+3. Re-run Phase 5 with the toss-aware variant; compare ROI.
+4. Side markets: Polymarket's Top Batter and Most Sixes markets are thin and probably ARE inefficient. But they don't appear in IPL closed events — they exist on the live event page but settle differently. Need to manually probe a live event during a match week.
+
+- **Phase 8 — Decision fork (operator checklist).** Run AFTER Phase 5 EV
+  backtest + first week of live betting. Concrete steps:
+
+  1. Run `python scripts/backtest_polymarket_ev.py --tournament-pattern '%Indian Premier League%' --since-date 2024-06-01` and read `data/diagnostics/wave_5_polymarket_ev.md`.
+  2. Identify which markets have `n_settled >= 50 AND realised_roi > 0`.
+     Update `BETTING_AUTO_MARKETS` in `.env` to that comma-separated list.
+  3. Run `python scripts/bootstrap_polymarket_wallet.py --generate`, fund
+     the printed address with $200 USDC on Polygon, then
+     `--approve` to derive L2 creds.
+  4. Switch mode to `MANUAL` via the Live Betting UI (kill switch off).
+     Place 5-10 hand-approved test bets across 1-2 days. Confirm
+     reconciliation marks them settled correctly.
+  5. After 50+ settled bets:
+     - **realised live ROI > 0 and within 50% of backtest projection** ->
+       graduate envelope to $500 via the dashboard "Graduate" button.
+       Open Wave 6 LP scoping in NEXT_OVERHAUL.
+     - **realised live ROI > 0 but well below backtest projection** ->
+       stay at $200 envelope, investigate slippage / fee model, consider
+       earlier entry (T-30 -> T-60 lookback in Phase 5).
+     - **realised live ROI <= 0 across 50+ settled bets** -> flip mode
+       to OFF, write postmortem in NEXT_OVERHAUL, do NOT proceed to LP.
+       Likely needs a model architecture revisit (V3?).
+
+ELO modelling improvements (deferred indefinitely; V2 model does the heavy lifting now):
+
+- ELO margin-of-victory term. Was Wave 5; deferred since V2's calibration
+  layer dominates the impact this would have had.
+- ELO recency decay / half-life. Same reasoning; V2's training recency
+  weighting + post-hoc Platt calibration cover the relevant signal.
+- Populate `team_external_ids` for Cricinfo / CREX / Cricsheet at scale.
+  Schema landed Wave 3 but no single-session ROI without Wave 8 source
+  ingest.
+
+ELO items subsumed by Wave 4 (no longer needed):
+
+- Venue / home advantage in ELO. V2's learned venue embedding handles it.
+- Team-specific scoring dispersion in the simulator. V2's team embedding
+  + per-over head + extras handling addresses this.
+- `FIRST_INNINGS_SCORE_BONUS` calibration. V2's calibration layer
+  subsumes this.
+
+## Wave 6 (parking lot) — Polymarket liquidity provision (LP)
+
+Pre-requisite: Wave 5 Phase 5 EV backtest + Phase 7 live results must
+show consistent positive realised edge on the markets we'd LP into.
+Without that evidence, LP is just paying spread-as-tax.
+
+Why deferred from Wave 5: LP requires the write-path to be
+battle-tested in Phase 6/7 first. LP also has fundamentally different
+unit economics — instead of "we have edge over the market", you're
+betting "the market is mispriced AND adverse selection will not eat
+our spread". That requires:
+
+1. WebSocket subscription to Polymarket order book updates.
+2. Recompute fair value on every relevant input change (toss, lineup,
+   live match score).
+3. Inventory + adverse-selection management (max liability per market,
+   kill switch on N consecutive adverse fills).
+4. Post-fill drift monitoring (if our quotes get hit and the market
+   moves against us 60% of the time, we're being adverse-selected).
+
+Realistic earliest start: 1-2 weeks AFTER Wave 5 Phase 7 shows a clean
+week of live betting that actually realised the modelled edge.
+
+Target markets: Top Batter and Most Sixes (3-way) where current spread
+is ~50% and volume is $0-$80. A market-maker bot would:
+
+- Compute fair value from V2 model.
+- Post limit orders on both sides at fair value ± spread (e.g. fair=30¢
+  → post bid 27¢, ask 33¢).
+- Earn the spread when both sides fill.
+- Cancel/move quotes when the model's fair value moves (live recompute
+  on toss / lineup changes).
+- Inventory limits per market to bound adverse-selection risk.
+- Critical risk: if our model is wrong, we accumulate adverse positions.
+  Need to size limits as a function of model confidence on that specific
+  market.
+
+## Wave 7 (parking lot) — V2 productionisation
+
+Now that V2 beats V1 on every probabilistic metric, the next session-sized
+items are about getting V2 in front of users and building wider evaluation
+coverage:
+
+- **Wire V2 into the GUI training tab.** Currently
+  [`app/main.py`](../app/main.py) line ~5023 calls
+  `from full_retrain import run_full_pipeline` (V1-only). Add a
+  `model_version` toggle on the training UI so non-CLI users can train V2
+  with the same recipe Wave 4.5 settled on.
+- **Promote V2 in the predict path.** Currently the live web predict
+  routes default to V1 simulator. Switch the default to V2 (with a hidden
+  v1 fallback flag) once we've also validated on a wider holdout.
+- **Wider backtest holdout.** Substantially covered by Wave 5 Phase 3-4,
+  but the GUI-side "compare V1 vs V2 across N tournaments" report still
+  needs wiring.
+- **Hidden-state debug UI.** Streamlit-style page that lets you step
+  through a v2 simulated match ball-by-ball and inspect per-ball softmax
+  + over-budget biases. Effectively a UI wrapper around
+  [`scripts/inspect_v2_outputs.py`](../scripts/inspect_v2_outputs.py).
+- **Calibration refit on the wider backtest.** Once Wave 5 Phase 3
+  produces the wider holdout, refit the per-(format, gender) Platt
+  scalars to keep near-optimal NLL on each route.
+- **Address the wicket over-prediction structurally.** The Wave 4.5
+  diagnostic showed wicket prob 9.3% vs reality 4.9%. Uniform class
+  weights closed most of the gap, but the residual could be addressed by
+  (a) explicit wicket-down-weight (e.g. 0.7 weight just on class 6),
+  (b) adding a per-batter "in" feature that captures whether the batter
+  has just come in or is set, or (c) a hazard-style per-ball wicket
+  model trained as a separate head.
+- **Era-feature investigation v2.** The counterfactual era flip showed
+  -0.030pp on P(4)+P(6) — the era column is being ignored. Worth one
+  diagnostic session to figure out why the model isn't using it (likely
+  swamped by the higher-magnitude state features) and either fix via
+  feature scaling or accept and remove the column.
+
+## Wave 8 (parking lot) — Advanced model + new data sources
 
 Bigger architectural / data-pipeline lifts that should land after Wave 4
 proves out:
@@ -403,45 +687,17 @@ proves out:
 - 14. `cricketdata` R ingest pathway.
 - 17. Cricsheet Register — full cross-source player identifier integration.
 
-## Wave 7 (parking lot) — V2 productionisation
+## Indefinitely deferred
 
-Now that V2 beats V1 on every probabilistic metric, the next session-sized
-items are about getting V2 in front of users and building wider evaluation
-coverage:
-
-- **Wire V2 into the GUI training tab.** Currently
-  [`app/main.py`](../app/main.py) line ~5023 calls
-  `from full_retrain import run_full_pipeline` (V1-only). Add a
-  `model_version` toggle on the training UI so non-CLI users can train V2
-  with the same recipe Wave 4.5 settled on.
-- **Promote V2 in the predict path.** Currently the live web predict
-  routes default to V1 simulator. Switch the default to V2 (with a hidden
-  v1 fallback flag) once we've also validated on a wider holdout.
-- **Wider backtest holdout.** We've validated V2 on 44 IPL T20 male
-  matches. Run the harness on (a) IPL 2025 (already), (b) PSL 2025-26,
-  (c) BBL 2025-26, (d) WPL 2025, (e) ODI internationals 2025. Each is one
-  `backtest_simulator.py --tournament-pattern '%X%'` invocation; we want
-  V2's promotion to be backed by ~200+ matches across formats and
-  tournaments, not just one.
-- **Hidden-state debug UI.** Streamlit-style page that lets you step
-  through a v2 simulated match ball-by-ball and inspect per-ball softmax
-  + over-budget biases. Effectively a UI wrapper around
-  [`scripts/inspect_v2_outputs.py`](../scripts/inspect_v2_outputs.py).
-- **Calibration refit on the wider backtest.** Once we have the wider
-  holdout, refit the per-(format, gender) Platt scalars to keep
-  near-optimal NLL on each route.
-- **Address the wicket over-prediction structurally.** The Wave 4.5
-  diagnostic showed wicket prob 9.3% vs reality 4.9%. Uniform class
-  weights closed most of the gap, but the residual could be addressed by
-  (a) explicit wicket-down-weight (e.g. 0.7 weight just on class 6),
-  (b) adding a per-batter "in" feature that captures whether the batter
-  has just come in or is set, or (c) a hazard-style per-ball wicket
-  model trained as a separate head.
-- **Era-feature investigation v2.** The counterfactual era flip showed
-  -0.030pp on P(4)+P(6) — the era column is being ignored. Worth one
-  diagnostic session to figure out why the model isn't using it (likely
-  swamped by the higher-magnitude state features) and either fix via
-  feature scaling or accept and remove the column.
+- **Betfair integration.** Read-path scaffolding shipped in Wave 2
+  (`src/integrations/betfair/`, session bootstrap / keep-alive,
+  credential plumbing in `config.py`). Polymarket pivot in Wave 5 makes
+  Betfair integration unnecessary; sub-tree retained in git history and
+  in the repo (un-wired from active Flask routes) so resurrection is
+  ~30 minutes of work if Polymarket goes south. Active Flask routes
+  removed in Wave 5 Phase 0.
+- **Cross-venue true-arb pathway** (was item 12). Made sense with two
+  venues; with Polymarket-only there's no cross-venue arb to chase.
 
 ## Done
 
@@ -462,8 +718,8 @@ coverage:
 
 - Polymarket client + read endpoints; per-fixture comparison service;
   Bulk Predict + Single Predict UI cards.
-- Betfair session bootstrap / keep-alive (read-only; write deferred to
-  Wave 5).
+- Betfair session bootstrap / keep-alive (read-only; write path
+  indefinitely deferred — see "Indefinitely deferred" section).
 - Polymarket-first readiness gating.
 - Bulk Predict live Monte Carlo running-state UI polish.
 
@@ -560,14 +816,17 @@ Wave 4 intervention will be A/B'd against this baseline using
 | 6 | Team 1/2 order stabilization | DONE (Wave 1) |
 | 7 | Bulk predict live UI polish | DONE (Wave 2) |
 | 8a | Polymarket read path | DONE (Wave 2) |
-| 8b | Polymarket write path | Wave 5 |
-| 9a | Betfair read path | DONE (Wave 2) |
-| 9b | Betfair write path (back/lay) | Wave 5 |
-| 10 | Autonomous runner | Wave 5 |
-| 11 | Bet ledger | Wave 5 |
-| 12 | Cross-venue true-arb | Wave 5 |
-| 13 | Liquidity depth research | Wave 5 |
-| 14 | `cricketdata` R ingest | Wave 6 |
+| 8b | Polymarket write path | Wave 5 (CURRENT, Phase 6) |
+| 9a | Betfair read path | DONE (Wave 2; deferred indefinitely) |
+| 9b | Betfair write path (back/lay) | Indefinitely deferred (Polymarket pivot supersedes) |
+| 10 | Autonomous runner | Wave 5 (CURRENT, Phase 6 semi-auto mode) |
+| 11 | Bet ledger | Wave 5 (CURRENT, Phase 6b) |
+| 12 | Cross-venue true-arb | Indefinitely deferred (Polymarket-only scope) |
+| 13 | Liquidity depth research | Wave 6 (LP parking lot) |
+| 14 | `cricketdata` R ingest | Wave 8 |
 | 15 | Ball outcome class imbalance | DONE (Wave 4 Phase 5: class-weighted loss + 9-class extras) |
 | 16 | Match-level backtest | DONE (Wave 3.5) |
-| 17 | Cricsheet Register | Wave 6 (paired with team_external_ids in Wave 5) |
+| 17 | Cricsheet Register | Wave 8 (paired with team_external_ids) |
+| 18 | Polymarket historical EV backtest | Wave 5 (CURRENT, Phase 5) |
+| 19 | Polymarket multi-market simulator outputs | Wave 5 (CURRENT, Phase 1-2) |
+| 20 | Live betting risk gate + kill switch | Wave 5 (CURRENT, Phase 6c) |

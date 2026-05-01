@@ -68,6 +68,7 @@ from src.features.ball_training_data_v2 import (  # noqa: E402
     FORMAT_ID,
     GENDER_ID,
     LABEL_DOT,
+    LABEL_SIX,
     LABEL_WICKET,
     LABEL_WIDE,
     LABEL_NOBALL,
@@ -517,7 +518,7 @@ class V2Simulator:
         )
 
         # First innings: team1 bats, team2 bowls
-        first_runs, _ = self._simulate_innings(
+        first_runs, _, team1_batter_runs, team1_sixes = self._simulate_innings(
             n_matches=n_matches,
             innings=1,
             target=0,
@@ -538,7 +539,7 @@ class V2Simulator:
 
         # Second innings: team2 chases first_runs + 1
         targets = (first_runs + 1).astype(np.int32)
-        second_runs, _ = self._simulate_innings(
+        second_runs, _, team2_batter_runs, team2_sixes = self._simulate_innings(
             n_matches=n_matches,
             innings=2,
             target=targets,
@@ -590,6 +591,17 @@ class V2Simulator:
             "dist_quality": dist_quality,
             "team1_elo_used": float(team1_elo),
             "team2_elo_used": float(team2_elo),
+            # Wave 5 Phase 1: per-market raw arrays for derive_polymarket_market_probs.
+            # Shapes: team*_player_runs is (n_matches, n_batters); team*_sixes is (n_matches,).
+            "team1_player_runs": team1_batter_runs,
+            "team2_player_runs": team2_batter_runs,
+            "team1_sixes": team1_sixes,
+            "team2_sixes": team2_sixes,
+            # Player ID lists (raw cricsheet IDs) so downstream code can
+            # map column index -> player_id when surfacing the Top Batter
+            # distribution for the UI.
+            "team1_batter_ids": list(team1_batter_ids),
+            "team2_batter_ids": list(team2_batter_ids),
         }
 
     # ------------------------------------------------------------------
@@ -614,11 +626,23 @@ class V2Simulator:
         venue_features: np.ndarray,
         era_norm: float,
         rng: np.random.Generator,
-    ) -> Tuple[np.ndarray, np.ndarray]:
-        """Hierarchical innings simulator. Returns (runs, wkts) per match."""
+    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+        """Hierarchical innings simulator.
+
+        Returns:
+            runs:         (n_matches,)       per-match team total
+            wkts:         (n_matches,)       per-match wickets fallen
+            batter_runs:  (n_matches, n_batters) per-match per-batter runs
+            sixes:        (n_matches,)       per-match team sixes count
+
+        The per-batter runs array supports the Polymarket "Team Top Batter"
+        market (Wave 5 Phase 1). Sixes count supports the "Most Sixes"
+        market.
+        """
         max_legal_balls = max_overs * 6
         # Headroom for extras-heavy overs
         max_total_balls = max_overs * 9
+        n_batters = len(batter_vocab)
 
         # Per-match state
         runs = np.zeros(n_matches, dtype=np.int32)
@@ -627,6 +651,11 @@ class V2Simulator:
         current_batter = np.zeros(n_matches, dtype=np.int32)
         free_hit = np.zeros(n_matches, dtype=bool)
         active = np.ones(n_matches, dtype=bool)
+
+        # Wave 5 Phase 1: per-batter runs and per-team sixes for sub-market
+        # probability extraction.
+        batter_runs = np.zeros((n_matches, n_batters), dtype=np.int32)
+        sixes = np.zeros(n_matches, dtype=np.int32)
 
         # Per-over budgets refreshed at the start of each over
         over_runs_so_far = np.zeros(n_matches, dtype=np.int32)
@@ -757,6 +786,25 @@ class V2Simulator:
             runs += np.where(active, runs_added, 0)
             over_runs_so_far += np.where(active, runs_added, 0)
 
+            # Per-batter run attribution (Wave 5 Phase 1).
+            # On a wide, the run is bowler-side (extras); the batter does not
+            # face it and should not be credited. On a noball, the batter
+            # faces the ball and any runs scored go to the batter -- v2's
+            # current encoding bundles the +1 noball penalty into the
+            # outcome's `runs_added`, so we exclude wides only.
+            batter_credit_mask = active & ~is_wide
+            credit_match_idx = np.where(batter_credit_mask)[0]
+            if credit_match_idx.size:
+                batter_runs[credit_match_idx, current_batter[credit_match_idx]] += (
+                    runs_added[credit_match_idx]
+                )
+
+            # Six counter (only counted when outcome was a six on a legal ball;
+            # wide/noball labels are mutually exclusive with LABEL_SIX so
+            # mask is just is_legal & outcome == LABEL_SIX).
+            is_six = active & (outcome == LABEL_SIX)
+            sixes += is_six.astype(np.int32)
+
             # Wickets (only on legal balls; wicket outcome != wide/noball labels)
             wkts += np.where(is_wicket, 1, 0)
             over_wkts_so_far += np.where(is_wicket, 1, 0)
@@ -830,7 +878,7 @@ class V2Simulator:
             )
             active = active & ~all_out & ~innings_done_balls & ~target_reached
 
-        return runs, wkts
+        return runs, wkts, batter_runs, sixes
 
     def _refresh_over_budgets(
         self,

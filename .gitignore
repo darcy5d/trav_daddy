@@ -22,7 +22,8 @@ wheels/
 
 # Virtual Environment
 venv/
-venv311/
+venv*/
+venv 2/
 ENV/
 env/
 .venv/
@@ -56,6 +57,7 @@ data/diagnostics/
 *.db
 *.db-shm
 *.db-wal
+*.db.bak*
 *.sqlite
 *.sqlite3
 

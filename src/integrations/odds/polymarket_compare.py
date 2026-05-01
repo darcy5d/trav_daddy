@@ -1,4 +1,23 @@
-"""Polymarket fixture linking and comparison helpers."""
+"""Polymarket fixture linking and comparison helpers.
+
+Wave 5 extension: alongside the existing moneyline compare service,
+this module now classifies each linked Polymarket market into one of
+4 modellable cricket market types (moneyline, top_batter, most_sixes,
+toss_match_double) and exposes a `compare_fixture_multi` method that
+returns probabilities and edges per market.
+
+Polymarket lists ~6 cricket market types per fixture event, but only
+4 carry meaningful cricket-skill signal we can edge:
+
+- Moneyline (2-way): which team wins
+- Team Top Batter (3-way: team1 / draw / team2)
+- Most Sixes (3-way: team1 / draw / team2)
+- Toss Match Double (4-way: toss x match cross product)
+
+Toss Winner is genuinely 50/50; Completed Match is a weather event.
+Both are dropped on the model side but recognised so they don't pollute
+the matching logic.
+"""
 
 from __future__ import annotations
 
@@ -9,6 +28,38 @@ from difflib import SequenceMatcher
 from typing import Any, Dict, List, Optional, Tuple
 
 from src.integrations.polymarket import PolymarketClient
+
+# Polymarket taker fee. Updated 2026-05-01 (Wave 5.7 follow-up):
+# Polymarket migrated to their own token / sports_fees_v2 schedule in
+# late April 2026. New rate is 3% taker-only with a 25% maker rebate.
+# (Confirmed via Gamma /markets response: feeType='sports_fees_v2',
+# feeSchedule={'rate': 0.03, 'takerOnly': True, 'rebateRate': 0.25}.)
+# Historical bets settled before this date were charged 2%; those
+# entries in bet_ledger keep their original computed fees and pnl.
+POLYMARKET_TAKER_FEE = 0.03
+
+# Wave 5: cricket market-type classifier. Patterns checked in order.
+# Each pattern matches against the lowercased market title + question +
+# slug. The 4 modellable types map to constants used by market_outputs.
+MARKET_TYPE_MONEYLINE = "moneyline"
+MARKET_TYPE_TOP_BATTER = "top_batter"
+MARKET_TYPE_MOST_SIXES = "most_sixes"
+MARKET_TYPE_TOSS_MATCH_DOUBLE = "toss_match_double"
+MARKET_TYPE_TOSS_WINNER = "toss_winner"
+MARKET_TYPE_COMPLETED = "completed_match"
+
+# Order matters: more specific patterns FIRST. e.g. "toss match double"
+# would also match the moneyline pattern (because it contains "match"),
+# so it must be tested first.
+MARKET_TYPE_PATTERNS: List[Tuple[str, re.Pattern]] = [
+    (MARKET_TYPE_TOSS_MATCH_DOUBLE, re.compile(r"toss[\s\-]+match[\s\-]+double", re.I)),
+    (MARKET_TYPE_TOP_BATTER, re.compile(r"top[\s\-]+(batter|batsman|run[\s\-]*scorer)", re.I)),
+    (MARKET_TYPE_MOST_SIXES, re.compile(r"most[\s\-]+sixes", re.I)),
+    (MARKET_TYPE_TOSS_WINNER, re.compile(r"toss[\s\-]+winner|wins?[\s\-]+the[\s\-]+toss", re.I)),
+    (MARKET_TYPE_COMPLETED, re.compile(r"complete[d]?[\s\-]+match|match[\s\-]+complete[d]?", re.I)),
+    # Moneyline last since "will X beat Y" is the broadest cricket pattern
+    (MARKET_TYPE_MONEYLINE, re.compile(r"\b(beat|defeat|win\s+vs|moneyline|to[\s\-]+win)\b", re.I)),
+]
 
 GENERIC_TEAM_WORDS = {
     "men",
@@ -589,6 +640,403 @@ class PolymarketComparisonService:
                 series=fixture.get("series"),
                 model_team1_win_pct=_coerce_float(fixture.get("model_team1_win_pct")),
                 model_team2_win_pct=_coerce_float(fixture.get("model_team2_win_pct")),
+            )
+            result["row_key"] = fixture.get("row_key")
+            results.append(result)
+        return {"success": True, "count": len(results), "results": results}
+
+    # ------------------------------------------------------------------
+    # Wave 5: Multi-market comparison
+    # ------------------------------------------------------------------
+
+    def find_event_markets(
+        self,
+        team1: str,
+        team2: str,
+        start_utc: Optional[str] = None,
+        series: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        """Return ALL Polymarket markets linked to this fixture.
+
+        Polymarket groups multiple markets (moneyline, top batter, most
+        sixes, toss, etc.) under a single 'event'. We first locate the
+        best moneyline-style match using the existing fuzzy matching,
+        then expand to sibling markets sharing the same `eventId` /
+        `eventSlug`.
+        """
+        markets = self._get_markets_cached()
+        anchor, _conf = select_best_market(
+            markets=markets,
+            team1=team1,
+            team2=team2,
+            start_utc=start_utc,
+            series_name=series,
+        )
+        if anchor is None:
+            slug_markets = self._get_markets_by_slug_candidates(team1, team2, start_utc, series)
+            if slug_markets:
+                anchor, _conf = select_best_market(
+                    markets=slug_markets,
+                    team1=team1,
+                    team2=team2,
+                    start_utc=start_utc,
+                    series_name=series,
+                )
+                if anchor is None and slug_markets:
+                    anchor = slug_markets[0]
+        if anchor is None:
+            return []
+        # Expand to siblings sharing the event id/slug
+        event_id = str(anchor.get("eventId") or anchor.get("event_id") or "")
+        event_slug = str(anchor.get("eventSlug") or anchor.get("event_slug") or "")
+        siblings: List[Dict[str, Any]] = []
+        for market in markets:
+            if not isinstance(market, dict):
+                continue
+            mid = str(market.get("eventId") or market.get("event_id") or "")
+            mslug = str(market.get("eventSlug") or market.get("event_slug") or "")
+            if (event_id and mid == event_id) or (event_slug and mslug == event_slug):
+                siblings.append(market)
+        if not siblings:
+            siblings = [anchor]
+        # Belt-and-braces: dedupe by market id
+        seen = set()
+        unique: List[Dict[str, Any]] = []
+        for m in siblings:
+            key = str(m.get("id") or m.get("conditionId") or m.get("question") or len(unique))
+            if key in seen:
+                continue
+            seen.add(key)
+            unique.append(m)
+        return unique
+
+    def _classify_market_type(self, market: Dict[str, Any]) -> Optional[str]:
+        """Classify a Polymarket market into one of the cricket types.
+
+        Order: try regex patterns (covers explicit "Top Batter" / "Most Sixes"
+        markets); if those don't match, fall back to outcome-shape inference:
+        a 2-outcome market with non-Yes/No labels is treated as a moneyline
+        (this catches the "Team A vs. Team B" Polymarket events that only
+        list team names as outcomes without a verb in the title).
+        """
+        text_parts = [
+            str(market.get("question") or ""),
+            str(market.get("title") or ""),
+            str(market.get("slug") or ""),
+            str(market.get("groupItemTitle") or ""),
+            str(market.get("eventTitle") or ""),
+        ]
+        text = " ".join([p for p in text_parts if p])
+        if text:
+            for market_type, pattern in MARKET_TYPE_PATTERNS:
+                if pattern.search(text):
+                    return market_type
+        # Fallback: 2-outcome market with non-Yes/No labels -> moneyline
+        outcomes = _coerce_list(market.get("outcomes"))
+        if len(outcomes) == 2:
+            normalized = [normalize_team_name(str(o)) for o in outcomes]
+            if not any(n in ("yes", "no") for n in normalized):
+                return MARKET_TYPE_MONEYLINE
+        return None
+
+    @staticmethod
+    def _market_outcomes_with_prices(market: Dict[str, Any]) -> List[Dict[str, Any]]:
+        """Return [{label, token_id, last_price}, ...] for a Polymarket market.
+
+        Polymarket markets carry `outcomes` (label list) parallel with
+        `clobTokenIds` (token list) and optionally `outcomePrices` (last
+        traded prices in a stringified JSON array). Best-effort parser
+        for that schema.
+        """
+        labels = _coerce_list(market.get("outcomes"))
+        token_ids = _coerce_list(market.get("clobTokenIds") or market.get("clobTokenIDs"))
+        last_prices_raw = market.get("outcomePrices")
+        last_prices: List[Optional[float]] = []
+        if isinstance(last_prices_raw, str):
+            try:
+                parsed = json.loads(last_prices_raw)
+                last_prices = [_coerce_float(v) for v in parsed if isinstance(parsed, list)]
+            except json.JSONDecodeError:
+                last_prices = []
+        elif isinstance(last_prices_raw, list):
+            last_prices = [_coerce_float(v) for v in last_prices_raw]
+        rows: List[Dict[str, Any]] = []
+        for idx, label in enumerate(labels):
+            row = {
+                "label": str(label),
+                "token_id": str(token_ids[idx]) if idx < len(token_ids) else None,
+                "last_price": last_prices[idx] if idx < len(last_prices) else None,
+            }
+            rows.append(row)
+        return rows
+
+    def _live_market_implied_pct(self, token_id: Optional[str]) -> Optional[float]:
+        """Try to fetch a fresh CLOB midpoint for a token; fall back to None."""
+        if not token_id:
+            return None
+        try:
+            book = self.client.get_clob_order_book(token_id)
+            implied = _extract_implied_probability_from_book(book)
+            return implied
+        except Exception:
+            return None
+
+    @staticmethod
+    def label_matches_team(label: str, team_name: str) -> bool:
+        """Wave 5 Phase 5: token-overlap label-to-team matcher.
+
+        Substring matching breaks on franchise rebrands like
+        'Royal Challengers Bengaluru' vs 'Royal Challengers Bangalore'.
+        Token-overlap with generic-word filtering handles both.
+        """
+        if not label or not team_name:
+            return False
+        label_tokens = {tok for tok in _tokenize(label) if tok not in GENERIC_TEAM_WORDS}
+        team_tokens = {tok for tok in _tokenize(team_name) if tok not in GENERIC_TEAM_WORDS}
+        if not label_tokens or not team_tokens:
+            return False
+        # Match if any meaningful token overlaps. e.g. "royal challengers
+        # bangalore" and "royal challengers bengaluru" share "royal" and
+        # "challengers" -> match.
+        return bool(label_tokens & team_tokens)
+
+    @staticmethod
+    def _model_outcome_prob_for_label(
+        market_type: str,
+        label: str,
+        team1: str,
+        team2: str,
+        market_probs: Dict[str, Any],
+    ) -> Optional[float]:
+        """Map an outcome label string to a per-outcome model probability.
+
+        Uses token-overlap matching (handles franchise rebrands).
+        Returns None if we can't confidently map.
+        """
+        norm_label = normalize_team_name(label)
+        is_draw = any(tok in norm_label for tok in ("tie", "draw"))
+        match_t1 = PolymarketComparisonService.label_matches_team(label, team1)
+        match_t2 = PolymarketComparisonService.label_matches_team(label, team2)
+        if market_type == MARKET_TYPE_MONEYLINE:
+            ml = market_probs.get("moneyline", {})
+            if match_t1 and not match_t2:
+                return float(ml.get("team1") or 0.0) * 100.0
+            if match_t2 and not match_t1:
+                return float(ml.get("team2") or 0.0) * 100.0
+            return None
+        if market_type == MARKET_TYPE_TOP_BATTER:
+            tb = market_probs.get("top_batter", {})
+            if is_draw:
+                return float(tb.get("draw") or 0.0) * 100.0
+            if match_t1 and not match_t2:
+                return float(tb.get("team1_higher") or 0.0) * 100.0
+            if match_t2 and not match_t1:
+                return float(tb.get("team2_higher") or 0.0) * 100.0
+            return None
+        if market_type == MARKET_TYPE_MOST_SIXES:
+            ms = market_probs.get("most_sixes", {})
+            if is_draw:
+                return float(ms.get("draw") or 0.0) * 100.0
+            if match_t1 and not match_t2:
+                return float(ms.get("team1") or 0.0) * 100.0
+            if match_t2 and not match_t1:
+                return float(ms.get("team2") or 0.0) * 100.0
+            return None
+        if market_type == MARKET_TYPE_TOSS_MATCH_DOUBLE:
+            tmd = market_probs.get("toss_match_double", {})
+            # Polymarket labels are typically of the form
+            # "Win Toss & Win Match" / "Win Toss & Lose Match" / "Lose Toss & Win Match"
+            # But the specific team association varies. As a fallback,
+            # we don't auto-map TMD outcomes; the UI shows the four
+            # composite probs and the user manually picks.
+            # Heuristic: substring match for team name + "& win/lose".
+            if norm_t1 and norm_t1 in norm_label:
+                if "win match" in norm_label or "match win" in norm_label:
+                    if "win toss" in norm_label or "toss win" in norm_label:
+                        return float(tmd.get("toss_team1_match_team1") or 0.0) * 100.0
+                    return float(tmd.get("toss_team2_match_team1") or 0.0) * 100.0
+                if "lose match" in norm_label or "match lose" in norm_label:
+                    # implied: team2 wins match
+                    if "win toss" in norm_label or "toss win" in norm_label:
+                        return float(tmd.get("toss_team1_match_team2") or 0.0) * 100.0
+                    return float(tmd.get("toss_team2_match_team2") or 0.0) * 100.0
+            return None
+        return None
+
+    def compare_fixture_multi(
+        self,
+        team1: str,
+        team2: str,
+        market_probs: Dict[str, Any],
+        start_utc: Optional[str] = None,
+        series: Optional[str] = None,
+        stale_after_sec: int = 180,
+    ) -> Dict[str, Any]:
+        """Multi-market Polymarket comparison.
+
+        Args:
+            team1, team2: fixture team names.
+            market_probs: output dict from
+                `src.models.market_outputs.derive_polymarket_market_probs`.
+                Required because moneyline-only callers can use the older
+                `compare_fixture` -- this method's whole point is the 4
+                markets together.
+
+        Returns:
+            {
+                "success": True,
+                "fixture_key": "...",
+                "markets": {
+                    "moneyline": {market_meta, outcomes: [{label, model_prob_pct, market_implied_pct, edge_pp, token_id, ...}]},
+                    "top_batter": {...},
+                    "most_sixes": {...},
+                    "toss_match_double": {...},
+                },
+                "warnings": [...],
+            }
+
+        Markets that aren't found on Polymarket appear with `status = "no_match"`.
+        Markets that are found but have no usable price appear with `status = "quote_unavailable"`.
+        """
+        fixture_key = build_fixture_key(team1, team2, start_utc)
+        all_markets = self.find_event_markets(team1, team2, start_utc, series)
+        warnings: List[str] = []
+        if not all_markets:
+            return {
+                "success": True,
+                "status": "no_match",
+                "fixture_key": fixture_key,
+                "markets": {
+                    MARKET_TYPE_MONEYLINE: {"status": "no_match"},
+                    MARKET_TYPE_TOP_BATTER: {"status": "no_match"},
+                    MARKET_TYPE_MOST_SIXES: {"status": "no_match"},
+                    MARKET_TYPE_TOSS_MATCH_DOUBLE: {"status": "no_match"},
+                },
+                "warnings": ["No reliable Polymarket markets matched"],
+            }
+
+        # Group markets by classified type. Take the first match per type
+        # (Polymarket typically lists each market type once per event).
+        markets_by_type: Dict[str, Dict[str, Any]] = {}
+        for market in all_markets:
+            market_type = self._classify_market_type(market)
+            if not market_type:
+                continue
+            if market_type not in markets_by_type:
+                markets_by_type[market_type] = market
+
+        out: Dict[str, Dict[str, Any]] = {}
+        now = datetime.now(timezone.utc)
+        for market_type in (
+            MARKET_TYPE_MONEYLINE,
+            MARKET_TYPE_TOP_BATTER,
+            MARKET_TYPE_MOST_SIXES,
+            MARKET_TYPE_TOSS_MATCH_DOUBLE,
+        ):
+            market = markets_by_type.get(market_type)
+            if market is None:
+                out[market_type] = {"status": "no_match"}
+                continue
+
+            outcomes = self._market_outcomes_with_prices(market)
+            outcome_rows: List[Dict[str, Any]] = []
+            quote_observed_at = now
+            quote_age_sec = 0
+            had_live_quote = False
+            for outcome in outcomes:
+                token_id = outcome.get("token_id")
+                live_implied_pct = self._live_market_implied_pct(token_id)
+                if live_implied_pct is not None:
+                    market_implied_pct = live_implied_pct
+                    had_live_quote = True
+                elif outcome.get("last_price") is not None:
+                    market_implied_pct = round(float(outcome["last_price"]) * 100.0, 2)
+                else:
+                    market_implied_pct = None
+                model_pct = self._model_outcome_prob_for_label(
+                    market_type=market_type,
+                    label=outcome.get("label", ""),
+                    team1=team1,
+                    team2=team2,
+                    market_probs=market_probs,
+                )
+                edge_pp = (
+                    compute_edge_pct_points(model_pct, market_implied_pct)
+                    if (model_pct is not None and market_implied_pct is not None)
+                    else None
+                )
+                outcome_rows.append({
+                    "label": outcome.get("label"),
+                    "token_id": token_id,
+                    "model_pct": model_pct,
+                    "market_implied_pct": market_implied_pct,
+                    "edge_pp": edge_pp,
+                })
+
+            status = "ok"
+            if not had_live_quote and not any(o["market_implied_pct"] is not None for o in outcome_rows):
+                status = "quote_unavailable"
+            out[market_type] = {
+                "status": status,
+                "linked_market": {
+                    "market_id": str(market.get("id") or market.get("conditionId") or ""),
+                    "question": market.get("question"),
+                    "slug": market.get("slug"),
+                    "event_id": str(market.get("eventId") or market.get("event_id") or ""),
+                    "event_slug": str(market.get("eventSlug") or market.get("event_slug") or ""),
+                },
+                "outcomes": outcome_rows,
+                "quote": {
+                    "source": "polymarket",
+                    "quote_age_sec": quote_age_sec,
+                    "observed_at_utc": quote_observed_at.isoformat(),
+                },
+                "fee_applied_taker": POLYMARKET_TAKER_FEE,
+            }
+
+        return {
+            "success": True,
+            "status": "ok",
+            "fixture_key": fixture_key,
+            "markets": out,
+            "warnings": warnings,
+        }
+
+    def compare_batch_multi(
+        self,
+        fixtures: List[Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        """Multi-market batch wrapper.
+
+        Each input fixture should include `market_probs` (from
+        `derive_polymarket_market_probs`). Fixtures missing market_probs
+        fall back to a moneyline-only response (single team1_win_prob).
+        """
+        results = []
+        for fixture in fixtures:
+            market_probs = fixture.get("market_probs") or {}
+            if not market_probs:
+                t1_pct = _coerce_float(fixture.get("model_team1_win_pct"))
+                t2_pct = _coerce_float(fixture.get("model_team2_win_pct"))
+                if t1_pct is not None and t2_pct is not None:
+                    market_probs = {
+                        "moneyline": {"team1": t1_pct / 100.0, "team2": t2_pct / 100.0},
+                        "top_batter": {"team1_higher": 0.0, "draw": 1.0, "team2_higher": 0.0},
+                        "most_sixes": {"team1": 0.0, "draw": 1.0, "team2": 0.0},
+                        "toss_match_double": {
+                            "toss_team1_match_team1": (t1_pct / 100.0) * 0.5,
+                            "toss_team1_match_team2": (t2_pct / 100.0) * 0.5,
+                            "toss_team2_match_team1": (t1_pct / 100.0) * 0.5,
+                            "toss_team2_match_team2": (t2_pct / 100.0) * 0.5,
+                        },
+                    }
+
+            result = self.compare_fixture_multi(
+                team1=str(fixture.get("team1") or ""),
+                team2=str(fixture.get("team2") or ""),
+                market_probs=market_probs,
+                start_utc=fixture.get("start_utc"),
+                series=fixture.get("series"),
             )
             result["row_key"] = fixture.get("row_key")
             results.append(result)
