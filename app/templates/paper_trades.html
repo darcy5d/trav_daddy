@@ -1,12 +1,20 @@
 {% extends "base.html" %}
 {% block title %}Paper Trades{% endblock %}
-{% block extra_head %}
+{% block head %}
 <style>
     .pt-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 1rem; flex-wrap: wrap; gap: 0.5rem; }
-    .pt-header h1 { margin: 0; }
+    .pt-header h1 {
+        margin: 0;
+        font-size: 1.75rem;
+        font-weight: 700;
+        background: var(--gradient-1);
+        -webkit-background-clip: text;
+        -webkit-text-fill-color: transparent;
+        background-clip: text;
+    }
     .pt-actions { display: inline-flex; gap: 0.5rem; }
     .pt-actions button {
-        padding: 0.5rem 1rem; border-radius: 8px; border: 1px solid var(--border);
+        padding: 0.5rem 1rem; border-radius: 8px; border: 1px solid var(--border-color);
         background: transparent; color: var(--text-primary); cursor: pointer; font-weight: 600;
     }
     .pt-actions button.primary {
@@ -18,7 +26,7 @@
         gap: 0.6rem; margin-bottom: 1rem;
     }
     .pt-total-cell {
-        padding: 0.7rem 0.9rem; border: 1px solid var(--border); border-radius: 8px;
+        padding: 0.7rem 0.9rem; border: 1px solid var(--border-color); border-radius: 8px;
         background: var(--bg-secondary);
     }
     .pt-total-label { color: var(--text-muted); font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.5px; }
@@ -27,7 +35,21 @@
     .pt-total-value.negative { color: #ef4444; }
 
     .pt-section { margin-top: 1.5rem; }
-    .pt-section h2 { font-size: 1rem; color: var(--text-primary); margin: 0 0 0.5rem 0; }
+    .pt-section h2 {
+        font-size: 1.1rem; margin: 0 0 0.5rem 0;
+        font-weight: 700;
+        background: var(--gradient-1);
+        -webkit-background-clip: text;
+        -webkit-text-fill-color: transparent;
+        background-clip: text;
+        display: inline-block;
+    }
+    .pt-section h2 .pt-section-subtitle {
+        background: none;
+        -webkit-text-fill-color: var(--text-muted);
+        color: var(--text-muted);
+        font-weight: 400;
+    }
 
     .pt-table { width: 100%; border-collapse: collapse; font-size: 0.78rem; }
     .pt-table th, .pt-table td { padding: 0.4rem 0.5rem; border-bottom: 1px solid rgba(55,65,81,0.4); text-align: left; vertical-align: top; }
@@ -52,7 +74,7 @@
     .pt-status-lost     { background: rgba(239, 68, 68, 0.15); color: #ef4444; }
 
     .pt-chart-card {
-        padding: 0.6rem; border: 1px solid var(--border); border-radius: 8px;
+        padding: 0.6rem; border: 1px solid var(--border-color); border-radius: 8px;
         background: var(--bg-secondary);
     }
     canvas.pt-chart { display: block; max-width: 100%; height: 220px; background: rgba(0,0,0,0.05); border-radius: 6px; }
@@ -62,7 +84,7 @@
     .pt-toast.error { background: rgba(239, 68, 68, 0.15); color: #ef4444; }
     /* Toss modal buttons */
     .pt-toss-trigger, .pt-winner-btn, .pt-chose-btn {
-        padding: 0.4rem 0.8rem; border-radius: 6px; border: 1px solid var(--border);
+        padding: 0.4rem 0.8rem; border-radius: 6px; border: 1px solid var(--border-color);
         background: transparent; color: var(--text-primary); cursor: pointer; font-weight: 600; font-size: 0.85rem;
     }
     .pt-toss-trigger:hover, .pt-winner-btn:hover, .pt-chose-btn:hover { border-color: var(--accent-primary); }
@@ -78,10 +100,192 @@
         background: var(--accent-primary); color: white; border-color: var(--accent-primary);
     }
     #pt-toss-modal-cancel, #pt-toss-modal-resolve, #pt-toss-modal-submit {
-        padding: 0.5rem 1rem; border-radius: 6px; border: 1px solid var(--border);
+        padding: 0.5rem 1rem; border-radius: 6px; border: 1px solid var(--border-color);
         background: transparent; color: var(--text-primary); cursor: pointer; font-weight: 600; font-size: 0.85rem;
     }
     #pt-toss-modal-submit.primary { background: var(--accent-primary); color: white; border-color: var(--accent-primary); }
+
+    /* ----- Card-style sections (open + settled) ----- */
+    .pt-section-header {
+        display: flex; justify-content: space-between; align-items: flex-start;
+        gap: 0.6rem; flex-wrap: wrap; margin-bottom: 0.6rem;
+    }
+    .pt-section-subtitle {
+        color: var(--text-muted); font-weight: 400; font-size: 0.85rem;
+    }
+    .pt-section-controls {
+        display: flex; gap: 0.5rem; align-items: center; flex-wrap: wrap;
+    }
+    .pt-filter-chips {
+        display: inline-flex; gap: 0.3rem; flex-wrap: wrap;
+    }
+    .pt-chip {
+        padding: 0.3rem 0.75rem; border-radius: 999px; border: 1px solid var(--border-color);
+        background: var(--bg-tertiary); color: var(--text-secondary); cursor: pointer;
+        font-size: 0.75rem; font-weight: 600; letter-spacing: 0.2px;
+        transition: all 0.2s ease;
+        white-space: nowrap;
+        font-family: 'Space Grotesk', sans-serif;
+    }
+    .pt-chip:hover {
+        border-color: var(--accent-primary); color: var(--text-primary);
+        background: rgba(16, 185, 129, 0.08);
+    }
+    .pt-chip.active {
+        background: var(--accent-primary); color: white; border-color: var(--accent-primary);
+        box-shadow: 0 2px 4px rgba(0, 0, 0, 0.2);
+    }
+    .pt-chip.active:hover { background: var(--accent-primary); }
+    .pt-chip-count {
+        margin-left: 0.4rem; padding: 0.05rem 0.45rem; border-radius: 999px;
+        background: rgba(255,255,255,0.18); font-size: 0.65rem; font-weight: 700;
+    }
+    .pt-chip:not(.active) .pt-chip-count {
+        background: rgba(255,255,255,0.06); color: var(--text-muted);
+    }
+
+    .pt-card-list {
+        display: flex; flex-direction: column; gap: 0.5rem;
+    }
+    .pt-card {
+        background: var(--bg-secondary); border: 1px solid var(--border-color);
+        border-radius: 12px; overflow: hidden;
+        transition: border-color 0.15s ease;
+    }
+
+    .pt-card-summary {
+        display: flex; align-items: center; gap: 0.7rem;
+        padding: 0.65rem 0.85rem; cursor: pointer; user-select: none;
+    }
+    .pt-card-summary:hover { background: rgba(16, 185, 129, 0.06); }
+    .pt-card:hover { border-color: rgba(16, 185, 129, 0.35); }
+    .pt-card-chevron {
+        font-size: 0.65rem; color: var(--text-muted);
+        transition: transform 0.15s ease; flex-shrink: 0; width: 10px;
+    }
+    .pt-card.open .pt-card-chevron { transform: rotate(90deg); }
+
+    .pt-card-title {
+        flex: 1; min-width: 0;
+    }
+    .pt-card-title-main {
+        font-weight: 600; font-size: 0.92rem; color: var(--text-primary);
+        display: flex; align-items: center; gap: 0.4rem; flex-wrap: wrap;
+    }
+    .pt-card-title-sub {
+        color: var(--text-muted); font-size: 0.72rem; margin-top: 0.15rem;
+    }
+    .pt-card-meta {
+        display: flex; gap: 1.2rem; align-items: center; flex-shrink: 0;
+        font-size: 0.78rem;
+    }
+    .pt-meta-cell {
+        display: flex; flex-direction: column; align-items: flex-end;
+        line-height: 1.15;
+    }
+    .pt-meta-label {
+        color: var(--text-muted); font-size: 0.65rem;
+        text-transform: uppercase; letter-spacing: 0.5px;
+        font-weight: 500;
+    }
+    .pt-meta-value {
+        color: var(--text-primary); font-weight: 600; font-size: 0.85rem;
+    }
+    .pt-meta-value.positive { color: var(--accent-primary); }
+    .pt-meta-value.negative { color: #ef4444; }
+
+    /* Time-to-kickoff badge - matches predict.html tag conventions: 0.2 fill / 0.35 border */
+    .pt-ko-badge {
+        display: inline-flex; align-items: center; gap: 0.3rem;
+        padding: 0.15rem 0.55rem; border-radius: 999px;
+        font-size: 0.7rem; font-weight: 700;
+        white-space: nowrap;
+        border: 1px solid transparent;
+    }
+    .pt-ko-imminent { background: rgba(239, 68, 68, 0.2);   color: #ef4444;                  border-color: rgba(239, 68, 68, 0.35); }    /* < 4h */
+    .pt-ko-soon     { background: rgba(245, 158, 11, 0.2);  color: var(--accent-warning);    border-color: rgba(245, 158, 11, 0.35); }   /* 4-12h */
+    .pt-ko-future   { background: rgba(16, 185, 129, 0.2);  color: var(--accent-primary);    border-color: rgba(16, 185, 129, 0.35); }   /* 12h+ */
+    .pt-ko-live     { background: rgba(59, 130, 246, 0.2);  color: #93c5fd;                  border-color: rgba(59, 130, 246, 0.35); }   /* in-flight */
+    .pt-ko-pending  { background: rgba(107, 114, 128, 0.2); color: var(--text-muted);        border-color: rgba(107, 114, 128, 0.35); }  /* settling */
+
+    .pt-card-body {
+        display: none; border-top: 1px solid var(--border-color);
+        padding: 0.4rem 0.85rem 0.6rem; background: var(--bg-tertiary);
+    }
+    .pt-card.open .pt-card-body { display: block; }
+
+    .pt-bet-row {
+        display: grid;
+        grid-template-columns: 100px 1fr 95px 60px 60px 65px 75px 90px;
+        gap: 0.6rem; align-items: center;
+        padding: 0.45rem 0; font-size: 0.78rem;
+        border-bottom: 1px solid var(--border-color);
+    }
+    .pt-bet-row:last-child { border-bottom: none; }
+    .pt-bet-row .strat-name { font-weight: 600; }
+    .pt-bet-row .side-label { color: var(--text-secondary); }
+    .pt-bet-row .num { text-align: right; font-variant-numeric: tabular-nums; }
+
+    .pt-edge-pill {
+        display: inline-block; padding: 0.05rem 0.5rem; border-radius: 999px;
+        font-size: 0.68rem; font-weight: 700; text-align: center;
+        font-variant-numeric: tabular-nums;
+        border: 1px solid transparent;
+    }
+    .pt-edge-high   { background: rgba(16, 185, 129, 0.2);  color: var(--accent-primary); border-color: rgba(16, 185, 129, 0.35); }
+    .pt-edge-medium { background: rgba(245, 158, 11, 0.2);  color: var(--accent-warning); border-color: rgba(245, 158, 11, 0.35); }
+    .pt-edge-low    { background: rgba(107, 114, 128, 0.2); color: var(--text-muted);     border-color: rgba(107, 114, 128, 0.35); }
+
+    .pt-outcome-pill {
+        display: inline-block; padding: 0.1rem 0.55rem; border-radius: 999px;
+        font-size: 0.65rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.4px;
+        border: 1px solid transparent;
+    }
+    .pt-outcome-won  { background: rgba(16, 185, 129, 0.2); color: var(--accent-primary); border-color: rgba(16, 185, 129, 0.35); }
+    .pt-outcome-lost { background: rgba(239, 68, 68, 0.2);  color: #ef4444;               border-color: rgba(239, 68, 68, 0.35); }
+
+    .pt-empty {
+        padding: 1.5rem; text-align: center; color: var(--text-muted); font-size: 0.85rem;
+        background: var(--bg-secondary); border: 1px solid var(--border-color); border-radius: 12px;
+    }
+
+    /* Day-group header (for settled grouping) */
+    .pt-day-card .pt-card-title-main { font-size: 0.95rem; }
+    .pt-day-card .pt-card-body { padding: 0.5rem 0.85rem 0.7rem; }
+    .pt-fixture-row {
+        display: flex; align-items: center; gap: 0.7rem;
+        padding: 0.5rem 0.6rem; border-radius: 8px;
+        background: var(--bg-secondary);
+        border: 1px solid var(--border-color);
+        margin-bottom: 0.35rem;
+        cursor: pointer;
+        transition: background 0.15s ease, border-color 0.15s ease;
+    }
+    .pt-fixture-row:hover { background: rgba(16, 185, 129, 0.08); border-color: rgba(16, 185, 129, 0.35); }
+    .pt-fixture-row.open { background: rgba(16, 185, 129, 0.06); border-color: rgba(16, 185, 129, 0.25); }
+    .pt-fixture-row-head {
+        flex: 1; display: flex; align-items: center; gap: 0.5rem;
+        min-width: 0;
+    }
+    .pt-fixture-name { font-weight: 600; font-size: 0.82rem; }
+    .pt-fixture-tag  { color: var(--text-muted); font-size: 0.7rem; }
+    .pt-fixture-meta {
+        display: flex; gap: 0.8rem; font-size: 0.75rem;
+        font-variant-numeric: tabular-nums; flex-shrink: 0;
+    }
+    .pt-fixture-bets {
+        display: none;
+        padding: 0.2rem 0.6rem 0.5rem 1.4rem;
+    }
+    .pt-fixture-row.open + .pt-fixture-bets { display: block; }
+
+    @media (max-width: 800px) {
+        .pt-bet-row {
+            grid-template-columns: 1fr 1fr; gap: 0.3rem;
+            font-size: 0.75rem; padding: 0.3rem 0;
+        }
+        .pt-bet-row .num { text-align: left; }
+    }
 </style>
 {% endblock %}
 {% block content %}
@@ -176,7 +380,7 @@
 
 <!-- Modal for post-toss form -->
 <div id="pt-toss-modal" style="display:none; position:fixed; inset:0; background:rgba(0,0,0,0.6); z-index:1000; align-items:center; justify-content:center;">
-    <div style="background:var(--bg-secondary); border:1px solid var(--border); border-radius:8px; padding:1.2rem; width:680px; max-width:96vw; max-height:90vh; overflow-y:auto;">
+    <div style="background:var(--bg-secondary); border:1px solid var(--border-color); border-radius:8px; padding:1.2rem; width:680px; max-width:96vw; max-height:90vh; overflow-y:auto;">
         <h3 style="margin:0 0 0.5rem 0;">Post-Toss Re-scan</h3>
         <p style="color:var(--text-muted); font-size:0.85rem; margin:0 0 0.8rem 0;" id="pt-toss-modal-fixture">--</p>
 
@@ -193,7 +397,7 @@
             </div>
         </div>
 
-        <details style="margin-bottom:0.8rem; border:1px solid var(--border); border-radius:6px; padding:0.5rem;" open>
+        <details style="margin-bottom:0.8rem; border:1px solid var(--border-color); border-radius:6px; padding:0.5rem;" open>
             <summary style="cursor:pointer; font-weight:600; font-size:0.85rem; color:var(--text-secondary);">
                 Confirmed Playing XI (one name per line, batting order)
             </summary>
@@ -209,11 +413,11 @@
             <div style="display:grid; grid-template-columns:1fr 1fr; gap:0.6rem;">
                 <div>
                     <label id="pt-xi1-label" style="display:block; font-weight:600; font-size:0.8rem; margin-bottom:0.2rem;">Team 1 XI</label>
-                    <textarea id="pt-xi1-input" rows="11" placeholder="V Kohli&#10;F du Plessis&#10;..." style="width:100%; box-sizing:border-box; background:var(--bg-primary); color:var(--text-primary); border:1px solid var(--border); border-radius:4px; padding:0.4rem; font-family:monospace; font-size:0.78rem;"></textarea>
+                    <textarea id="pt-xi1-input" rows="11" placeholder="V Kohli&#10;F du Plessis&#10;..." style="width:100%; box-sizing:border-box; background:var(--bg-primary); color:var(--text-primary); border:1px solid var(--border-color); border-radius:4px; padding:0.4rem; font-family:monospace; font-size:0.78rem;"></textarea>
                 </div>
                 <div>
                     <label id="pt-xi2-label" style="display:block; font-weight:600; font-size:0.8rem; margin-bottom:0.2rem;">Team 2 XI</label>
-                    <textarea id="pt-xi2-input" rows="11" placeholder="" style="width:100%; box-sizing:border-box; background:var(--bg-primary); color:var(--text-primary); border:1px solid var(--border); border-radius:4px; padding:0.4rem; font-family:monospace; font-size:0.78rem;"></textarea>
+                    <textarea id="pt-xi2-input" rows="11" placeholder="" style="width:100%; box-sizing:border-box; background:var(--bg-primary); color:var(--text-primary); border:1px solid var(--border-color); border-radius:4px; padding:0.4rem; font-family:monospace; font-size:0.78rem;"></textarea>
                 </div>
             </div>
             <div id="pt-xi-resolved" style="margin-top:0.5rem; font-size:0.75rem;"></div>
@@ -230,44 +434,27 @@
 </div>
 
 <div class="pt-section">
-    <h2>Open Paper Bets <span style="color:var(--text-muted);font-weight:400;font-size:0.85rem;" id="pt-open-count"></span></h2>
-    <table class="pt-table">
-        <thead>
-            <tr>
-                <th>Placed</th>
-                <th>Strategy</th>
-                <th>Fixture</th>
-                <th>Side</th>
-                <th style="text-align:right">Model</th>
-                <th style="text-align:right">Market</th>
-                <th style="text-align:right">Edge</th>
-                <th style="text-align:right">Stake</th>
-                <th style="text-align:right">Bankroll@Bet</th>
-            </tr>
-        </thead>
-        <tbody id="pt-open-body"><tr><td colspan="9" style="color:var(--text-muted);text-align:center;padding:1rem">No open paper bets</td></tr></tbody>
-    </table>
+    <div class="pt-section-header">
+        <h2>Open Paper Bets <span class="pt-section-subtitle" id="pt-open-count"></span></h2>
+        <div class="pt-section-controls">
+            <div class="pt-filter-chips" id="pt-open-filter-chips"></div>
+        </div>
+    </div>
+    <div id="pt-open-body" class="pt-card-list">
+        <div class="pt-empty">No open paper bets</div>
+    </div>
 </div>
 
 <div class="pt-section">
-    <h2>Recent Settled <span style="color:var(--text-muted);font-weight:400;font-size:0.85rem;" id="pt-settled-count"></span></h2>
-    <table class="pt-table">
-        <thead>
-            <tr>
-                <th>Settled</th>
-                <th>Strategy</th>
-                <th>Fixture</th>
-                <th>Side</th>
-                <th style="text-align:right">Model</th>
-                <th style="text-align:right">Market</th>
-                <th style="text-align:right">Edge</th>
-                <th style="text-align:right">Stake</th>
-                <th style="text-align:right">P&amp;L</th>
-                <th>Outcome</th>
-            </tr>
-        </thead>
-        <tbody id="pt-settled-body"><tr><td colspan="10" style="color:var(--text-muted);text-align:center;padding:1rem">No settled bets yet</td></tr></tbody>
-    </table>
+    <div class="pt-section-header">
+        <h2>Recent Settled <span class="pt-section-subtitle" id="pt-settled-count"></span></h2>
+        <div class="pt-section-controls">
+            <div class="pt-filter-chips" id="pt-settled-filter-chips"></div>
+        </div>
+    </div>
+    <div id="pt-settled-body" class="pt-card-list">
+        <div class="pt-empty">No settled bets yet</div>
+    </div>
 </div>
 
 <script>
@@ -341,62 +528,315 @@
         document.getElementById('pt-total-open').textContent = fmtMoney(totals.open_size);
     }
 
-    async function loadOpenBets() {
-        const r = await fetch(betsUrl + '?status=open&limit=50');
-        const d = await r.json();
-        const tbody = document.getElementById('pt-open-body');
-        tbody.innerHTML = '';
-        document.getElementById('pt-open-count').textContent = `(${d.n})`;
-        if (!d.bets || !d.bets.length) {
-            tbody.innerHTML = '<tr><td colspan="9" style="color:var(--text-muted);text-align:center;padding:1rem">No open paper bets</td></tr>';
-            return;
+    // ----- Helpers for new card UI -----
+
+    // fixture_key -> ISO kickoff string. Populated from /api/paper/upcoming
+    // (live fixtures) and falls back to slug-date parsing for older settled
+    // bets where the fixture is no longer in Polymarket's open list.
+    let kickoffMap = {};
+    let openFilterStrategy = 'ALL';
+    let settledFilterStrategy = 'ALL';
+
+    async function refreshKickoffMap() {
+        try {
+            const r = await fetch('/api/paper/upcoming?hours_ahead=336');  // 14 days
+            const d = await r.json();
+            if (d.success && d.fixtures) {
+                for (const fx of d.fixtures) {
+                    if (fx.fixture_key && fx.scheduled_start_utc) {
+                        kickoffMap[fx.fixture_key] = fx.scheduled_start_utc;
+                    }
+                }
+            }
+        } catch (e) { /* silent */ }
+    }
+    function kickoffForFixture(fixture_key) {
+        if (kickoffMap[fixture_key]) return kickoffMap[fixture_key];
+        // Fall back to parsing the slug date and assuming 14:00 UTC (IPL/PSL evening)
+        const m = (fixture_key || '').match(/(\d{4}-\d{2}-\d{2})$/);
+        if (m) return m[1] + 'T14:00:00+00:00';
+        return null;
+    }
+    function kickoffBadgeFor(fixture_key, options) {
+        options = options || {};
+        const isoKo = kickoffForFixture(fixture_key);
+        if (!isoKo) return {cls: 'pt-ko-pending', label: 'pending'};
+        const ko = new Date(isoKo);
+        const now = new Date();
+        const deltaMs = ko.getTime() - now.getTime();
+        const deltaH  = deltaMs / 3600000;
+
+        // Settling phase: match clearly ended (>4h after kickoff for T20, >12h for ODI)
+        if (options.forSettled) {
+            return {cls: 'pt-ko-pending', label: ko.toLocaleDateString(undefined, {month:'short', day:'numeric'})};
         }
-        for (const b of d.bets) {
-            const tr = document.createElement('tr');
-            const fixture = b.fixture_key || '';
-            tr.innerHTML = `
-                <td>${fmtDate(b.proposed_at)}</td>
-                <td><strong>${b.strategy_label}</strong></td>
-                <td><span style="font-size:0.7rem;color:var(--text-muted)">${fixture}</span></td>
-                <td>${b.side_label || '--'}</td>
-                <td style="text-align:right">${(b.model_prob*100).toFixed(1)}%</td>
-                <td style="text-align:right">${(b.market_price_at_proposal*100).toFixed(1)}%</td>
-                <td style="text-align:right">${edgeBadge(b.edge_pp)}</td>
-                <td style="text-align:right">${fmtMoney(b.size_usdc)}</td>
-                <td style="text-align:right">${fmtMoney(b.bankroll_at_proposal)}</td>`;
-            tbody.appendChild(tr);
+        if (deltaMs < 0) {
+            // In flight or settling
+            const elapsedH = -deltaH;
+            if (elapsedH < 4) return {cls: 'pt-ko-live', label: `live, +${Math.floor(elapsedH * 60)}m`};
+            if (elapsedH < 14) return {cls: 'pt-ko-pending', label: `settling (+${Math.round(elapsedH)}h)`};
+            return {cls: 'pt-ko-pending', label: `awaiting settle`};
+        }
+        if (deltaH < 4)  return {cls: 'pt-ko-imminent', label: `in ${Math.round(deltaH * 60)}m`};
+        if (deltaH < 12) return {cls: 'pt-ko-soon',     label: `in ${deltaH.toFixed(1)}h`};
+        if (deltaH < 48) return {cls: 'pt-ko-future',   label: `in ${deltaH.toFixed(1)}h`};
+        return {cls: 'pt-ko-future', label: `in ${Math.round(deltaH/24)}d`};
+    }
+    function fixturePrettyName(fixture_key) {
+        // cricipl-luc-mum-2026-05-04 -> "LUC vs MUM"
+        const parts = (fixture_key || '').split('-');
+        if (parts.length < 4) return fixture_key;
+        const t1 = parts[1] ? parts[1].toUpperCase() : '?';
+        const t2 = parts[2] ? parts[2].toUpperCase() : '?';
+        return `${t1} vs ${t2}`;
+    }
+    function tournamentPrefixLabel(fixture_key) {
+        const prefix = (fixture_key || '').split('-')[0] || '';
+        const map = {
+            cricipl: 'IPL', cricpsl: 'PSL', cricbbl: 'BBL', criclcl: 'LCL',
+            cricwbbl: 'WBBL', cricwpl: 'WPL', crint: 'International',
+            crictbcl: 'Brisbane CL',
+        };
+        return map[prefix] || prefix;
+    }
+
+    function renderFilterChips(containerId, strategies, currentFilter, onSelect) {
+        const c = document.getElementById(containerId);
+        c.innerHTML = '';
+        const allChip = document.createElement('button');
+        allChip.className = 'pt-chip ' + (currentFilter === 'ALL' ? 'active' : '');
+        allChip.innerHTML = `All<span class="pt-chip-count">${strategies.reduce((a, s) => a + s.count, 0)}</span>`;
+        allChip.addEventListener('click', () => onSelect('ALL'));
+        c.appendChild(allChip);
+        for (const s of strategies) {
+            const chip = document.createElement('button');
+            chip.className = 'pt-chip ' + (currentFilter === s.name ? 'active' : '');
+            chip.innerHTML = `${s.name}<span class="pt-chip-count">${s.count}</span>`;
+            chip.addEventListener('click', () => onSelect(s.name));
+            c.appendChild(chip);
         }
     }
 
-    async function loadSettledBets() {
-        const r = await fetch(betsUrl + '?status=settled&limit=50');
+    function makeBetRow(b) {
+        const edgeCls = b.edge_pp >= 5 ? 'pt-edge-high' : b.edge_pp >= 2 ? 'pt-edge-medium' : 'pt-edge-low';
+        const settled = b.status === 'settled';
+        const won = b.settle_outcome === 1;
+        const pnl = b.pnl_realised_usdc;
+        const pnlSpan = settled
+            ? `<span class="num ${pnl >= 0 ? 'pt-pl-positive' : 'pt-pl-negative'}">${fmtMoney(pnl)}</span>`
+            : `<span class="num">${fmtMoney(b.size_usdc)}</span>`;
+        const outcome = settled
+            ? `<span class="pt-outcome-pill ${won ? 'pt-outcome-won' : 'pt-outcome-lost'}">${won ? 'WON' : 'LOST'}</span>`
+            : `<span class="num" style="color:var(--text-muted)">${fmtMoney(b.bankroll_at_proposal)}</span>`;
+        return `
+            <div class="pt-bet-row">
+                <span class="strat-name">${b.strategy_label}</span>
+                <span class="side-label">${b.side_label || '--'}</span>
+                <span class="num"><span class="pt-edge-pill ${edgeCls}">+${Number(b.edge_pp).toFixed(1)}pp</span></span>
+                <span class="num">${(b.model_prob*100).toFixed(1)}%</span>
+                <span class="num">${(b.market_price_at_proposal*100).toFixed(1)}%</span>
+                <span class="num" style="color:var(--text-muted);font-size:0.72rem">${(settled ? b.settled_at : b.proposed_at || '').slice(5,16).replace('T',' ')}</span>
+                ${pnlSpan}
+                ${outcome}
+            </div>
+        `;
+    }
+
+    // ----- Open Paper Bets (grouped by fixture) -----
+    async function loadOpenBets() {
+        const r = await fetch(betsUrl + '?status=open&limit=200');
         const d = await r.json();
-        const tbody = document.getElementById('pt-settled-body');
-        tbody.innerHTML = '';
-        document.getElementById('pt-settled-count').textContent = `(${d.n})`;
-        if (!d.bets || !d.bets.length) {
-            tbody.innerHTML = '<tr><td colspan="10" style="color:var(--text-muted);text-align:center;padding:1rem">No settled bets yet</td></tr>';
+        const container = document.getElementById('pt-open-body');
+        const allBets = d.bets || [];
+        document.getElementById('pt-open-count').textContent = allBets.length
+            ? `\u00b7 ${allBets.length} bets, ${fmtMoney(allBets.reduce((a,b) => a + (b.size_usdc||0), 0))} exposure`
+            : '';
+
+        // Build strategy filter chips from this dataset
+        const stratCounts = {};
+        for (const b of allBets) stratCounts[b.strategy_label] = (stratCounts[b.strategy_label] || 0) + 1;
+        const stratList = Object.entries(stratCounts).sort((a,b) => b[1] - a[1]).map(([name, count]) => ({name, count}));
+        renderFilterChips('pt-open-filter-chips', stratList, openFilterStrategy, (s) => {
+            openFilterStrategy = s; loadOpenBets();
+        });
+
+        const filtered = openFilterStrategy === 'ALL'
+            ? allBets
+            : allBets.filter(b => b.strategy_label === openFilterStrategy);
+
+        if (!filtered.length) {
+            container.innerHTML = '<div class="pt-empty">No open paper bets matching filter</div>';
             return;
         }
-        for (const b of d.bets) {
-            const tr = document.createElement('tr');
-            const won = b.settle_outcome === 1;
-            const outcomeBadge = won
-                ? '<span class="pt-status-badge pt-status-settled">WON</span>'
-                : '<span class="pt-status-badge pt-status-lost">LOST</span>';
-            tr.innerHTML = `
-                <td>${fmtDate(b.settled_at)}</td>
-                <td><strong>${b.strategy_label}</strong></td>
-                <td><span style="font-size:0.7rem;color:var(--text-muted)">${b.fixture_key || ''}</span></td>
-                <td>${b.side_label || '--'}</td>
-                <td style="text-align:right">${(b.model_prob*100).toFixed(1)}%</td>
-                <td style="text-align:right">${(b.market_price_at_proposal*100).toFixed(1)}%</td>
-                <td style="text-align:right">${edgeBadge(b.edge_pp)}</td>
-                <td style="text-align:right">${fmtMoney(b.size_usdc)}</td>
-                <td style="text-align:right" class="${pnlClass(b.pnl_realised_usdc || 0)}">${fmtMoney(b.pnl_realised_usdc)}</td>
-                <td>${outcomeBadge}</td>`;
-            tbody.appendChild(tr);
+
+        // Group by fixture, sort by kickoff time (soonest first)
+        const byFixture = {};
+        for (const b of filtered) {
+            const k = b.fixture_key || '?';
+            if (!byFixture[k]) byFixture[k] = [];
+            byFixture[k].push(b);
         }
+        const fixtures = Object.entries(byFixture).map(([key, bets]) => {
+            const ko = kickoffForFixture(key);
+            const koMs = ko ? new Date(ko).getTime() : Infinity;
+            return {key, bets, koMs};
+        }).sort((a,b) => a.koMs - b.koMs);
+
+        container.innerHTML = '';
+        for (const fx of fixtures) {
+            const card = document.createElement('div');
+            card.className = 'pt-card';
+            const ko = kickoffBadgeFor(fx.key);
+            const totalStake = fx.bets.reduce((a,b) => a + (b.size_usdc||0), 0);
+            const avgEdge = fx.bets.reduce((a,b) => a + (b.edge_pp||0), 0) / fx.bets.length;
+            const sides = [...new Set(fx.bets.map(b => b.side_label))];
+            const sideLabel = sides.length === 1 ? sides[0] : `${sides.length} sides`;
+
+            card.innerHTML = `
+                <div class="pt-card-summary">
+                    <span class="pt-card-chevron">\u25B6</span>
+                    <div class="pt-card-title">
+                        <div class="pt-card-title-main">
+                            ${fixturePrettyName(fx.key)}
+                            <span class="pt-ko-badge ${ko.cls}">${ko.label}</span>
+                            <span style="color:var(--text-muted);font-size:0.7rem;font-weight:400">${tournamentPrefixLabel(fx.key)}</span>
+                        </div>
+                        <div class="pt-card-title-sub">Backing ${sideLabel}</div>
+                    </div>
+                    <div class="pt-card-meta">
+                        <div class="pt-meta-cell">
+                            <span class="pt-meta-label">bets</span>
+                            <span class="pt-meta-value">${fx.bets.length}</span>
+                        </div>
+                        <div class="pt-meta-cell">
+                            <span class="pt-meta-label">stake</span>
+                            <span class="pt-meta-value">${fmtMoney(totalStake)}</span>
+                        </div>
+                        <div class="pt-meta-cell">
+                            <span class="pt-meta-label">avg edge</span>
+                            <span class="pt-meta-value">+${avgEdge.toFixed(1)}pp</span>
+                        </div>
+                    </div>
+                </div>
+                <div class="pt-card-body">
+                    ${fx.bets.map(makeBetRow).join('')}
+                </div>
+            `;
+            card.querySelector('.pt-card-summary').addEventListener('click', () => card.classList.toggle('open'));
+            container.appendChild(card);
+        }
+    }
+
+    // ----- Recent Settled (grouped by day -> fixture -> bet) -----
+    async function loadSettledBets() {
+        const r = await fetch(betsUrl + '?status=settled&limit=200');
+        const d = await r.json();
+        const container = document.getElementById('pt-settled-body');
+        const allBets = d.bets || [];
+        const totalPnl = allBets.reduce((a,b) => a + (b.pnl_realised_usdc||0), 0);
+        document.getElementById('pt-settled-count').textContent = allBets.length
+            ? `\u00b7 ${allBets.length} bets, P&L ${fmtMoney(totalPnl)}`
+            : '';
+
+        // Build strategy filter chips
+        const stratCounts = {};
+        for (const b of allBets) stratCounts[b.strategy_label] = (stratCounts[b.strategy_label] || 0) + 1;
+        const stratList = Object.entries(stratCounts).sort((a,b) => b[1] - a[1]).map(([name, count]) => ({name, count}));
+        renderFilterChips('pt-settled-filter-chips', stratList, settledFilterStrategy, (s) => {
+            settledFilterStrategy = s; loadSettledBets();
+        });
+
+        const filtered = settledFilterStrategy === 'ALL'
+            ? allBets
+            : allBets.filter(b => b.strategy_label === settledFilterStrategy);
+
+        if (!filtered.length) {
+            container.innerHTML = '<div class="pt-empty">No settled bets matching filter</div>';
+            return;
+        }
+
+        // Group by settlement day -> fixture
+        const byDay = {};
+        for (const b of filtered) {
+            const day = (b.settled_at || '').slice(0, 10);
+            if (!byDay[day]) byDay[day] = {};
+            const fk = b.fixture_key || '?';
+            if (!byDay[day][fk]) byDay[day][fk] = [];
+            byDay[day][fk].push(b);
+        }
+        const days = Object.keys(byDay).sort().reverse();
+
+        container.innerHTML = '';
+        days.forEach((day, dayIdx) => {
+            const fixtures = byDay[day];
+            const allDayBets = Object.values(fixtures).flat();
+            const dayPnl = allDayBets.reduce((a,b) => a + (b.pnl_realised_usdc||0), 0);
+            const wins = allDayBets.filter(b => b.settle_outcome === 1).length;
+            const losses = allDayBets.length - wins;
+            const dayDate = new Date(day + 'T00:00:00');
+            const dayLabel = dayDate.toLocaleDateString(undefined, {weekday:'short', month:'short', day:'numeric'});
+
+            const card = document.createElement('div');
+            card.className = 'pt-card pt-day-card' + (dayIdx === 0 ? ' open' : '');  // newest day open by default
+            card.innerHTML = `
+                <div class="pt-card-summary">
+                    <span class="pt-card-chevron">\u25B6</span>
+                    <div class="pt-card-title">
+                        <div class="pt-card-title-main">
+                            ${dayLabel}
+                            <span style="color:var(--text-muted);font-weight:400;font-size:0.78rem">${day}</span>
+                        </div>
+                    </div>
+                    <div class="pt-card-meta">
+                        <div class="pt-meta-cell">
+                            <span class="pt-meta-label">record</span>
+                            <span class="pt-meta-value">${wins}W ${losses}L</span>
+                        </div>
+                        <div class="pt-meta-cell">
+                            <span class="pt-meta-label">bets</span>
+                            <span class="pt-meta-value">${allDayBets.length}</span>
+                        </div>
+                        <div class="pt-meta-cell">
+                            <span class="pt-meta-label">P&amp;L</span>
+                            <span class="pt-meta-value ${dayPnl >= 0 ? 'positive' : 'negative'}">${fmtMoney(dayPnl)}</span>
+                        </div>
+                    </div>
+                </div>
+                <div class="pt-card-body"></div>
+            `;
+            const body = card.querySelector('.pt-card-body');
+            // Sort fixtures within day by P&L desc
+            const fxList = Object.entries(fixtures).map(([fk, bets]) => {
+                const pnl = bets.reduce((a,b) => a + (b.pnl_realised_usdc||0), 0);
+                return {fk, bets, pnl};
+            }).sort((a,b) => b.pnl - a.pnl);
+
+            for (const fx of fxList) {
+                const wins = fx.bets.filter(b => b.settle_outcome === 1).length;
+                const losses = fx.bets.length - wins;
+                const fxRow = document.createElement('div');
+                fxRow.className = 'pt-fixture-row';
+                fxRow.innerHTML = `
+                    <span class="pt-card-chevron">\u25B6</span>
+                    <div class="pt-fixture-row-head">
+                        <span class="pt-fixture-name">${fixturePrettyName(fx.fk)}</span>
+                        <span class="pt-fixture-tag">${tournamentPrefixLabel(fx.fk)}</span>
+                    </div>
+                    <div class="pt-fixture-meta">
+                        <span style="color:var(--text-muted)">${wins}W ${losses}L</span>
+                        <span class="${fx.pnl >= 0 ? 'pt-pl-positive' : 'pt-pl-negative'}" style="font-weight:600">${fmtMoney(fx.pnl)}</span>
+                    </div>
+                `;
+                const fxBets = document.createElement('div');
+                fxBets.className = 'pt-fixture-bets';
+                fxBets.innerHTML = fx.bets.map(makeBetRow).join('');
+                fxRow.addEventListener('click', () => fxRow.classList.toggle('open'));
+                body.appendChild(fxRow);
+                body.appendChild(fxBets);
+            }
+            card.querySelector('.pt-card-summary').addEventListener('click', () => card.classList.toggle('open'));
+            container.appendChild(card);
+        });
     }
 
     // Time-based bankroll-over-time chart. ALL strategies are plotted on
@@ -910,10 +1350,13 @@
                 : fetch(reconcileUrl, {method: 'POST', headers: {'Content-Type':'application/json'}})
                     .then(r => r.json())
                     .catch(() => null);
+            // Refresh kickoff map FIRST so open-bet rendering has fresh times
+            await refreshKickoffMap();
             await Promise.all([loadStrategies(), loadOpenBets(), loadSettledBets(), loadBankrollChart(), loadUpcomingFixtures()]);
             const r = await reconcilePromise;
             if (r && r.success && r.reconcile && r.reconcile.n_settled > 0) {
                 showToast(`Reconciled ${r.reconcile.n_settled} bet(s) - reloading...`, 'ok');
+                await refreshKickoffMap();
                 await Promise.all([loadStrategies(), loadOpenBets(), loadSettledBets(), loadBankrollChart(), loadUpcomingFixtures()]);
             }
         } catch (e) {

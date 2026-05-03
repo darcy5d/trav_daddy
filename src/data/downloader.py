@@ -106,16 +106,21 @@ def extract_zip(zip_path: Path, extract_to: Path) -> bool:
 
 def download_cricsheet_data(
     formats: Optional[list] = None,
-    force_download: bool = False
+    force_download: bool = False,
+    age_threshold_hours: Optional[float] = None,
 ) -> dict:
     """
     Download cricket match data from Cricsheet.org.
-    
+
     Args:
         formats: List of formats to download (e.g., ["t20i", "odi"]).
                 If None, downloads all available formats.
         force_download: If True, re-download even if files exist.
-        
+        age_threshold_hours: If set, re-download when the local zip is older
+                than this many hours (mtime-based). Lets daily-refresh callers
+                avoid pulling 50MB on every cron tick while still picking up
+                new data overnight. Ignored if `force_download=True`.
+
     Returns:
         Dictionary with format keys and paths to extracted data directories.
     """
@@ -124,32 +129,48 @@ def download_cricsheet_data(
     
     # Ensure raw data directory exists
     RAW_DATA_DIR.mkdir(parents=True, exist_ok=True)
-    
+
+    import time as _time
+
     results = {}
-    
+
     for format_name in formats:
         if format_name not in DATA_SOURCES:
             logger.warning(f"Unknown format: {format_name}. Skipping.")
             continue
-        
+
         url = DATA_SOURCES[format_name]
         zip_filename = f"{format_name}_json.zip"
         zip_path = RAW_DATA_DIR / zip_filename
         extract_dir = RAW_DATA_DIR / format_name
-        
-        # Check if already downloaded and extracted
-        if extract_dir.exists() and not force_download:
+
+        # Decide whether to re-download. Priority:
+        #   force_download=True              -> always redownload
+        #   age_threshold_hours set + stale  -> redownload
+        #   extract_dir exists with JSONs    -> skip (cached)
+        #   else                             -> download
+        zip_is_stale = False
+        if age_threshold_hours is not None and zip_path.exists():
+            zip_age_h = (_time.time() - zip_path.stat().st_mtime) / 3600.0
+            if zip_age_h > age_threshold_hours:
+                zip_is_stale = True
+                logger.info(
+                    f"{format_name}: local zip is {zip_age_h:.1f}h old "
+                    f"(threshold {age_threshold_hours}h) - redownloading"
+                )
+
+        if not force_download and not zip_is_stale and extract_dir.exists():
             json_files = list(extract_dir.glob("**/*.json"))
             if json_files:
                 logger.info(
                     f"{format_name}: Already have {len(json_files)} JSON files. "
-                    "Use force_download=True to re-download."
+                    "Pass force_download=True or age_threshold_hours to re-download."
                 )
                 results[format_name] = extract_dir
                 continue
-        
+
         # Download the ZIP file
-        if not zip_path.exists() or force_download:
+        if not zip_path.exists() or force_download or zip_is_stale:
             success = download_file(url, zip_path)
             if not success:
                 logger.error(f"Failed to download {format_name} data")

@@ -1,11 +1,11 @@
 {% extends "base.html" %}
 {% block title %}Live Betting{% endblock %}
-{% block extra_head %}
+{% block head %}
 <style>
     .lb-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 1rem; }
     .lb-status-bar {
         display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 0.6rem;
-        margin: 1rem 0; padding: 0.6rem; border: 1px solid var(--border); border-radius: 8px;
+        margin: 1rem 0; padding: 0.6rem; border: 1px solid var(--border-color); border-radius: 8px;
         background: var(--bg-secondary);
     }
     .lb-status-cell { font-size: 0.8rem; }
@@ -13,7 +13,7 @@
     .lb-status-cell .lb-value { font-weight: 700; font-size: 1.05rem; color: var(--text-primary); }
     .lb-mode-toggle { display: inline-flex; gap: 0.25rem; }
     .lb-mode-toggle button {
-        padding: 0.4rem 0.8rem; border-radius: 999px; border: 1px solid var(--border);
+        padding: 0.4rem 0.8rem; border-radius: 999px; border: 1px solid var(--border-color);
         background: transparent; color: var(--text-secondary); cursor: pointer; font-weight: 600; font-size: 0.85rem;
     }
     .lb-mode-toggle button.active.OFF    { background: rgba(107, 114, 128, 0.2); color: var(--text-primary); border-color: rgba(107, 114, 128, 0.5); }
@@ -39,7 +39,7 @@
     .lb-edge-medium { background: rgba(245, 158, 11, 0.18); color: var(--accent-warning); }
     .lb-edge-low    { background: rgba(107, 114, 128, 0.2); color: var(--text-muted); }
     .lb-actions button {
-        padding: 0.3rem 0.7rem; border-radius: 6px; border: 1px solid var(--border);
+        padding: 0.3rem 0.7rem; border-radius: 6px; border: 1px solid var(--border-color);
         background: transparent; color: var(--text-secondary); cursor: pointer; font-size: 0.75rem;
     }
     .lb-actions button.primary { background: var(--accent-primary); color: white; border-color: var(--accent-primary); }
