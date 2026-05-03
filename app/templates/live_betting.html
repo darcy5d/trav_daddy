@@ -53,6 +53,25 @@
     .lb-cap-bar-fill { display: block; height: 100%; background: var(--accent-primary); }
     .lb-cap-bar-fill.warn { background: var(--accent-warning); }
     .lb-cap-bar-fill.danger { background: #ef4444; }
+    .lb-strategy-row.disabled { opacity: 0.55; }
+    .lb-strategy-name { font-weight: 600; }
+    .lb-strategy-badge {
+        display: inline-block; padding: 0.08rem 0.45rem; border-radius: 999px;
+        font-size: 0.62rem; font-weight: 700; margin-left: 0.35rem; vertical-align: middle;
+    }
+    .lb-strategy-badge.on  { background: rgba(16, 185, 129, 0.18); color: var(--accent-primary); }
+    .lb-strategy-badge.off { background: rgba(107, 114, 128, 0.25); color: var(--text-muted); }
+    .lb-wallet-bar {
+        display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 0.6rem;
+        margin: 0.5rem 0 1rem 0; padding: 0.7rem 0.9rem;
+        border: 1px solid var(--border-color); border-radius: 8px;
+        background: rgba(16, 185, 129, 0.04);
+    }
+    .lb-wallet-bar.warn    { border-color: rgba(245, 158, 11, 0.5); background: rgba(245, 158, 11, 0.06); }
+    .lb-wallet-bar.danger  { border-color: rgba(239, 68, 68, 0.5); background: rgba(239, 68, 68, 0.06); }
+    .lb-wallet-cell .lb-label { color: var(--text-muted); font-size: 0.65rem; text-transform: uppercase; letter-spacing: 0.5px; }
+    .lb-wallet-cell .lb-value { font-weight: 700; font-size: 1.2rem; color: var(--text-primary); }
+    .lb-wallet-cell .lb-sub  { color: var(--text-muted); font-size: 0.7rem; margin-top: 0.2rem; }
 </style>
 {% endblock %}
 {% block content %}
@@ -68,6 +87,29 @@
     </div>
 </div>
 
+<div class="lb-wallet-bar" id="wallet-bar" title="Live on-chain USDC balance in the Polymarket proxy wallet (queried via py-clob-client)">
+    <div class="lb-wallet-cell">
+        <div class="lb-label">Polymarket wallet</div>
+        <div class="lb-value" id="wallet-balance">--</div>
+        <div class="lb-sub" id="wallet-balance-sub">USDC on Polygon</div>
+    </div>
+    <div class="lb-wallet-cell">
+        <div class="lb-label">Envelope</div>
+        <div class="lb-value" id="wallet-envelope">--</div>
+        <div class="lb-sub" id="wallet-envelope-sub">BETTING_MAX_DEPOSIT</div>
+    </div>
+    <div class="lb-wallet-cell">
+        <div class="lb-label">Funded vs envelope</div>
+        <div class="lb-value" id="wallet-funded-pct">--</div>
+        <div class="lb-sub" id="wallet-funded-sub">&nbsp;</div>
+    </div>
+    <div class="lb-wallet-cell">
+        <div class="lb-label">On-chain approvals</div>
+        <div class="lb-value" id="wallet-approvals">--</div>
+        <div class="lb-sub" id="wallet-approvals-sub">Exchange + CTF</div>
+    </div>
+</div>
+
 <div class="lb-status-bar" id="status-bar">
     <div class="lb-status-cell"><div class="lb-label">Mode</div><div class="lb-value" id="status-mode">--</div></div>
     <div class="lb-status-cell"><div class="lb-label">Today P&L</div><div class="lb-value" id="status-todays-pl">--</div></div>
@@ -77,6 +119,30 @@
     <div class="lb-status-cell"><div class="lb-label">Deposit cap left</div><div class="lb-value" id="status-cap-deposit">--</div><div class="lb-cap-bar"><span class="lb-cap-bar-fill" id="status-cap-deposit-bar"></span></div></div>
     <div class="lb-status-cell"><div class="lb-label">Settled bets total</div><div class="lb-value" id="status-settled-total">--</div></div>
     <div class="lb-status-cell"><div class="lb-label">Auto markets</div><div class="lb-value" id="status-auto-markets" style="font-size: 0.75rem;">--</div></div>
+</div>
+
+<div class="lb-section">
+    <h2>Strategies <small style="font-weight: 400; color: var(--text-muted); font-size: 0.7rem;">— per-strategy bankroll + open exposure</small></h2>
+    <p style="color: var(--text-muted); font-size: 0.75rem; margin: 0.2rem 0 0.5rem 0;">
+        Each strategy runs independently with its own <code>BETTING_MAX_DEPOSIT_PER_STRATEGY</code> cap.
+        Disable a strategy by removing its label from <code>BETTING_LIVE_STRATEGIES</code> in <code>.env</code> and restarting.
+    </p>
+    <table class="lb-table" id="strategies-table">
+        <thead><tr>
+            <th>Strategy</th>
+            <th>Start</th>
+            <th>Current</th>
+            <th>Open</th>
+            <th>Cap left</th>
+            <th>Realised P&L</th>
+            <th>ROI</th>
+            <th>Bets</th>
+            <th>Win rate</th>
+        </tr></thead>
+        <tbody id="strategies-body">
+            <tr><td colspan="9" style="text-align:center; color: var(--text-muted);">Loading...</td></tr>
+        </tbody>
+    </table>
 </div>
 
 <div class="lb-section">
@@ -231,6 +297,93 @@
         const r = await fetch('/api/betting/config');
         const status = await r.json();
         updateStatusBar(status);
+    }
+
+    async function fetchWallet() {
+        const bar = document.getElementById('wallet-bar');
+        let data;
+        try {
+            const r = await fetch('/api/betting/wallet');
+            data = await r.json();
+        } catch (err) {
+            document.getElementById('wallet-balance').textContent = 'error';
+            bar.classList.remove('warn'); bar.classList.add('danger');
+            return;
+        }
+        // Error or no wallet configured
+        if (!data || data.success === false) {
+            document.getElementById('wallet-balance').textContent = '--';
+            document.getElementById('wallet-balance-sub').textContent = data && data.error ? data.error.slice(0, 40) : 'not configured';
+            document.getElementById('wallet-envelope').textContent = '--';
+            document.getElementById('wallet-funded-pct').textContent = '--';
+            document.getElementById('wallet-approvals').textContent = '--';
+            bar.classList.remove('warn'); bar.classList.add('danger');
+            return;
+        }
+        document.getElementById('wallet-balance').textContent = fmtUsd(data.balance_usdc);
+        document.getElementById('wallet-balance-sub').textContent = 'USDC (polygon, sig_type=' + data.signature_type + ')';
+        document.getElementById('wallet-envelope').textContent = fmtUsd(data.max_deposit_usdc);
+        const pct = data.funded_vs_envelope_pct;
+        document.getElementById('wallet-funded-pct').textContent = pct !== null ? pct.toFixed(0) + '%' : '--';
+        const diff = data.balance_usdc - data.max_deposit_usdc;
+        const diffSub = document.getElementById('wallet-funded-sub');
+        diffSub.textContent = (diff >= 0 ? '+' : '') + fmtUsd(diff) + ' vs envelope';
+        diffSub.className = 'lb-sub ' + (diff < 0 ? 'lb-pl-negative' : '');
+        const approvalsEl = document.getElementById('wallet-approvals');
+        if (data.allowances_ok) {
+            approvalsEl.textContent = 'OK';
+            approvalsEl.className = 'lb-value lb-pl-positive';
+        } else {
+            approvalsEl.textContent = 'MISSING';
+            approvalsEl.className = 'lb-value lb-pl-negative';
+        }
+        // Border colour: danger if under-funded or no approvals; warn if pct < 100 but > 80.
+        bar.classList.remove('warn', 'danger');
+        if (data.underfunded || !data.allowances_ok) {
+            bar.classList.add('danger');
+        } else if (pct !== null && pct < 100) {
+            bar.classList.add('warn');
+        }
+    }
+
+    async function fetchStrategies() {
+        let data;
+        try {
+            const r = await fetch('/api/betting/strategies');
+            data = await r.json();
+        } catch (err) {
+            document.getElementById('strategies-body').innerHTML =
+                '<tr><td colspan="9" style="text-align:center; color: var(--text-muted);">Error loading strategies.</td></tr>';
+            return;
+        }
+        const body = document.getElementById('strategies-body');
+        const rows = (data && data.strategies) ? data.strategies : [];
+        if (!rows.length) {
+            body.innerHTML = '<tr><td colspan="9" style="text-align:center; color: var(--text-muted);">No strategies configured (BETTING_LIVE_STRATEGIES empty).</td></tr>';
+            return;
+        }
+        body.innerHTML = rows.map(r => {
+            const badge = r.enabled
+                ? '<span class="lb-strategy-badge on">LIVE</span>'
+                : '<span class="lb-strategy-badge off">disabled</span>';
+            const rowCls = r.enabled ? 'lb-strategy-row' : 'lb-strategy-row disabled';
+            const winRate = r.win_rate !== null && r.win_rate !== undefined
+                ? (r.win_rate * 100).toFixed(1) + '%'
+                : '--';
+            return `
+                <tr class="${rowCls}">
+                    <td><span class="lb-strategy-name">${r.strategy_label}</span>${badge}</td>
+                    <td>${fmtUsd(r.starting_bankroll_usdc)}</td>
+                    <td class="${plClass(r.current_bankroll_usdc - r.starting_bankroll_usdc)}">${fmtUsd(r.current_bankroll_usdc)}</td>
+                    <td>${fmtUsd(r.open_exposure_usdc)}</td>
+                    <td>${fmtUsd(r.cap_remaining_usdc)}</td>
+                    <td class="${plClass(r.realised_pnl_usdc)}">${fmtUsd(r.realised_pnl_usdc)}</td>
+                    <td class="${plClass(r.roi_pct)}">${r.roi_pct.toFixed(2)}%</td>
+                    <td>${r.n_settled}/${r.n_total}${r.n_errored ? ' <span style="color:#ef4444; font-size:0.7rem;">err:' + r.n_errored + '</span>' : ''}</td>
+                    <td>${winRate}</td>
+                </tr>
+            `;
+        }).join('');
     }
 
     async function fetchTodaysBets() {
@@ -401,10 +554,15 @@
     }
 
     fetchStatus();
+    fetchWallet();
+    fetchStrategies();
     fetchTodaysBets();
     fetchRecentSettled();
     fetchDashboard();
     setInterval(fetchStatus, 10000);
+    // Wallet balance hits Polymarket's API on each call; 60s is plenty.
+    setInterval(fetchWallet, 60000);
+    setInterval(fetchStrategies, 30000);
     setInterval(fetchTodaysBets, 30000);
     setInterval(fetchRecentSettled, 60000);
     setInterval(fetchDashboard, 60000);

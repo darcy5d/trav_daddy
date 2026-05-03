@@ -80,6 +80,16 @@ BETTING_CONFIG = {
     # Phase 7 scale-up gate thresholds (used by the dashboard "graduate envelope" flow).
     "scale_up_min_settled_bets": int(os.getenv("BETTING_SCALE_MIN_BETS", "50")),
     "scale_up_max_brier_drift": float(os.getenv("BETTING_SCALE_MAX_BRIER_DRIFT", "0.02")),
+    # Wave 5.8: per-strategy caps for the 5-strategy live-betting envelope.
+    # Each strategy_label in bet_ledger is independently capped so a single
+    # strategy cannot monopolise the total deposit envelope.
+    "max_deposit_per_strategy_usdc": float(os.getenv("BETTING_MAX_DEPOSIT_PER_STRATEGY", "100")),
+    # Whitelist of strategy_labels allowed to place real (bet_kind='real') orders.
+    # Empty list = no strategies are live; remove a name here to silence that
+    # strategy without any code changes.
+    "live_strategies": [
+        s.strip() for s in os.getenv("BETTING_LIVE_STRATEGIES", "").split(",") if s.strip()
+    ],
 }
 
 BETFAIR_CONFIG = {

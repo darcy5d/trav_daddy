@@ -17,7 +17,13 @@ from src.integrations.polymarket.risk_gate import (
 
 @pytest.fixture
 def in_memory_ledger() -> Generator[sqlite3.Connection, None, None]:
-    """SQLite in-memory connection with the bet_ledger schema applied."""
+    """SQLite in-memory connection with the bet_ledger schema applied.
+
+    Schema mirrors V5 (schema_v5_betting.sql) + V6 paper-trading extensions
+    (schema_v6_paper_betting.sql) + phase/xi/toss tracking columns used by
+    paper_bet_scan.py and bet_placement.py. All columns default to NULL so
+    pre-existing tests that don't set them still pass.
+    """
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
     schema_sql = (
@@ -47,7 +53,15 @@ def in_memory_ledger() -> Generator[sqlite3.Connection, None, None]:
         "  pnl_realised_usdc REAL,"
         "  status TEXT NOT NULL,"
         "  mode TEXT NOT NULL,"
-        "  error_message TEXT"
+        "  error_message TEXT,"
+        "  bet_kind TEXT,"
+        "  strategy_label TEXT,"
+        "  bankroll_at_proposal REAL,"
+        "  bankroll_after_settle REAL,"
+        "  phase TEXT,"
+        "  xi_signature TEXT,"
+        "  toss_winner_team_id INTEGER,"
+        "  toss_chose_to TEXT"
         ")"
     )
     conn.execute(schema_sql)
@@ -87,6 +101,10 @@ def _make_betting_config(**overrides):
         "auto_enabled_markets": ["moneyline"],
         "scale_up_min_settled_bets": 50,
         "scale_up_max_brier_drift": 0.02,
+        # Wave 5.8: per-strategy envelope. Empty live_strategies list means any
+        # bet with a strategy_label will be rejected — matches production default.
+        "max_deposit_per_strategy_usdc": 100.0,
+        "live_strategies": [],
     }
     defaults.update(overrides)
     return defaults
@@ -189,3 +207,103 @@ def test_clean_pass_auto_with_qualifying_edge(in_memory_ledger):
     with patch("config.BETTING_CONFIG", _make_betting_config(mode="AUTO", auto_enabled_markets=["moneyline"], auto_min_edge_pp=5.0)):
         decision = can_place_bet(25.0, "moneyline", 7.5, "auto", conn=in_memory_ledger)
     assert decision.allowed is True
+
+
+# ---- Wave 5.8: per-strategy whitelist + cap tests ----
+
+def test_strategy_not_in_whitelist_rejected(in_memory_ledger):
+    with patch(
+        "config.BETTING_CONFIG",
+        _make_betting_config(live_strategies=["v2_odi_3pp"]),
+    ):
+        decision = can_place_bet(
+            25.0, "moneyline", 5.0, "manual",
+            conn=in_memory_ledger, strategy_label="not_a_real_strategy",
+        )
+    assert decision.allowed is False
+    assert "not in BETTING_LIVE_STRATEGIES" in decision.reason
+
+
+def test_strategy_in_whitelist_passes(in_memory_ledger):
+    with patch(
+        "config.BETTING_CONFIG",
+        _make_betting_config(live_strategies=["v2_odi_3pp"]),
+    ):
+        decision = can_place_bet(
+            25.0, "moneyline", 5.0, "manual",
+            conn=in_memory_ledger, strategy_label="v2_odi_3pp",
+        )
+    assert decision.allowed is True
+    assert decision.reason == "OK"
+
+
+def test_strategy_open_exposure_cap(in_memory_ledger):
+    """A strategy with $90 open cannot accept a $20 bet when cap is $100."""
+    now = datetime.now(timezone.utc).isoformat()
+    # Open real bet of $90 under this strategy
+    _insert_bet(
+        in_memory_ledger, status="filled",
+        placed_at=now, filled_at=now,
+        fill_price=0.5, fill_size_usdc=90.0,
+        bet_kind="real", strategy_label="v2_odi_3pp",
+    )
+    with patch(
+        "config.BETTING_CONFIG",
+        _make_betting_config(
+            live_strategies=["v2_odi_3pp"],
+            max_deposit_per_strategy_usdc=100.0,
+            # Bump global caps so the per-strategy cap is what fires
+            max_deposit_usdc=500.0,
+            max_per_day_usdc=500.0,
+            max_loss_per_day_usdc=500.0,
+        ),
+    ):
+        decision = can_place_bet(
+            20.0, "moneyline", 5.0, "manual",
+            conn=in_memory_ledger, strategy_label="v2_odi_3pp",
+        )
+    assert decision.allowed is False
+    assert "per-strategy cap" in decision.reason
+
+
+def test_paper_bets_excluded_from_live_caps(in_memory_ledger):
+    """Paper bets in bet_ledger must NOT consume live daily-stake or deposit capacity."""
+    now = datetime.now(timezone.utc).isoformat()
+    # A bunch of paper bets that, if counted, would instantly trip caps
+    for _ in range(10):
+        _insert_bet(
+            in_memory_ledger, status="filled",
+            placed_at=now, filled_at=now,
+            fill_price=0.5, fill_size_usdc=50.0,
+            bet_kind="paper", strategy_label="v2_odi_3pp",
+        )
+    # Despite $500 of paper "filled today", a fresh $25 real bet should pass
+    with patch(
+        "config.BETTING_CONFIG",
+        _make_betting_config(
+            mode="AUTO",
+            live_strategies=["v2_odi_3pp"],
+            auto_enabled_markets=["moneyline"],
+            auto_min_edge_pp=5.0,
+        ),
+    ):
+        decision = can_place_bet(
+            25.0, "moneyline", 5.0, "auto",
+            conn=in_memory_ledger, strategy_label="v2_odi_3pp",
+        )
+    assert decision.allowed is True, f"expected pass; got rejected: {decision.reason}"
+
+
+def test_untagged_bet_bypasses_strategy_whitelist(in_memory_ledger):
+    """When strategy_label is None (ad-hoc manual bet from /live-betting UI),
+    the whitelist check is skipped so a user can still place one-off bets."""
+    with patch(
+        "config.BETTING_CONFIG",
+        _make_betting_config(live_strategies=[]),  # empty whitelist
+    ):
+        decision = can_place_bet(
+            25.0, "moneyline", 5.0, "manual",
+            conn=in_memory_ledger, strategy_label=None,
+        )
+    assert decision.allowed is True
+    assert decision.reason == "OK"

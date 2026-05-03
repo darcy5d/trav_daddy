@@ -46,13 +46,20 @@ def _today_start_utc_iso() -> str:
 
 
 def _todays_filled_stakes(conn: sqlite3.Connection) -> float:
-    """Sum of fill_size_usdc for bets filled today (UTC)."""
+    """Sum of fill_size_usdc for REAL bets filled today (UTC).
+
+    Wave 5.8: excludes bet_kind='paper' so paper-trading history doesn't
+    consume live daily-stake capacity. Legacy rows with NULL bet_kind are
+    treated as 'real' (pre-dates the column).
+    """
     cur = conn.cursor()
     cur.execute(
         """
         SELECT COALESCE(SUM(fill_size_usdc), 0.0) AS total
         FROM bet_ledger
-        WHERE filled_at IS NOT NULL AND filled_at >= ?
+        WHERE COALESCE(bet_kind, 'real') = 'real'
+          AND filled_at IS NOT NULL
+          AND filled_at >= ?
         """,
         (_today_start_utc_iso(),),
     )
@@ -61,13 +68,15 @@ def _todays_filled_stakes(conn: sqlite3.Connection) -> float:
 
 
 def _todays_realised_loss(conn: sqlite3.Connection) -> float:
-    """Negative pnl_realised_usdc summed across today (settled bets)."""
+    """Negative pnl_realised_usdc summed across REAL bets settled today."""
     cur = conn.cursor()
     cur.execute(
         """
         SELECT COALESCE(SUM(CASE WHEN pnl_realised_usdc < 0 THEN -pnl_realised_usdc ELSE 0 END), 0.0) AS loss
         FROM bet_ledger
-        WHERE settled_at IS NOT NULL AND settled_at >= ?
+        WHERE COALESCE(bet_kind, 'real') = 'real'
+          AND settled_at IS NOT NULL
+          AND settled_at >= ?
         """,
         (_today_start_utc_iso(),),
     )
@@ -76,14 +85,39 @@ def _todays_realised_loss(conn: sqlite3.Connection) -> float:
 
 
 def _open_exposure_usdc(conn: sqlite3.Connection) -> float:
-    """Sum of fill_size_usdc for bets that are filled but not yet settled."""
+    """Sum of fill_size_usdc for REAL bets filled but not yet settled."""
     cur = conn.cursor()
     cur.execute(
         """
         SELECT COALESCE(SUM(fill_size_usdc), 0.0) AS exposure
         FROM bet_ledger
-        WHERE filled_at IS NOT NULL AND settled_at IS NULL
+        WHERE COALESCE(bet_kind, 'real') = 'real'
+          AND filled_at IS NOT NULL
+          AND settled_at IS NULL
         """
+    )
+    row = cur.fetchone()
+    return float(row["exposure"] or 0.0)
+
+
+def _strategy_open_exposure_usdc(conn: sqlite3.Connection, strategy_label: str) -> float:
+    """Sum of fill_size_usdc for real (not paper) bets under this strategy
+    that are filled but not yet settled.
+
+    Wave 5.8: per-strategy cap enforcement. Paper bets are excluded so a
+    historical paper run doesn't consume live capacity.
+    """
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT COALESCE(SUM(fill_size_usdc), 0.0) AS exposure
+        FROM bet_ledger
+        WHERE COALESCE(bet_kind, 'real') = 'real'
+          AND strategy_label = ?
+          AND filled_at IS NOT NULL
+          AND settled_at IS NULL
+        """,
+        (strategy_label,),
     )
     row = cur.fetchone()
     return float(row["exposure"] or 0.0)
@@ -94,7 +128,8 @@ def _todays_bet_count(conn: sqlite3.Connection) -> int:
     cur.execute(
         """
         SELECT COUNT(*) AS n FROM bet_ledger
-        WHERE proposed_at >= ?
+        WHERE COALESCE(bet_kind, 'real') = 'real'
+          AND proposed_at >= ?
         """,
         (_today_start_utc_iso(),),
     )
@@ -104,7 +139,13 @@ def _todays_bet_count(conn: sqlite3.Connection) -> int:
 
 def _settled_bet_count(conn: sqlite3.Connection) -> int:
     cur = conn.cursor()
-    cur.execute("SELECT COUNT(*) AS n FROM bet_ledger WHERE settled_at IS NOT NULL")
+    cur.execute(
+        """
+        SELECT COUNT(*) AS n FROM bet_ledger
+        WHERE COALESCE(bet_kind, 'real') = 'real'
+          AND settled_at IS NOT NULL
+        """
+    )
     row = cur.fetchone()
     return int(row["n"] or 0)
 
@@ -115,6 +156,7 @@ def can_place_bet(
     edge_pp: float,
     requested_mode: str = "manual",
     conn: Optional[sqlite3.Connection] = None,
+    strategy_label: Optional[str] = None,
 ) -> RiskGateDecision:
     """Return RiskGateDecision indicating whether the bet may proceed.
 
@@ -124,6 +166,9 @@ def can_place_bet(
         edge_pp: Model edge over market in percentage points (positive = favourable).
         requested_mode: "manual" or "auto" (matches the bet's `mode` column).
         conn: Optional sqlite connection; opens its own if None.
+        strategy_label: Optional strategy name; when provided the per-strategy
+            cap (BETTING_MAX_DEPOSIT_PER_STRATEGY) and live_strategies whitelist
+            (BETTING_LIVE_STRATEGIES) are enforced in addition to the global caps.
 
     All caps come from BETTING_CONFIG which is env-driven (BETTING_*).
     """
@@ -161,6 +206,24 @@ def can_place_bet(
                 cap_remaining_today=0.0,
                 cap_remaining_deposit=0.0,
             )
+
+        # 2b. Per-strategy whitelist gate (Wave 5.8).
+        # When a strategy_label is provided, it must appear in BETTING_LIVE_STRATEGIES
+        # (empty list = no strategies are live; blocks all strategy-tagged bets).
+        # Untagged bets (strategy_label=None) bypass this check and only face the
+        # global caps — used for ad-hoc manual bets from the /live-betting UI.
+        if strategy_label is not None:
+            live_strategies = BETTING_CONFIG.get("live_strategies", []) or []
+            if strategy_label not in live_strategies:
+                return RiskGateDecision(
+                    allowed=False,
+                    reason=(
+                        f"Strategy '{strategy_label}' is not in BETTING_LIVE_STRATEGIES="
+                        f"{live_strategies}. Add the label to .env to enable."
+                    ),
+                    cap_remaining_today=0.0,
+                    cap_remaining_deposit=0.0,
+                )
 
         # 3. Per-bet cap
         max_per_bet = float(BETTING_CONFIG.get("max_per_bet_usdc", 0))
@@ -218,6 +281,26 @@ def can_place_bet(
                 cap_remaining_today=cap_remaining_today,
                 cap_remaining_deposit=cap_remaining_deposit,
             )
+
+        # 6b. Per-strategy open exposure (Wave 5.8).
+        # Enforce BETTING_MAX_DEPOSIT_PER_STRATEGY so one strategy cannot
+        # consume the full shared bankroll envelope.
+        if strategy_label is not None:
+            strategy_cap = float(BETTING_CONFIG.get("max_deposit_per_strategy_usdc", 0))
+            if strategy_cap > 0:
+                strategy_open = _strategy_open_exposure_usdc(conn, strategy_label)
+                cap_remaining_strategy = max(0.0, strategy_cap - strategy_open)
+                if proposed_size_usdc > cap_remaining_strategy:
+                    return RiskGateDecision(
+                        allowed=False,
+                        reason=(
+                            f"Strategy '{strategy_label}' open ${strategy_open:.2f} + "
+                            f"${proposed_size_usdc} would exceed per-strategy cap "
+                            f"${strategy_cap} (remaining ${cap_remaining_strategy:.2f})."
+                        ),
+                        cap_remaining_today=cap_remaining_today,
+                        cap_remaining_deposit=cap_remaining_deposit,
+                    )
 
         # 7. AUTO-mode market gate
         if requested_mode == "auto":
@@ -299,6 +382,82 @@ def _is_scale_up_eligible(settled_count: int) -> bool:
     from config import BETTING_CONFIG
     min_required = int(BETTING_CONFIG.get("scale_up_min_settled_bets", 50))
     return settled_count >= min_required
+
+
+def get_strategy_breakdown() -> Dict[str, Any]:
+    """Wave 5.8: per-strategy roll-up for /live-betting UI.
+
+    For each strategy in BETTING_LIVE_STRATEGIES (plus any strategy that has
+    ever placed a real bet, so retired strategies still show their history),
+    returns: bankroll start, open exposure, realised P&L, bet counts by status.
+    """
+    from config import BETTING_CONFIG
+    from src.data.database import get_connection
+
+    live_strategies = list(BETTING_CONFIG.get("live_strategies", []) or [])
+    strategy_cap = float(BETTING_CONFIG.get("max_deposit_per_strategy_usdc", 0))
+
+    conn = get_connection()
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            """
+            SELECT DISTINCT strategy_label
+            FROM bet_ledger
+            WHERE COALESCE(bet_kind, 'real') = 'real'
+              AND strategy_label IS NOT NULL
+            """
+        )
+        historical = [r["strategy_label"] for r in cur.fetchall()]
+
+        all_labels = sorted(set(live_strategies) | set(historical))
+
+        rows = []
+        for label in all_labels:
+            cur.execute(
+                """
+                SELECT
+                    COUNT(*) AS n_total,
+                    COALESCE(SUM(CASE WHEN status='settled' THEN 1 ELSE 0 END), 0) AS n_settled,
+                    COALESCE(SUM(CASE WHEN status='filled' AND settled_at IS NULL THEN 1 ELSE 0 END), 0) AS n_open,
+                    COALESCE(SUM(CASE WHEN status='errored' THEN 1 ELSE 0 END), 0) AS n_errored,
+                    COALESCE(SUM(CASE WHEN filled_at IS NOT NULL AND settled_at IS NULL THEN fill_size_usdc ELSE 0 END), 0.0) AS open_exposure,
+                    COALESCE(SUM(CASE WHEN status='settled' THEN pnl_realised_usdc ELSE 0 END), 0.0) AS realised_pnl,
+                    COALESCE(SUM(CASE WHEN status='settled' AND pnl_realised_usdc > 0 THEN 1 ELSE 0 END), 0) AS n_wins
+                FROM bet_ledger
+                WHERE COALESCE(bet_kind, 'real') = 'real'
+                  AND strategy_label = ?
+                """,
+                (label,),
+            )
+            row = cur.fetchone()
+            n_settled = int(row["n_settled"] or 0)
+            n_wins = int(row["n_wins"] or 0)
+            open_exposure = float(row["open_exposure"] or 0.0)
+            realised_pnl = float(row["realised_pnl"] or 0.0)
+            rows.append({
+                "strategy_label": label,
+                "enabled": label in live_strategies,
+                "starting_bankroll_usdc": strategy_cap,
+                "current_bankroll_usdc": round(strategy_cap + realised_pnl, 2),
+                "open_exposure_usdc": round(open_exposure, 2),
+                "cap_remaining_usdc": round(max(0.0, strategy_cap - open_exposure), 2),
+                "realised_pnl_usdc": round(realised_pnl, 2),
+                "roi_pct": round(100.0 * realised_pnl / strategy_cap, 2) if strategy_cap > 0 else 0.0,
+                "n_total": int(row["n_total"] or 0),
+                "n_settled": n_settled,
+                "n_open": int(row["n_open"] or 0),
+                "n_errored": int(row["n_errored"] or 0),
+                "win_rate": round(n_wins / n_settled, 3) if n_settled > 0 else None,
+            })
+    finally:
+        conn.close()
+
+    return {
+        "strategies": rows,
+        "max_deposit_per_strategy_usdc": strategy_cap,
+        "live_strategies": live_strategies,
+    }
 
 
 def write_env_var(key: str, value: str, env_path: Optional[Path] = None) -> bool:

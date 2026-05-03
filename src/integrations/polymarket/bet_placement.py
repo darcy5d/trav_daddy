@@ -45,16 +45,30 @@ def place_bet(
     size_usdc: float,
     requested_mode: str = "manual",
     poly_client: Optional[PolymarketClient] = None,
+    strategy_label: Optional[str] = None,
+    bankroll_at_proposal: Optional[float] = None,
+    phase: Optional[str] = None,
+    xi_signature: Optional[str] = None,
+    toss_winner_team_id: Optional[int] = None,
+    toss_chose_to: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Run risk gate + place market order + insert/update bet ledger row.
 
     Returns: a dict with keys `success`, `bet_id`, `status`, `reason`, and
     `placement_response` (the raw CLOB API response).
+
+    Wave 5.8: strategy_label threads through to the risk gate (enforces
+    per-strategy cap + BETTING_LIVE_STRATEGIES whitelist) and is written to
+    bet_ledger alongside bet_kind='real' so paper/live can be compared in SQL.
+    The paper-parity metadata (phase/xi_signature/toss_*) is optional.
     """
     edge_pp = (model_prob - market_price_at_proposal) * 100.0
 
     # Step 1: risk gate
-    decision = can_place_bet(size_usdc, market_type, edge_pp, requested_mode)
+    decision = can_place_bet(
+        size_usdc, market_type, edge_pp, requested_mode,
+        strategy_label=strategy_label,
+    )
     if not decision.allowed:
         return {
             "success": False,
@@ -82,15 +96,19 @@ def place_bet(
                 polymarket_market_id, polymarket_token_id,
                 side_label, model_prob, market_price_at_proposal, edge_pp,
                 side, size_usdc, fees_estimated_usdc,
-                status, mode
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'proposed', ?)
+                status, mode, bet_kind, strategy_label,
+                bankroll_at_proposal, phase, xi_signature,
+                toss_winner_team_id, toss_chose_to
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'proposed', ?, 'real', ?, ?, ?, ?, ?, ?)
             """,
             (
                 proposed_at, match_id, fixture_key, market_type,
                 polymarket_market_id, polymarket_token_id,
                 side_label, model_prob, market_price_at_proposal, edge_pp,
                 side.upper(), size_usdc, fees_est,
-                requested_mode,
+                requested_mode, strategy_label,
+                bankroll_at_proposal, phase, xi_signature,
+                toss_winner_team_id, toss_chose_to,
             ),
         )
         bet_id = cur.lastrowid

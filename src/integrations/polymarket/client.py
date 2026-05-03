@@ -188,7 +188,12 @@ class PolymarketClient:
     # ------------------------------------------------------------------
 
     def _get_clob_sdk_client(self) -> Any:
-        """Lazy-init the py-clob-client SDK with L1 + L2 credentials.
+        """Lazy-init the py-clob-client-v2 SDK with L1 + L2 credentials.
+
+        Wave 5.8: migrated from `py-clob-client` (v1) to `py-clob-client-v2`
+        after Polymarket's April 27 2026 protocol upgrade made v1 signed
+        orders return `order_version_mismatch`. v2 defaults to the V2
+        exchange contract + order schema; otherwise same semantics.
 
         Raises ValueError if required env vars are missing. Caches the
         client on the instance so subsequent calls are cheap.
@@ -196,17 +201,17 @@ class PolymarketClient:
         if self._clob_sdk is not None:
             return self._clob_sdk
         try:
-            from py_clob_client.client import ClobClient
+            from py_clob_client_v2 import ClobClient, ApiCreds
         except ImportError as exc:
             raise RuntimeError(
-                "py-clob-client is not installed. Run "
-                "`pip install py-clob-client` (or add it to requirements.txt)."
+                "py-clob-client-v2 is not installed. Run "
+                "`pip install py-clob-client-v2` (or add it to requirements.txt)."
             ) from exc
 
         private_key = POLYMARKET_CONFIG.get("private_key") or ""
         funder = POLYMARKET_CONFIG.get("funder_address") or ""
         chain_id = int(POLYMARKET_CONFIG.get("chain_id", 137))
-        signature_type = int(POLYMARKET_CONFIG.get("signature_type", 1))  # POLY_PROXY default
+        signature_type = int(POLYMARKET_CONFIG.get("signature_type", 1))
 
         if not private_key:
             raise ValueError(
@@ -215,27 +220,32 @@ class PolymarketClient:
                 "to generate one."
             )
 
+        api_key = POLYMARKET_CONFIG.get("api_key") or ""
+        api_secret = POLYMARKET_CONFIG.get("api_secret") or ""
+        passphrase = POLYMARKET_CONFIG.get("passphrase") or ""
+
+        # v2 ClobClient accepts creds in its constructor (unlike v1 which
+        # needed a separate set_api_creds call). Fall back to deriving the
+        # creds from the private key if env creds are missing.
+        creds: Optional[Any] = None
+        if api_key and api_secret and passphrase:
+            creds = ApiCreds(api_key=api_key, api_secret=api_secret, api_passphrase=passphrase)
+
         client = ClobClient(
             host=self.clob_base_url,
-            key=private_key,
             chain_id=chain_id,
+            key=private_key,
+            creds=creds,
             signature_type=signature_type,
             funder=funder if funder else None,
         )
 
-        api_key = POLYMARKET_CONFIG.get("api_key") or ""
-        api_secret = POLYMARKET_CONFIG.get("api_secret") or ""
-        passphrase = POLYMARKET_CONFIG.get("passphrase") or ""
-        if api_key and api_secret and passphrase:
+        if creds is None:
             try:
-                from py_clob_client.clob_types import ApiCreds
-                creds = ApiCreds(api_key=api_key, api_secret=api_secret, api_passphrase=passphrase)
+                creds = client.create_or_derive_api_key()
                 client.set_api_creds(creds)
             except Exception as exc:
-                logger.warning(f"Failed to set L2 creds; deriving from key: {exc}")
-                client.set_api_creds(client.create_or_derive_api_creds())
-        else:
-            client.set_api_creds(client.create_or_derive_api_creds())
+                logger.warning(f"Failed to derive v2 API creds: {exc}")
 
         self._clob_sdk = client
         return client
@@ -259,14 +269,21 @@ class PolymarketClient:
             CLOB API response dict (includes `orderID`, status, fill details).
         """
         client = self._get_clob_sdk_client()
-        from py_clob_client.clob_types import OrderType, MarketOrderArgs
-        from py_clob_client.order_builder.constants import BUY, SELL
-        side_const = BUY if side.upper() == "BUY" else SELL
+        from py_clob_client_v2 import OrderType, Side, MarketOrderArgsV2
+        side_const = Side.BUY if side.upper() == "BUY" else Side.SELL
         order_type_enum = OrderType.FOK if order_type.upper() == "FOK" else OrderType.FAK
-        args = MarketOrderArgs(
+
+        # V2 market orders require the live user_usdc_balance. Query it fresh
+        # so the signed order matches on-chain state.
+        bal_info = self.get_usdc_balance()
+        user_usdc_balance = float(bal_info.get("balance_usdc", 0.0))
+
+        args = MarketOrderArgsV2(
             token_id=token_id,
             amount=float(amount_usdc),
             side=side_const,
+            order_type=order_type_enum,
+            user_usdc_balance=user_usdc_balance,
         )
         signed = client.create_market_order(args)
         return client.post_order(signed, order_type_enum)
@@ -290,9 +307,8 @@ class PolymarketClient:
             CLOB API response dict.
         """
         client = self._get_clob_sdk_client()
-        from py_clob_client.clob_types import OrderArgs, OrderType
-        from py_clob_client.order_builder.constants import BUY, SELL
-        side_const = BUY if side.upper() == "BUY" else SELL
+        from py_clob_client_v2 import OrderType, Side, OrderArgs
+        side_const = Side.BUY if side.upper() == "BUY" else Side.SELL
         args = OrderArgs(
             token_id=token_id,
             price=float(price),
@@ -326,4 +342,45 @@ class PolymarketClient:
         if hasattr(client, "get_orderbook_positions"):
             return client.get_orderbook_positions()
         return []
+
+    def get_usdc_balance(self) -> Dict[str, Any]:
+        """Wave 5.8: live USDC balance + on-chain allowance status for the
+        proxy wallet. Uses py-clob-client's get_balance_allowance (L2-authed).
+
+        Returns:
+            {
+                "balance_usdc": float,       # USDC balance (6 decimals normalised to float)
+                "balance_raw": str,          # exact micro-USDC value as string
+                "allowances_ok": bool,       # True iff all Polymarket contracts have >0 allowance
+                "allowances": dict,          # contract_address -> allowance (raw micro-USDC string)
+                "signature_type": int,       # 0/1/2 signature_type used for this wallet
+            }
+        """
+        from py_clob_client_v2 import BalanceAllowanceParams, AssetType
+
+        client = self._get_clob_sdk_client()
+        signature_type = int(POLYMARKET_CONFIG.get("signature_type", 1))
+        params = BalanceAllowanceParams(
+            asset_type=AssetType.COLLATERAL,
+            signature_type=signature_type,
+        )
+        resp = client.get_balance_allowance(params)
+        balance_raw = str(resp.get("balance", "0") or "0")
+        try:
+            balance_usdc = int(balance_raw) / 1_000_000.0
+        except (TypeError, ValueError):
+            balance_usdc = 0.0
+        allowances = resp.get("allowances", {}) or {}
+        # Allowances are set to max-uint256 when approvals are healthy; any
+        # nonzero value is fine but we guard against all-zero explicitly.
+        allowances_ok = len(allowances) > 0 and all(
+            int(v or 0) > 0 for v in allowances.values()
+        )
+        return {
+            "balance_usdc": round(balance_usdc, 4),
+            "balance_raw": balance_raw,
+            "allowances_ok": allowances_ok,
+            "allowances": allowances,
+            "signature_type": int(POLYMARKET_CONFIG.get("signature_type", 0)),
+        }
 

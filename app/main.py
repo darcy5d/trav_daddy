@@ -4819,9 +4819,65 @@ def betting_config():
         return jsonify({'success': False, 'error': str(e)}), 500
 
 
+@app.route('/api/betting/strategies', methods=['GET'])
+def betting_strategies():
+    """Wave 5.8: per-strategy bankroll + P&L rollup for the Live Betting UI.
+
+    Returns starting bankroll, current bankroll, open exposure, realised P&L,
+    ROI, win rate and bet counts for each strategy in BETTING_LIVE_STRATEGIES
+    plus any retired strategy that still has historical real bets.
+    """
+    try:
+        from src.integrations.polymarket.risk_gate import get_strategy_breakdown
+        return jsonify(get_strategy_breakdown())
+    except Exception as e:
+        logger.error(f"Error getting betting strategies: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/betting/wallet', methods=['GET'])
+def betting_wallet():
+    """Wave 5.8: live on-chain USDC balance + approval status for the bot wallet.
+
+    Reads the Polymarket CLOB `get_balance_allowance` endpoint using the L2
+    credentials in .env. Compared against BETTING_MAX_DEPOSIT so the UI can
+    flag under-funded wallets without guessing.
+    """
+    try:
+        from src.integrations.polymarket import PolymarketClient
+        from config import BETTING_CONFIG, POLYMARKET_CONFIG
+        pm = PolymarketClient()
+        if not POLYMARKET_CONFIG.get('private_key'):
+            return jsonify({
+                'success': False,
+                'error': 'POLYGON_PRIVATE_KEY not set in .env',
+                'configured': False,
+            })
+        info = pm.get_usdc_balance()
+        max_deposit = float(BETTING_CONFIG.get('max_deposit_usdc', 0))
+        info['max_deposit_usdc'] = max_deposit
+        info['funded_vs_envelope_pct'] = (
+            round(info['balance_usdc'] / max_deposit * 100, 1) if max_deposit > 0 else None
+        )
+        # under-funded if live balance < 80% of envelope
+        info['underfunded'] = (
+            max_deposit > 0 and info['balance_usdc'] < 0.8 * max_deposit
+        )
+        info['success'] = True
+        info['configured'] = True
+        return jsonify(info)
+    except Exception as e:
+        logger.error(f"Error fetching wallet balance: {e}")
+        return jsonify({'success': False, 'error': str(e), 'configured': True}), 500
+
+
 @app.route('/api/betting/today', methods=['GET'])
 def betting_today():
-    """Today's bets (UTC) for the Live Betting tab."""
+    """Today's REAL bets (UTC) for the Live Betting tab.
+
+    Wave 5.8: filters bet_kind='real' so paper bets don't contaminate the
+    /live-betting view. Paper bets are shown at /paper-trades.
+    """
     try:
         from src.data.database import get_connection
         from datetime import datetime, timezone
@@ -4831,7 +4887,8 @@ def betting_today():
             cur.execute(
                 """
                 SELECT * FROM bet_ledger
-                WHERE proposed_at >= ?
+                WHERE COALESCE(bet_kind, 'real') = 'real'
+                  AND proposed_at >= ?
                 ORDER BY proposed_at DESC
                 LIMIT 100
                 """,
@@ -4846,7 +4903,10 @@ def betting_today():
 
 @app.route('/api/betting/recent-settled', methods=['GET'])
 def betting_recent_settled():
-    """Last 50 settled bets."""
+    """Last 50 settled REAL bets.
+
+    Wave 5.8: filters bet_kind='real'; paper bets surfaced at /paper-trades.
+    """
     try:
         from src.data.database import get_connection
         with get_connection() as conn:
@@ -4854,7 +4914,8 @@ def betting_recent_settled():
             cur.execute(
                 """
                 SELECT * FROM bet_ledger
-                WHERE settled_at IS NOT NULL
+                WHERE COALESCE(bet_kind, 'real') = 'real'
+                  AND settled_at IS NOT NULL
                 ORDER BY settled_at DESC
                 LIMIT 50
                 """
@@ -4969,12 +5030,14 @@ def betting_dashboard():
         from src.data.database import get_connection
         with get_connection() as conn:
             cur = conn.cursor()
+            # Wave 5.8: restrict to real bets; paper bets live at /paper-trades.
             cur.execute(
                 """
                 SELECT settled_at, market_type, model_prob, settle_outcome,
                        fill_size_usdc, pnl_realised_usdc
                 FROM bet_ledger
-                WHERE settled_at IS NOT NULL
+                WHERE COALESCE(bet_kind, 'real') = 'real'
+                  AND settled_at IS NOT NULL
                 ORDER BY settled_at ASC
                 """
             )
@@ -5735,10 +5798,17 @@ def betting_scale_up():
         if target not in envelopes:
             return jsonify({'success': False, 'error': f"Invalid target {target}; use '500' or '1000'."}), 400
 
-        # Recompute eligibility live to avoid stale UI
+        # Recompute eligibility live to avoid stale UI.
+        # Wave 5.8: scale-up is based on REAL settled bets only.
         with get_connection() as conn:
             cur = conn.cursor()
-            cur.execute("SELECT COUNT(*) AS n FROM bet_ledger WHERE settled_at IS NOT NULL")
+            cur.execute(
+                """
+                SELECT COUNT(*) AS n FROM bet_ledger
+                WHERE COALESCE(bet_kind, 'real') = 'real'
+                  AND settled_at IS NOT NULL
+                """
+            )
             settled_count = int((cur.fetchone() or {'n': 0})['n'])
         if not _is_scale_up_eligible(settled_count):
             return jsonify({
