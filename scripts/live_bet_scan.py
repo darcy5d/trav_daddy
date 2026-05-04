@@ -53,8 +53,55 @@ from src.integrations.polymarket.paper_inputs import (
 from src.integrations.polymarket.paper_strategies import (
     PaperStrategy,
     get_enabled_strategies,
-    kelly_stake_usdc,
 )
+
+# Polymarket CLOB minimum order is $1 USDC; orders below this get rejected.
+POLYMARKET_MIN_ORDER_USDC = 1.0
+
+# Live sizing mirrors paper at a 1/10 scale. Paper's $5 min / $100 max on a
+# $1000 bankroll = 0.5% / 10% of bankroll. We apply those same ratios to
+# live's smaller bankroll so live is a clean scaled-down mirror of paper.
+LIVE_MIN_STAKE_FRACTION = 0.005
+LIVE_MAX_STAKE_FRACTION = 0.10
+
+
+def live_scaled_kelly_stake(
+    model_prob: float,
+    market_price: float,
+    live_bankroll_usdc: float,
+    strategy: PaperStrategy,
+) -> float:
+    """Half-Kelly stake sized RELATIVE to the live bankroll.
+
+    Paper's `kelly_stake_usdc` uses ABSOLUTE dollar min/max ($5 / $100)
+    tuned for the $1000 paper bankroll. When live runs at a $100 bankroll
+    those translate to 5% / 25% of bankroll (via bankroll * 0.25), which
+    distorts the skip pattern: any bet paper sizes under $50 falls below
+    live's $5 min and gets silently dropped. That makes paper-vs-live
+    non-comparable.
+
+    This variant keeps kelly_mult and kelly_fraction_cap identical to
+    paper but replaces absolute min/max with bankroll-relative 0.5% / 10%,
+    producing exactly 1/10 the paper stake for the same model/market inputs
+    at the same relative bankroll. Every skip paper makes, live makes too.
+    Polymarket's $1 minimum order size is enforced as a floor on top.
+    """
+    if market_price <= 0 or market_price >= 1:
+        return 0.0
+    if model_prob <= 0 or model_prob >= 1:
+        return 0.0
+    f_star = (model_prob - market_price) / (1.0 - market_price)
+    f_star = max(0.0, min(f_star, 1.0))
+    f_capped = min(f_star * strategy.kelly_mult, strategy.kelly_fraction_cap)
+    raw_stake = f_capped * live_bankroll_usdc
+    scaled_min = max(
+        LIVE_MIN_STAKE_FRACTION * live_bankroll_usdc,
+        POLYMARKET_MIN_ORDER_USDC,
+    )
+    scaled_max = LIVE_MAX_STAKE_FRACTION * live_bankroll_usdc
+    if raw_stake < scaled_min:
+        return 0.0
+    return min(raw_stake, scaled_max)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -464,7 +511,7 @@ def scan_and_place_live_bets(
                         "reason": "bankroll-exhausted",
                     })
                     continue
-                stake = kelly_stake_usdc(model_prob, market_price, bankroll_now, strat)
+                stake = live_scaled_kelly_stake(model_prob, market_price, bankroll_now, strat)
                 if stake <= 0:
                     summary["bets_skipped"].append({
                         "strategy": strat.name, "fixture": fix["fixture_key"],

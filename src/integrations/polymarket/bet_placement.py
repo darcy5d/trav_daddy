@@ -163,12 +163,35 @@ def place_bet(
     fill_size_usdc = None
     new_status = "placed"
     # FOK orders either fully fill instantly or are cancelled. Detect via
-    # `success`/`takingAmount` fields in the response.
+    # `status` / `success` and parse fill details.
+    # Wave 5.8: v2 CLOB response shape is {'makingAmount': str, 'takingAmount': str,
+    # 'status': 'matched', 'success': bool, 'orderID': str, 'transactionsHashes': [...]}.
+    # For BUY: makingAmount = USDC spent, takingAmount = outcome tokens received.
+    # fill_price (USDC per share) = makingAmount / takingAmount.
+    # The older 'fillPrice'/'fillAmount' fields are v1-era aliases; keep them
+    # as fallbacks so local tests with synthetic v1-shaped dicts still pass.
     if isinstance(placement_response, dict):
-        if placement_response.get("status") == "matched" or placement_response.get("filled"):
+        if (
+            placement_response.get("status") == "matched"
+            or placement_response.get("filled")
+            or placement_response.get("success")
+        ):
             new_status = "filled"
-            fill_price = placement_response.get("fillPrice") or placement_response.get("avg_price")
-            fill_size_usdc = placement_response.get("fillAmount") or size_usdc
+            making = placement_response.get("makingAmount")
+            taking = placement_response.get("takingAmount")
+            try:
+                if making is not None and taking is not None:
+                    fill_size_usdc = float(making)
+                    taking_f = float(taking)
+                    if taking_f > 0:
+                        fill_price = fill_size_usdc / taking_f
+            except (TypeError, ValueError):
+                pass
+            # Fall back to legacy v1 field names if v2 fields aren't present
+            if fill_price is None:
+                fill_price = placement_response.get("fillPrice") or placement_response.get("avg_price")
+            if fill_size_usdc is None:
+                fill_size_usdc = placement_response.get("fillAmount") or size_usdc
 
     cur.execute(
         """
