@@ -4871,6 +4871,186 @@ def betting_wallet():
         return jsonify({'success': False, 'error': str(e), 'configured': True}), 500
 
 
+@app.route('/api/betting/bankroll-history', methods=['GET'])
+def betting_bankroll_history():
+    """Bankroll-over-time per strategy for LIVE bets (bet_kind='real').
+    
+    Mirrors the paper trading endpoint but filters for real bets only.
+    Computes running bankroll chronologically: starting + cumsum(pnl)
+    ordered by settled_at.
+    """
+    try:
+        from src.data.database import get_connection
+        from config import BETTING_CONFIG
+        
+        # Get live strategies from config
+        live_strategies = BETTING_CONFIG.get('live_strategies', []) or []
+        starting_per_strategy = float(BETTING_CONFIG.get('max_deposit_per_strategy_usdc', 100))
+        
+        with get_connection() as conn:
+            cur = conn.cursor()
+            cur.execute(
+                """
+                SELECT strategy_label, settled_at, pnl_realised_usdc, side_label, fixture_key
+                FROM bet_ledger
+                WHERE COALESCE(bet_kind, 'real') = 'real' AND status = 'settled'
+                ORDER BY strategy_label, settled_at ASC
+                """
+            )
+            rows = [dict(r) for r in cur.fetchall()]
+        
+        by_strategy = {}
+        
+        # Initialize all live-enabled strategies with starting point
+        for strat_name in live_strategies:
+            by_strategy[strat_name] = [{
+                "timestamp": None,
+                "bankroll": starting_per_strategy,
+                "side_label": "starting",
+                "fixture_key": "",
+                "pnl": 0.0,
+            }]
+        
+        # Group rows by strategy
+        from collections import defaultdict
+        grouped = defaultdict(list)
+        for r in rows:
+            grouped[r["strategy_label"] or "(none)"].append(r)
+        
+        # Build cumulative bankroll timeline
+        for name, lst in grouped.items():
+            base = starting_per_strategy
+            running = base
+            if name not in by_strategy:
+                by_strategy[name] = [{
+                    "timestamp": None,
+                    "bankroll": base,
+                    "side_label": "starting",
+                    "fixture_key": "",
+                    "pnl": 0.0,
+                }]
+            for r in lst:
+                pnl = float(r.get("pnl_realised_usdc") or 0.0)
+                running += pnl
+                by_strategy[name].append({
+                    "timestamp": r["settled_at"],
+                    "bankroll": round(running, 2),
+                    "side_label": r.get("side_label"),
+                    "fixture_key": r.get("fixture_key"),
+                    "pnl": round(pnl, 2),
+                })
+        
+        return jsonify({"success": True, "history": by_strategy})
+    except Exception as e:
+        logger.error(f"Error in /api/betting/bankroll-history: {e}")
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
+@app.route('/api/betting/portfolio', methods=['GET'])
+def betting_portfolio():
+    """Wave 5.8: total portfolio value = wallet USDC + mark-to-market open positions.
+
+    For each real + filled + not-settled bet in bet_ledger we compute the
+    shares held (= fill_size_usdc / fill_price) and multiply by the current
+    CLOB midpoint to get the present market value of those tokens.
+    Portfolio value = wallet balance + sum of (shares * current midpoint).
+    """
+    try:
+        from src.integrations.polymarket import PolymarketClient
+        from src.data.database import get_connection
+        from config import POLYMARKET_CONFIG
+
+        pm = PolymarketClient()
+        if not POLYMARKET_CONFIG.get('private_key'):
+            return jsonify({
+                'success': False,
+                'error': 'POLYGON_PRIVATE_KEY not set in .env',
+                'configured': False,
+            })
+
+        # 1. Wallet cash
+        wallet = pm.get_usdc_balance()
+        wallet_cash = float(wallet.get('balance_usdc', 0.0))
+
+        # 2. Open positions with their cost basis + token id
+        with get_connection() as conn:
+            cur = conn.cursor()
+            cur.execute(
+                """
+                SELECT bet_id, polymarket_token_id AS token_id,
+                       fill_size_usdc, fill_price, side_label, strategy_label
+                FROM bet_ledger
+                WHERE COALESCE(bet_kind, 'real') = 'real'
+                  AND status = 'filled'
+                  AND settled_at IS NULL
+                  AND fill_price IS NOT NULL
+                  AND fill_price > 0
+                  AND polymarket_token_id IS NOT NULL
+                  AND polymarket_token_id != ''
+                """
+            )
+            positions = [dict(r) for r in cur.fetchall()]
+
+        # 3. Batched midpoint query for all unique tokens
+        unique_tokens = sorted({p['token_id'] for p in positions})
+        midpoints: dict = {}
+        if unique_tokens:
+            try:
+                midpoints = pm.get_token_midpoints(unique_tokens)
+            except Exception as exc:
+                logger.warning(f"portfolio: get_token_midpoints failed, falling back to cost basis: {exc}")
+                midpoints = {}
+
+        # 4. Mark each position to market; fallback to cost basis when
+        #    the CLOB didn't quote a midpoint for that token.
+        total_cost_basis = 0.0
+        total_market_value = 0.0
+        position_rows = []
+        for p in positions:
+            fill_price = float(p['fill_price'])
+            cost_basis = float(p['fill_size_usdc'] or 0.0)
+            shares = cost_basis / fill_price if fill_price > 0 else 0.0
+            mid = midpoints.get(str(p['token_id']))
+            if mid is None or mid <= 0:
+                market_value = cost_basis  # fallback
+                marked = False
+            else:
+                market_value = shares * mid
+                marked = True
+            total_cost_basis += cost_basis
+            total_market_value += market_value
+            position_rows.append({
+                'bet_id': p['bet_id'],
+                'strategy_label': p['strategy_label'],
+                'side_label': p['side_label'],
+                'shares': round(shares, 4),
+                'fill_price': round(fill_price, 4),
+                'cost_basis_usdc': round(cost_basis, 4),
+                'mid_price': round(mid, 4) if mid is not None else None,
+                'market_value_usdc': round(market_value, 4),
+                'unrealised_pnl_usdc': round(market_value - cost_basis, 4),
+                'marked_to_market': marked,
+            })
+
+        portfolio_value = wallet_cash + total_market_value
+        unrealised_pnl = total_market_value - total_cost_basis
+
+        return jsonify({
+            'success': True,
+            'configured': True,
+            'wallet_cash_usdc': round(wallet_cash, 2),
+            'open_positions_count': len(positions),
+            'open_positions_cost_basis_usdc': round(total_cost_basis, 2),
+            'open_positions_market_value_usdc': round(total_market_value, 2),
+            'unrealised_pnl_usdc': round(unrealised_pnl, 2),
+            'portfolio_value_usdc': round(portfolio_value, 2),
+            'positions': position_rows,
+        })
+    except Exception as e:
+        logger.error(f"Error fetching betting portfolio: {e}")
+        return jsonify({'success': False, 'error': str(e), 'configured': True}), 500
+
+
 @app.route('/api/betting/today', methods=['GET'])
 def betting_today():
     """Today's REAL bets (UTC) for the Live Betting tab.
@@ -4898,6 +5078,53 @@ def betting_today():
         return jsonify({'success': True, 'bets': bets})
     except Exception as e:
         logger.error(f"Error fetching today's bets: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/betting/bets', methods=['GET'])
+def betting_bets():
+    """Wave 5.8.3: Live bets (card UI) — mirrors /api/paper/bets for real bets.
+
+    Query: ?status=open|settled|all (default 'all'), ?limit=200, ?strategy=name
+
+    Drives the card-style 'Open Live Bets' and 'Recent Settled' sections on
+    /live-betting, analogous to /paper-trades but restricted to bet_kind='real'.
+    """
+    try:
+        from src.data.database import get_connection
+        status = (request.args.get('status') or 'all').lower()
+        strategy = request.args.get('strategy')
+        try:
+            limit = max(1, min(int(request.args.get('limit') or 200), 500))
+        except ValueError:
+            limit = 200
+
+        where = ["COALESCE(bet_kind, 'real') = 'real'"]
+        params: list = []
+        if status == 'open':
+            where.append("status NOT IN ('settled', 'cancelled', 'errored')")
+        elif status == 'settled':
+            where.append("status = 'settled'")
+        if strategy:
+            where.append("strategy_label = ?")
+            params.append(strategy)
+
+        sql = f"""
+            SELECT *
+            FROM bet_ledger
+            WHERE {' AND '.join(where)}
+            ORDER BY proposed_at DESC
+            LIMIT ?
+        """
+        params.append(limit)
+
+        with get_connection() as conn:
+            cur = conn.cursor()
+            cur.execute(sql, params)
+            bets = [dict(r) for r in cur.fetchall()]
+        return jsonify({'success': True, 'bets': bets, 'n': len(bets)})
+    except Exception as e:
+        logger.error(f"Error in /api/betting/bets: {e}")
         return jsonify({'success': False, 'error': str(e)}), 500
 
 
@@ -5012,6 +5239,183 @@ def betting_reconcile():
     except Exception as e:
         logger.error(f"Error reconciling bets: {e}")
         return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/betting/upcoming', methods=['GET'])
+def betting_upcoming():
+    """Upcoming Polymarket cricket fixtures considered for LIVE bets.
+
+    Identical Polymarket source as `/api/paper/upcoming` — both pages
+    look at the same fixtures slate. Exposed under /api/betting/* so the
+    live-betting page doesn't have to know about the paper namespace.
+    Adds `pre_toss_real_bets` / `post_toss_real_bets` counts so the UI
+    can show whether a fixture has already been bet on.
+    """
+    try:
+        from src.integrations.polymarket import PolymarketClient
+        from src.integrations.polymarket.upcoming import (
+            find_upcoming_cricket_events, attach_db_team_ids,
+        )
+        from src.data.database import get_connection
+        try:
+            hours_ahead = float(request.args.get('hours_ahead') or 96.0)
+        except ValueError:
+            hours_ahead = 96.0
+        c = PolymarketClient()
+        events = find_upcoming_cricket_events(c, hours_ahead=hours_ahead)
+        mapped = attach_db_team_ids(events)
+
+        # Pull live-bet counts per fixture/phase in one query — much
+        # faster than N round-trips when there are many fixtures.
+        fixture_keys = [ev["fixture_key"] for ev in mapped]
+        bet_counts: dict = {}
+        if fixture_keys:
+            placeholders = ",".join(["?"] * len(fixture_keys))
+            with get_connection() as conn:
+                cur = conn.cursor()
+                cur.execute(
+                    f"""
+                    SELECT fixture_key,
+                           COALESCE(phase, 'pre_toss') AS phase,
+                           COUNT(*) AS n
+                    FROM bet_ledger
+                    WHERE bet_kind = 'real'
+                      AND status != 'errored'
+                      AND fixture_key IN ({placeholders})
+                    GROUP BY fixture_key, phase
+                    """,
+                    fixture_keys,
+                )
+                for r in cur.fetchall():
+                    fk = r["fixture_key"]
+                    if fk not in bet_counts:
+                        bet_counts[fk] = {"pre_toss": 0, "post_toss": 0}
+                    bet_counts[fk][r["phase"]] = int(r["n"])
+
+        out = []
+        for ev in mapped:
+            ml = ev.get("moneyline") or {}
+            counts = bet_counts.get(ev["fixture_key"], {"pre_toss": 0, "post_toss": 0})
+            out.append({
+                "fixture_key": ev["fixture_key"],
+                "tournament_name": ev["tournament_name"],
+                "tournament_prefix": ev.get("tournament_prefix"),
+                "format": ev["format"],
+                "gender": ev["gender"],
+                "team1": ev.get("team1_db_name") or ev.get("team1_label"),
+                "team2": ev.get("team2_db_name") or ev.get("team2_label"),
+                "team1_id": ev.get("team1_id"),
+                "team2_id": ev.get("team2_id"),
+                "scheduled_start_utc": ev["scheduled_start_estimate"].isoformat(),
+                "has_moneyline": bool(ev.get("moneyline")),
+                "moneyline_outcomes": [
+                    {"label": o.get("label"), "last_price": o.get("last_price")}
+                    for o in (ml.get("outcomes") or [])
+                ] if ml else [],
+                "pre_toss_real_bets": counts["pre_toss"],
+                "post_toss_real_bets": counts["post_toss"],
+            })
+        return jsonify({"success": True, "fixtures": out, "n": len(out)})
+    except Exception as e:
+        logger.error(f"Error in /api/betting/upcoming: {e}")
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
+@app.route('/api/betting/post-toss-scan', methods=['POST'])
+def betting_post_toss_scan():
+    """Trigger a LIVE post-toss re-scan for one fixture in the background.
+
+    Spawns scripts/live_bet_post_toss_scan.py as a detached subprocess.
+    The script runs V2/V3 sims with PINNED toss, applies LIVE strategy
+    filters (BETTING_LIVE_STRATEGIES), and routes through `place_bet()`
+    if any qualifying edge is found. Mode/kill-switch are enforced
+    inside the script — calling this endpoint with BETTING_MODE=OFF is
+    safe (the script logs and exits).
+
+    Body: {fixture_key: str, toss_winner: 'team1'|'team2',
+           chose_to: 'bat'|'field',
+           team1_xi: [int,...] (optional), team2_xi: [int,...] (optional)}
+    """
+    try:
+        import subprocess
+        from pathlib import Path
+        payload = request.get_json(silent=True) or {}
+        fixture_key = str(payload.get("fixture_key") or "")
+        toss_winner = str(payload.get("toss_winner") or "")
+        chose_to = str(payload.get("chose_to") or "")
+        if (
+            not fixture_key
+            or toss_winner not in ("team1", "team2")
+            or chose_to not in ("bat", "field")
+        ):
+            return jsonify({
+                "success": False,
+                "error": "fixture_key + toss_winner (team1|team2) + chose_to (bat|field) required",
+            }), 400
+
+        repo_root = Path(__file__).resolve().parent.parent
+        log_dir = repo_root / "logs"
+        log_dir.mkdir(parents=True, exist_ok=True)
+        log_path = log_dir / "live_post_toss.log"
+        venv_python = repo_root / "venv311" / "bin" / "python"
+        script_path = repo_root / "scripts" / "live_bet_post_toss_scan.py"
+
+        cmd = [
+            str(venv_python), str(script_path),
+            "--fixture-key", fixture_key,
+            "--toss-winner", toss_winner,
+            "--chose-to", chose_to,
+        ]
+        t1_xi = payload.get("team1_xi") or []
+        t2_xi = payload.get("team2_xi") or []
+        if t1_xi:
+            cmd.extend(["--team1-xi", ",".join(str(int(x)) for x in t1_xi)])
+        if t2_xi:
+            cmd.extend(["--team2-xi", ",".join(str(int(x)) for x in t2_xi)])
+
+        with log_path.open("a") as logf:
+            logf.write(f"\n\n=== live post-toss spawn at {datetime.now(timezone.utc).isoformat()} ===\n")
+            logf.write(f"=== cmd: {' '.join(cmd)} ===\n")
+            logf.flush()
+            proc = subprocess.Popen(
+                cmd, cwd=str(repo_root), stdout=logf, stderr=subprocess.STDOUT,
+                start_new_session=True,
+            )
+
+        return jsonify({
+            "success": True, "started": True, "pid": proc.pid,
+            "log_path": str(log_path),
+            "message": (
+                "Live post-toss scan started in background. Poll "
+                "/api/betting/post-toss-scan/status to track progress; "
+                "any new bets appear in the live ledger when finished (~60s)."
+            ),
+        })
+    except Exception as e:
+        logger.error(f"Error in /api/betting/post-toss-scan: {e}")
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
+@app.route('/api/betting/post-toss-scan/status', methods=['GET'])
+def betting_post_toss_scan_status():
+    """Tail of the latest LIVE post-toss scan log."""
+    try:
+        from pathlib import Path
+        repo_root = Path(__file__).resolve().parent.parent
+        log_path = repo_root / "logs" / "live_post_toss.log"
+        if not log_path.exists():
+            return jsonify({"success": True, "running": False, "tail": ""})
+        with log_path.open("rb") as f:
+            f.seek(0, 2)
+            size = f.tell()
+            f.seek(max(0, size - 4096))
+            tail_bytes = f.read()
+        tail = tail_bytes.decode("utf-8", errors="replace")
+        # Match the "summary" sentinel printed by live_bet_post_toss_scan.main()
+        running = "LIVE POST-TOSS SCAN SUMMARY" not in tail.split("=== live post-toss spawn")[-1]
+        return jsonify({"success": True, "running": running, "tail": tail[-2000:]})
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)}), 500
 
 
 @app.route('/api/betting/dashboard', methods=['GET'])
@@ -5564,6 +5968,12 @@ def paper_auto_poller_start():
         lookback_min = int(payload.get("lookback_min") or 45)
         lookahead_min = int(payload.get("lookahead_min") or 30)
         dry_run = bool(payload.get("dry_run") or False)
+        # When also_live=true the daemon spawns BOTH the paper post-toss
+        # scan AND the live post-toss scan for each detected toss. The
+        # live scan respects BETTING_MODE / kill switch / live-strategy
+        # whitelist independently, so this is safe to enable even on a
+        # fully-OFF live system.
+        also_live = bool(payload.get("also_live") or False)
 
         cmd = [
             str(venv_python), str(script_path),
@@ -5573,6 +5983,8 @@ def paper_auto_poller_start():
         ]
         if dry_run:
             cmd.append("--dry-run")
+        if also_live:
+            cmd.append("--also-live")
 
         # Detach: redirect stdout/stderr so parent doesn't keep pipes open
         bootstrap_log = log_dir / "paper_auto_post_toss_bootstrap.log"
@@ -5588,6 +6000,7 @@ def paper_auto_poller_start():
             "config": {
                 "poll_interval": poll_interval, "lookback_min": lookback_min,
                 "lookahead_min": lookahead_min, "dry_run": dry_run,
+                "also_live": also_live,
             },
         })
     except Exception as e:

@@ -497,6 +497,11 @@ def init_betting_tables(db_path: Optional[Path] = None) -> bool:
                 # Toss outcome captured at bet time (post-toss only).
                 ("toss_winner_team_id",   "INTEGER"),
                 ("toss_chose_to",         "TEXT"),
+                # Wave 5.8.2: scheduled match start (ISO8601 UTC) at the
+                # moment we placed the bet. Lets the UI show "T-X.Xh to
+                # kickoff" per bet and post-hoc-bucket bets by actual
+                # time-to-match relative to the paper-trading comparison.
+                ("kickoff_at",            "TEXT"),
             ]
             for col_name, col_type in paper_columns:
                 if not _column_exists(conn, "bet_ledger", col_name):

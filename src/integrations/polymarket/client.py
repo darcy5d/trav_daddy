@@ -8,7 +8,7 @@ Wave 5 Phase 6a: write-path integration via `py-clob-client` SDK.
 from __future__ import annotations
 
 import logging
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 import requests
 
@@ -342,6 +342,31 @@ class PolymarketClient:
         if hasattr(client, "get_orderbook_positions"):
             return client.get_orderbook_positions()
         return []
+
+    def get_token_midpoints(self, token_ids: List[str]) -> Dict[str, float]:
+        """Wave 5.8: batched midpoint query for a list of outcome tokens.
+
+        Returns `{token_id: midpoint_price}` as floats. Tokens the CLOB
+        doesn't return a price for are omitted. Uses the v2 SDK's batched
+        `get_midpoints` to avoid one request per position.
+        """
+        if not token_ids:
+            return {}
+        client = self._get_clob_sdk_client()
+        # v2 SDK accepts a list of {'token_id': ...} dicts and returns
+        # {token_id_str: price_str}. Normalise to float dict.
+        params = [{"token_id": t} for t in token_ids if t]
+        if not params:
+            return {}
+        resp = client.get_midpoints(params)
+        out: Dict[str, float] = {}
+        if isinstance(resp, dict):
+            for tid, price_str in resp.items():
+                try:
+                    out[str(tid)] = float(price_str)
+                except (TypeError, ValueError):
+                    continue
+        return out
 
     def get_usdc_balance(self) -> Dict[str, Any]:
         """Wave 5.8: live USDC balance + on-chain allowance status for the

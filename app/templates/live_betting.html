@@ -72,12 +72,238 @@
     .lb-wallet-cell .lb-label { color: var(--text-muted); font-size: 0.65rem; text-transform: uppercase; letter-spacing: 0.5px; }
     .lb-wallet-cell .lb-value { font-weight: 700; font-size: 1.2rem; color: var(--text-primary); }
     .lb-wallet-cell .lb-sub  { color: var(--text-muted); font-size: 0.7rem; margin-top: 0.2rem; }
+
+    /* ---- Card-style bet sections (mirrors /paper-trades UI). Wave 5.8.3 ---- */
+    .lb-section-header {
+        display: flex; justify-content: space-between; align-items: flex-start;
+        gap: 0.6rem; flex-wrap: wrap; margin-bottom: 0.6rem;
+    }
+    .lb-section-subtitle { color: var(--text-muted); font-weight: 400; font-size: 0.85rem; }
+    .lb-section-controls { display: flex; gap: 0.5rem; align-items: center; flex-wrap: wrap; }
+    .lb-filter-chips { display: inline-flex; gap: 0.3rem; flex-wrap: wrap; }
+    .lb-chip {
+        padding: 0.3rem 0.75rem; border-radius: 999px; border: 1px solid var(--border-color);
+        background: var(--bg-tertiary); color: var(--text-secondary); cursor: pointer;
+        font-size: 0.75rem; font-weight: 600; letter-spacing: 0.2px;
+        transition: all 0.2s ease;
+        white-space: nowrap;
+        font-family: 'Space Grotesk', sans-serif;
+    }
+    .lb-chip:hover {
+        border-color: var(--accent-primary); color: var(--text-primary);
+        background: rgba(16, 185, 129, 0.08);
+    }
+    .lb-chip.active {
+        background: var(--accent-primary); color: white; border-color: var(--accent-primary);
+        box-shadow: 0 2px 4px rgba(0, 0, 0, 0.2);
+    }
+    .lb-chip.active:hover { background: var(--accent-primary); }
+    .lb-chip-count {
+        margin-left: 0.4rem; padding: 0.05rem 0.45rem; border-radius: 999px;
+        background: rgba(255,255,255,0.18); font-size: 0.65rem; font-weight: 700;
+    }
+    .lb-chip:not(.active) .lb-chip-count { background: rgba(255,255,255,0.06); color: var(--text-muted); }
+
+    .lb-card-list { display: flex; flex-direction: column; gap: 0.5rem; }
+    .lb-card {
+        background: var(--bg-secondary); border: 1px solid var(--border-color);
+        border-radius: 12px; overflow: hidden;
+        transition: border-color 0.15s ease;
+    }
+    .lb-card-summary {
+        display: flex; align-items: center; gap: 0.7rem;
+        padding: 0.65rem 0.85rem; cursor: pointer; user-select: none;
+    }
+    .lb-card-summary:hover { background: rgba(16, 185, 129, 0.06); }
+    .lb-card:hover { border-color: rgba(16, 185, 129, 0.35); }
+    .lb-card-chevron {
+        font-size: 0.65rem; color: var(--text-muted);
+        transition: transform 0.15s ease; flex-shrink: 0; width: 10px;
+    }
+    .lb-card.open .lb-card-chevron { transform: rotate(90deg); }
+    .lb-card-title { flex: 1; min-width: 0; }
+    .lb-card-title-main {
+        font-weight: 600; font-size: 0.92rem; color: var(--text-primary);
+        display: flex; align-items: center; gap: 0.4rem; flex-wrap: wrap;
+    }
+    .lb-card-title-sub { color: var(--text-muted); font-size: 0.72rem; margin-top: 0.15rem; }
+    .lb-card-meta {
+        display: flex; gap: 1.2rem; align-items: center; flex-shrink: 0;
+        font-size: 0.78rem;
+    }
+    .lb-meta-cell { display: flex; flex-direction: column; align-items: flex-end; line-height: 1.15; }
+    .lb-meta-label {
+        color: var(--text-muted); font-size: 0.65rem;
+        text-transform: uppercase; letter-spacing: 0.5px; font-weight: 500;
+    }
+    .lb-meta-value { color: var(--text-primary); font-weight: 600; font-size: 0.85rem; }
+    .lb-meta-value.positive { color: var(--accent-primary); }
+    .lb-meta-value.negative { color: #ef4444; }
+
+    .lb-ko-badge {
+        display: inline-flex; align-items: center; gap: 0.3rem;
+        padding: 0.15rem 0.55rem; border-radius: 999px;
+        font-size: 0.7rem; font-weight: 700; white-space: nowrap;
+        border: 1px solid transparent;
+    }
+    .lb-ko-imminent { background: rgba(239, 68, 68, 0.2);   color: #ef4444;               border-color: rgba(239, 68, 68, 0.35); }
+    .lb-ko-soon     { background: rgba(245, 158, 11, 0.2);  color: var(--accent-warning); border-color: rgba(245, 158, 11, 0.35); }
+    .lb-ko-future   { background: rgba(16, 185, 129, 0.2);  color: var(--accent-primary); border-color: rgba(16, 185, 129, 0.35); }
+    .lb-ko-live     { background: rgba(59, 130, 246, 0.2);  color: #93c5fd;               border-color: rgba(59, 130, 246, 0.35); }
+    .lb-ko-pending  { background: rgba(107, 114, 128, 0.2); color: var(--text-muted);     border-color: rgba(107, 114, 128, 0.35); }
+
+    .lb-card-body {
+        display: none; border-top: 1px solid var(--border-color);
+        padding: 0.4rem 0.85rem 0.6rem; background: var(--bg-tertiary);
+    }
+    .lb-card.open .lb-card-body { display: block; }
+    .lb-bet-row {
+        display: grid;
+        grid-template-columns: 110px 1fr 95px 60px 60px 100px 75px 90px;
+        gap: 0.6rem; align-items: center;
+        padding: 0.45rem 0; font-size: 0.78rem;
+        border-bottom: 1px solid var(--border-color);
+    }
+    .lb-bet-row:last-child { border-bottom: none; }
+    .lb-bet-row .strat-name { font-weight: 600; }
+    .lb-bet-row .side-label { color: var(--text-secondary); }
+    .lb-bet-row .num { text-align: right; font-variant-numeric: tabular-nums; }
+
+    .lb-edge-pill {
+        display: inline-block; padding: 0.05rem 0.5rem; border-radius: 999px;
+        font-size: 0.68rem; font-weight: 700; text-align: center;
+        font-variant-numeric: tabular-nums;
+        border: 1px solid transparent;
+    }
+    .lb-edge-pill.lb-edge-high   { background: rgba(16, 185, 129, 0.2);  color: var(--accent-primary); border-color: rgba(16, 185, 129, 0.35); }
+    .lb-edge-pill.lb-edge-medium { background: rgba(245, 158, 11, 0.2);  color: var(--accent-warning); border-color: rgba(245, 158, 11, 0.35); }
+    .lb-edge-pill.lb-edge-low    { background: rgba(107, 114, 128, 0.2); color: var(--text-muted);     border-color: rgba(107, 114, 128, 0.35); }
+
+    .lb-outcome-pill {
+        display: inline-block; padding: 0.1rem 0.55rem; border-radius: 999px;
+        font-size: 0.65rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.4px;
+        border: 1px solid transparent;
+    }
+    .lb-outcome-won  { background: rgba(16, 185, 129, 0.2); color: var(--accent-primary); border-color: rgba(16, 185, 129, 0.35); }
+    .lb-outcome-lost { background: rgba(239, 68, 68, 0.2);  color: #ef4444;               border-color: rgba(239, 68, 68, 0.35); }
+    .lb-empty {
+        padding: 1.5rem; text-align: center; color: var(--text-muted); font-size: 0.85rem;
+        background: var(--bg-secondary); border: 1px solid var(--border-color); border-radius: 12px;
+    }
+
+    /* Day-group header for settled grouping */
+    .lb-day-card .lb-card-title-main { font-size: 0.95rem; }
+    .lb-day-card .lb-card-body { padding: 0.5rem 0.85rem 0.7rem; }
+    .lb-fixture-row {
+        display: flex; align-items: center; gap: 0.7rem;
+        padding: 0.5rem 0.6rem; border-radius: 8px;
+        background: var(--bg-secondary);
+        border: 1px solid var(--border-color);
+        margin-bottom: 0.35rem;
+        cursor: pointer;
+        transition: background 0.15s ease, border-color 0.15s ease;
+    }
+    .lb-fixture-row:hover { background: rgba(16, 185, 129, 0.08); border-color: rgba(16, 185, 129, 0.35); }
+    .lb-fixture-row.open { background: rgba(16, 185, 129, 0.06); border-color: rgba(16, 185, 129, 0.25); }
+    .lb-fixture-row-head { flex: 1; display: flex; align-items: center; gap: 0.5rem; min-width: 0; }
+    .lb-fixture-name { font-weight: 600; font-size: 0.82rem; }
+    .lb-fixture-tag  { color: var(--text-muted); font-size: 0.7rem; }
+    .lb-fixture-meta { display: flex; gap: 0.8rem; font-size: 0.75rem; font-variant-numeric: tabular-nums; flex-shrink: 0; }
+    .lb-fixture-bets { display: none; padding: 0.2rem 0.6rem 0.5rem 1.4rem; }
+    .lb-fixture-row.open + .lb-fixture-bets { display: block; }
+
+    /* Bankroll chart styling */
+    .lb-chart-card {
+        padding: 0.6rem; border: 1px solid var(--border-color); border-radius: 8px;
+        background: var(--bg-secondary); margin-top: 1rem;
+    }
+    canvas.lb-chart { display: block; max-width: 100%; height: 220px; background: rgba(0,0,0,0.05); border-radius: 6px; }
+
+    /* Summary tiles (mirror of pt-totals) - sits under the wallet-bar */
+    .lb-totals {
+        display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+        gap: 0.6rem; margin: 0.4rem 0 1rem 0;
+    }
+    .lb-total-cell {
+        padding: 0.7rem 0.9rem; border: 1px solid var(--border-color); border-radius: 8px;
+        background: var(--bg-secondary);
+    }
+    .lb-total-label { color: var(--text-muted); font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.5px; }
+    .lb-total-value { font-size: 1.5rem; font-weight: 700; margin-top: 0.2rem; }
+    .lb-total-value.positive { color: var(--accent-primary); }
+    .lb-total-value.negative { color: #ef4444; }
+
+    /* Auto-toss daemon badge + button (mirror of pt-poller-*) */
+    .lb-poller-badge {
+        display: inline-flex; align-items: center;
+        padding: 0.35rem 0.7rem; border-radius: 999px; font-size: 0.75rem; font-weight: 600;
+        cursor: default; border: 1px solid var(--border-color);
+    }
+    .lb-poller-on    { background: rgba(16, 185, 129, 0.18); color: var(--accent-primary); border-color: rgba(16, 185, 129, 0.35); }
+    .lb-poller-off   { background: rgba(107, 114, 128, 0.18); color: var(--text-muted); }
+    .lb-poller-stale { background: rgba(245, 158, 11, 0.18); color: var(--accent-warning); border-color: rgba(245, 158, 11, 0.35); }
+    .lb-poller-toggle {
+        padding: 0.4rem 0.8rem; border-radius: 8px; border: 1px solid var(--border-color);
+        background: transparent; color: var(--text-secondary); cursor: pointer;
+        font-weight: 600; font-size: 0.85rem;
+    }
+    .lb-poller-toggle:hover { border-color: var(--accent-primary); color: var(--text-primary); }
+    .lb-poller-toggle:disabled { opacity: 0.5; cursor: not-allowed; }
+
+    /* Upcoming fixtures (mirror of pt-fixtures-table) */
+    .lb-fixtures-table {
+        width: 100%; border-collapse: collapse; font-size: 0.8rem;
+    }
+    .lb-fixtures-table th, .lb-fixtures-table td {
+        padding: 0.45rem 0.5rem; border-bottom: 1px solid rgba(55,65,81,0.4);
+        text-align: left; vertical-align: top;
+    }
+    .lb-fixtures-table th {
+        color: var(--text-muted); font-weight: 600; text-transform: uppercase;
+        letter-spacing: 0.4px; font-size: 0.65rem;
+    }
+    .lb-toss-trigger {
+        padding: 0.4rem 0.8rem; border-radius: 6px; border: 1px solid var(--border-color);
+        background: transparent; color: var(--text-primary); cursor: pointer;
+        font-weight: 600; font-size: 0.8rem;
+    }
+    .lb-toss-trigger:hover { border-color: var(--accent-primary); color: var(--accent-primary); }
+    .lb-toss-trigger:disabled { opacity: 0.5; cursor: not-allowed; }
+
+    /* Toss modal (mirror of paper trades modal) */
+    .lb-winner-btn, .lb-chose-btn {
+        padding: 0.4rem 0.8rem; border-radius: 6px; border: 1px solid var(--border-color);
+        background: transparent; color: var(--text-primary); cursor: pointer;
+        font-weight: 600; font-size: 0.85rem;
+    }
+    .lb-winner-btn:hover, .lb-chose-btn:hover { border-color: var(--accent-primary); }
+    .lb-winner-btn.primary, .lb-chose-btn.primary {
+        background: var(--accent-primary); color: white; border-color: var(--accent-primary);
+    }
+    #lb-toss-modal-cancel, #lb-toss-modal-resolve, #lb-toss-modal-submit, #lb-fetch-crex-xi {
+        padding: 0.5rem 1rem; border-radius: 6px; border: 1px solid var(--border-color);
+        background: transparent; color: var(--text-primary); cursor: pointer;
+        font-weight: 600; font-size: 0.85rem;
+    }
+    #lb-toss-modal-submit.primary {
+        background: var(--accent-primary); color: white; border-color: var(--accent-primary);
+    }
+    #lb-fetch-crex-xi:disabled { opacity: 0.5; cursor: not-allowed; }
+
+    @media (max-width: 800px) {
+        .lb-bet-row { grid-template-columns: 1fr 1fr; gap: 0.3rem; font-size: 0.75rem; padding: 0.3rem 0; }
+        .lb-bet-row .num { text-align: left; }
+    }
 </style>
 {% endblock %}
 {% block content %}
 <div class="lb-header">
     <h1>Live Betting</h1>
-    <div style="display: flex; gap: 0.6rem; align-items: center;">
+    <div style="display: flex; gap: 0.6rem; align-items: center; flex-wrap: wrap;">
+        <span id="lb-poller-badge" class="lb-poller-badge lb-poller-off"
+              title="Status of the auto-toss-detection daemon. When started from this page, the daemon spawns BOTH paper AND live post-toss scans for each detected toss.">Auto-toss: --</span>
+        <button class="lb-poller-toggle" id="lb-poller-toggle"
+                title="Start/stop the auto-toss-detection daemon (starts with --also-live so live bets are placed too).">Start auto-toss</button>
         <div class="lb-mode-toggle" id="mode-toggle">
             <button data-mode="OFF">OFF</button>
             <button data-mode="MANUAL">MANUAL</button>
@@ -88,6 +314,11 @@
 </div>
 
 <div class="lb-wallet-bar" id="wallet-bar" title="Live on-chain USDC balance in the Polymarket proxy wallet (queried via py-clob-client)">
+    <div class="lb-wallet-cell" title="Wallet cash + open positions marked to current CLOB midpoint">
+        <div class="lb-label">Portfolio value</div>
+        <div class="lb-value" id="portfolio-value">--</div>
+        <div class="lb-sub" id="portfolio-value-sub">cash + open positions</div>
+    </div>
     <div class="lb-wallet-cell">
         <div class="lb-label">Polymarket wallet</div>
         <div class="lb-value" id="wallet-balance">--</div>
@@ -110,6 +341,25 @@
     </div>
 </div>
 
+<div class="lb-totals" id="lb-totals" title="Live (real-money) bankroll roll-ups across all enabled strategies">
+    <div class="lb-total-cell">
+        <div class="lb-total-label">Total Bankroll</div>
+        <div class="lb-total-value" id="lb-total-bankroll">--</div>
+    </div>
+    <div class="lb-total-cell">
+        <div class="lb-total-label">Realised P&amp;L</div>
+        <div class="lb-total-value" id="lb-total-pnl">--</div>
+    </div>
+    <div class="lb-total-cell">
+        <div class="lb-total-label">ROI</div>
+        <div class="lb-total-value" id="lb-total-roi">--</div>
+    </div>
+    <div class="lb-total-cell">
+        <div class="lb-total-label">Open Stakes</div>
+        <div class="lb-total-value" id="lb-total-open">--</div>
+    </div>
+</div>
+
 <div class="lb-status-bar" id="status-bar">
     <div class="lb-status-cell"><div class="lb-label">Mode</div><div class="lb-value" id="status-mode">--</div></div>
     <div class="lb-status-cell"><div class="lb-label">Today P&L</div><div class="lb-value" id="status-todays-pl">--</div></div>
@@ -119,6 +369,14 @@
     <div class="lb-status-cell"><div class="lb-label">Deposit cap left</div><div class="lb-value" id="status-cap-deposit">--</div><div class="lb-cap-bar"><span class="lb-cap-bar-fill" id="status-cap-deposit-bar"></span></div></div>
     <div class="lb-status-cell"><div class="lb-label">Settled bets total</div><div class="lb-value" id="status-settled-total">--</div></div>
     <div class="lb-status-cell"><div class="lb-label">Auto markets</div><div class="lb-value" id="status-auto-markets" style="font-size: 0.75rem;">--</div></div>
+</div>
+
+<div class="lb-section">
+    <h2>Bankroll Over Time</h2>
+    <div class="lb-chart-card">
+        <canvas id="lb-bankroll-chart" class="lb-chart" width="900" height="220"></canvas>
+        <div id="lb-chart-legend" style="margin-top:0.5rem; font-size:0.75rem; display:flex; gap:0.8rem; flex-wrap:wrap;"></div>
+    </div>
 </div>
 
 <div class="lb-section">
@@ -146,29 +404,116 @@
 </div>
 
 <div class="lb-section">
-    <h2>Today's bets</h2>
-    <table class="lb-table" id="todays-bets-table">
-        <thead><tr>
-            <th>Time</th><th>Market</th><th>Side</th><th>Size</th>
-            <th>Edge</th><th>Status</th><th>Fill</th><th>P&L</th>
-        </tr></thead>
-        <tbody id="todays-bets-body">
-            <tr><td colspan="8" style="text-align:center; color: var(--text-muted);">Loading...</td></tr>
+    <h2>Upcoming Fixtures - Post-Toss Re-scan
+        <small style="font-weight: 400; color: var(--text-muted); font-size: 0.75rem;">
+            (V3 with PINNED toss + optional XI override; routes through live <code>place_bet()</code>)
+        </small>
+    </h2>
+    <p style="color: var(--text-muted); font-size: 0.8rem; margin: 0.2rem 0 0.5rem 0;">
+        Once the toss happens, click "Toss + Re-scan" to re-sim with the actual toss outcome. Live bets
+        placed via this path are tagged <code>phase='post_toss'</code> in the bet ledger so they're
+        analytically distinct from pre-toss bets. The auto-toss button at the top of the page does
+        this automatically when CREX detects the toss.
+    </p>
+    <table class="lb-fixtures-table" id="lb-fixtures-table">
+        <thead>
+            <tr>
+                <th>Match</th>
+                <th>Format</th>
+                <th id="lb-fixtures-kickoff-th">Kickoff</th>
+                <th>Market (T1 / T2)</th>
+                <th style="text-align:right">Pre-toss live</th>
+                <th style="text-align:right">Post-toss live</th>
+                <th></th>
+            </tr>
+        </thead>
+        <tbody id="lb-fixtures-body">
+            <tr><td colspan="7" style="color:var(--text-muted);text-align:center;padding:1rem">Loading...</td></tr>
         </tbody>
     </table>
 </div>
 
+<!-- Modal for live post-toss form (mirrors paper trades modal) -->
+<div id="lb-toss-modal" style="display:none; position:fixed; inset:0; background:rgba(0,0,0,0.6); z-index:1000; align-items:center; justify-content:center;">
+    <div style="background:var(--bg-secondary); border:1px solid var(--border-color); border-radius:8px; padding:1.2rem; width:680px; max-width:96vw; max-height:90vh; overflow-y:auto;">
+        <h3 style="margin:0 0 0.5rem 0;">Live Post-Toss Re-scan</h3>
+        <p style="color:var(--text-muted); font-size:0.85rem; margin:0 0 0.8rem 0;" id="lb-toss-modal-fixture">--</p>
+        <p style="color:var(--accent-warning); font-size:0.78rem; margin:0 0 0.8rem 0;">
+            This places REAL bets via Polymarket if any qualifying edge is found. The risk gate
+            (per-strategy / per-day / per-bet caps + mode/kill switch) is still enforced.
+        </p>
+
+        <div style="margin-bottom:0.8rem;">
+            <label style="display:block; font-weight:600; font-size:0.85rem; margin-bottom:0.3rem;">Who won the toss?</label>
+            <div id="lb-toss-winner-group" style="display:inline-flex; gap:0.4rem;"></div>
+        </div>
+
+        <div style="margin-bottom:0.8rem;">
+            <label style="display:block; font-weight:600; font-size:0.85rem; margin-bottom:0.3rem;">And chose to:</label>
+            <div style="display:inline-flex; gap:0.4rem;">
+                <button type="button" class="lb-chose-btn" data-value="bat">Bat</button>
+                <button type="button" class="lb-chose-btn" data-value="field">Field</button>
+            </div>
+        </div>
+
+        <details style="margin-bottom:0.8rem; border:1px solid var(--border-color); border-radius:6px; padding:0.5rem;" open>
+            <summary style="cursor:pointer; font-weight:600; font-size:0.85rem; color:var(--text-secondary);">
+                Confirmed Playing XI (one name per line, batting order)
+            </summary>
+            <p style="color:var(--text-muted); font-size:0.75rem; margin:0.5rem 0;">
+                Names will be fuzzy-matched against the team's recent appearances.
+                Click "Fetch from CREX" to auto-populate (~10s render). If left blank, the simulator
+                falls back to the last-3-matches average XI.
+            </p>
+            <div style="margin-bottom:0.5rem;">
+                <button type="button" id="lb-fetch-crex-xi">Fetch XI from CREX</button>
+                <span id="lb-fetch-crex-status" style="margin-left:0.5rem; font-size:0.75rem; color:var(--text-muted);"></span>
+            </div>
+            <div style="display:grid; grid-template-columns:1fr 1fr; gap:0.6rem;">
+                <div>
+                    <label id="lb-xi1-label" style="display:block; font-weight:600; font-size:0.8rem; margin-bottom:0.2rem;">Team 1 XI</label>
+                    <textarea id="lb-xi1-input" rows="11" placeholder="V Kohli&#10;F du Plessis&#10;..." style="width:100%; box-sizing:border-box; background:var(--bg-primary); color:var(--text-primary); border:1px solid var(--border-color); border-radius:4px; padding:0.4rem; font-family:monospace; font-size:0.78rem;"></textarea>
+                </div>
+                <div>
+                    <label id="lb-xi2-label" style="display:block; font-weight:600; font-size:0.8rem; margin-bottom:0.2rem;">Team 2 XI</label>
+                    <textarea id="lb-xi2-input" rows="11" placeholder="" style="width:100%; box-sizing:border-box; background:var(--bg-primary); color:var(--text-primary); border:1px solid var(--border-color); border-radius:4px; padding:0.4rem; font-family:monospace; font-size:0.78rem;"></textarea>
+                </div>
+            </div>
+            <div id="lb-xi-resolved" style="margin-top:0.5rem; font-size:0.75rem;"></div>
+        </details>
+
+        <div id="lb-toss-modal-toast"></div>
+
+        <div style="display:flex; justify-content:flex-end; gap:0.4rem; margin-top:1rem;">
+            <button type="button" id="lb-toss-modal-cancel">Cancel</button>
+            <button type="button" id="lb-toss-modal-resolve">Resolve XI Names</button>
+            <button type="button" id="lb-toss-modal-submit" class="primary">Submit Live Post-Toss Scan</button>
+        </div>
+    </div>
+</div>
+
 <div class="lb-section">
-    <h2>Recent settled bets</h2>
-    <table class="lb-table" id="recent-settled-table">
-        <thead><tr>
-            <th>Date</th><th>Market</th><th>Side</th><th>Size</th>
-            <th>Edge</th><th>Settle</th><th>P&L</th>
-        </tr></thead>
-        <tbody id="recent-settled-body">
-            <tr><td colspan="7" style="text-align:center; color: var(--text-muted);">Loading...</td></tr>
-        </tbody>
-    </table>
+    <div class="lb-section-header">
+        <h2>Open Live Bets <span class="lb-section-subtitle" id="lb-open-count"></span></h2>
+        <div class="lb-section-controls">
+            <div class="lb-filter-chips" id="lb-open-filter-chips"></div>
+        </div>
+    </div>
+    <div id="lb-open-body" class="lb-card-list">
+        <div class="lb-empty">Loading...</div>
+    </div>
+</div>
+
+<div class="lb-section">
+    <div class="lb-section-header">
+        <h2>Recent Settled <span class="lb-section-subtitle" id="lb-settled-count"></span></h2>
+        <div class="lb-section-controls">
+            <div class="lb-filter-chips" id="lb-settled-filter-chips"></div>
+        </div>
+    </div>
+    <div id="lb-settled-body" class="lb-card-list">
+        <div class="lb-empty">Loading...</div>
+    </div>
 </div>
 
 <div class="lb-section">
@@ -243,6 +588,22 @@
         return `<span class="lb-edge-badge ${cls}">${v > 0 ? '+' : ''}${v.toFixed(1)} pp</span>`;
     }
 
+    function fmtTimeToKickoff(kickoff_at) {
+        if (!kickoff_at) return '<span style="color: var(--text-muted);">--</span>';
+        const k = new Date(kickoff_at);
+        if (isNaN(k)) return '<span style="color: var(--text-muted);">--</span>';
+        const diffH = (k - new Date()) / 3_600_000;
+        if (diffH < 0) {
+            // Match already started or settled
+            const mag = Math.abs(diffH);
+            const label = mag < 24 ? `T+${mag.toFixed(1)}h` : `T+${(mag / 24).toFixed(1)}d`;
+            return `<span style="color: var(--text-muted);">${label}</span>`;
+        }
+        if (diffH < 1)   return `<span style="color: var(--accent-warning); font-weight:600;">T-${Math.floor(diffH * 60)}min</span>`;
+        if (diffH < 24)  return `T-${diffH.toFixed(1)}h`;
+        return `T-${(diffH / 24).toFixed(1)}d`;
+    }
+
     function showToast(msg, kind) {
         const t = document.createElement('div');
         t.className = 'lb-toast ' + (kind || 'ok');
@@ -297,6 +658,33 @@
         const r = await fetch('/api/betting/config');
         const status = await r.json();
         updateStatusBar(status);
+    }
+
+    async function fetchPortfolio() {
+        let data;
+        try {
+            const r = await fetch('/api/betting/portfolio');
+            data = await r.json();
+        } catch (err) {
+            document.getElementById('portfolio-value').textContent = 'error';
+            return;
+        }
+        if (!data || data.success === false) {
+            document.getElementById('portfolio-value').textContent = '--';
+            document.getElementById('portfolio-value-sub').textContent = data && data.error ? data.error.slice(0, 40) : 'not configured';
+            return;
+        }
+        document.getElementById('portfolio-value').textContent = fmtUsd(data.portfolio_value_usdc);
+        const cash = data.wallet_cash_usdc;
+        const positions = data.open_positions_market_value_usdc;
+        const n = data.open_positions_count;
+        const unrealised = data.unrealised_pnl_usdc;
+        const unrealisedStr = unrealised !== 0
+            ? ` (${unrealised >= 0 ? '+' : ''}${fmtUsd(unrealised)} open)`
+            : '';
+        const sub = document.getElementById('portfolio-value-sub');
+        sub.textContent = `${fmtUsd(cash)} cash + ${fmtUsd(positions)} in ${n} pos${unrealisedStr}`;
+        sub.className = 'lb-sub ' + (unrealised !== 0 ? plClass(unrealised) : '');
     }
 
     async function fetchWallet() {
@@ -384,49 +772,322 @@
                 </tr>
             `;
         }).join('');
+        updateLiveTotals(rows);
     }
 
-    async function fetchTodaysBets() {
-        const r = await fetch('/api/betting/today');
-        const data = await r.json();
-        const body = document.getElementById('todays-bets-body');
-        if (!data.success || !data.bets || data.bets.length === 0) {
-            body.innerHTML = '<tr><td colspan="8" style="text-align:center; color: var(--text-muted);">No bets placed today.</td></tr>';
+    // Roll-up tiles above the page (mirror of paper trades' pt-totals).
+    // Aggregates the per-strategy rows from /api/betting/strategies into
+    // four headline numbers that match the paper-trades visual pattern.
+    function updateLiveTotals(rows) {
+        if (!rows || !rows.length) {
+            ['lb-total-bankroll','lb-total-pnl','lb-total-roi','lb-total-open']
+                .forEach(id => { document.getElementById(id).textContent = '--'; });
             return;
         }
-        body.innerHTML = data.bets.map(b => `
-            <tr>
-                <td>${(b.proposed_at || '').slice(11, 16)}</td>
-                <td>${b.market_type}</td>
-                <td>${b.side_label || ''}<br/><span style="color: var(--text-muted); font-size:0.7rem;">${b.side}</span></td>
-                <td>${fmtUsd(b.size_usdc)}</td>
-                <td>${edgeBadge(b.edge_pp)}</td>
-                <td>${b.status}</td>
-                <td>${b.fill_price !== null ? Number(b.fill_price).toFixed(3) + ' / ' + fmtUsd(b.fill_size_usdc) : '--'}</td>
-                <td class="${plClass(b.pnl_realised_usdc)}">${b.pnl_realised_usdc !== null ? fmtUsd(b.pnl_realised_usdc) : '--'}</td>
-            </tr>
-        `).join('');
+        const enabled = rows.filter(r => r.enabled);
+        // Use enabled-only for the headline tiles; retired strategies that
+        // still have historical bets shouldn't drag the live ROI number.
+        const sumStart = enabled.reduce((a, r) => a + (r.starting_bankroll_usdc || 0), 0);
+        const sumBank  = enabled.reduce((a, r) => a + (r.current_bankroll_usdc || 0), 0);
+        const sumPnl   = enabled.reduce((a, r) => a + (r.realised_pnl_usdc || 0), 0);
+        const sumOpen  = enabled.reduce((a, r) => a + (r.open_exposure_usdc || 0), 0);
+        const roi = sumStart > 0 ? (sumPnl / sumStart * 100) : 0;
+        const set = (id, value, signed) => {
+            const el = document.getElementById(id);
+            el.textContent = value;
+            el.className = 'lb-total-value' + (signed
+                ? (signed > 0 ? ' positive' : signed < 0 ? ' negative' : '')
+                : '');
+        };
+        set('lb-total-bankroll', fmtUsd(sumBank), sumBank - sumStart);
+        set('lb-total-pnl',      fmtUsd(sumPnl),  sumPnl);
+        set('lb-total-roi',      roi.toFixed(2) + '%', roi);
+        set('lb-total-open',     fmtUsd(sumOpen), 0);
     }
 
-    async function fetchRecentSettled() {
-        const r = await fetch('/api/betting/recent-settled');
-        const data = await r.json();
-        const body = document.getElementById('recent-settled-body');
-        if (!data.success || !data.bets || data.bets.length === 0) {
-            body.innerHTML = '<tr><td colspan="7" style="text-align:center; color: var(--text-muted);">No settled bets yet.</td></tr>';
+    // ---- Card UI helpers (Wave 5.8.3, mirrors /paper-trades) ----
+
+    let openFilterStrategy = 'ALL';
+    let settledFilterStrategy = 'ALL';
+
+    function fixturePrettyName(fixture_key) {
+        const parts = (fixture_key || '').split('-');
+        if (parts.length < 4) return fixture_key || '?';
+        const t1 = (parts[1] || '?').toUpperCase();
+        const t2 = (parts[2] || '?').toUpperCase();
+        return `${t1} vs ${t2}`;
+    }
+
+    function tournamentPrefixLabel(fixture_key) {
+        const prefix = (fixture_key || '').split('-')[0] || '';
+        const map = {
+            cricipl: 'IPL', cricpsl: 'PSL', cricbbl: 'BBL', criclcl: 'LCL',
+            cricwbbl: 'WBBL', cricwpl: 'WPL', crint: 'International',
+            crictbcl: 'Brisbane CL',
+        };
+        return map[prefix] || prefix;
+    }
+
+    // Derive a rough kickoff when the bet's kickoff_at is NULL (pre-migration).
+    // Fall back to the date embedded in the fixture_key slug at 14:00 UTC.
+    function kickoffForBet(b) {
+        if (b.kickoff_at) return b.kickoff_at;
+        const m = (b.fixture_key || '').match(/(\d{4}-\d{2}-\d{2})$/);
+        if (m) return m[1] + 'T14:00:00+00:00';
+        return null;
+    }
+
+    function kickoffBadgeFor(isoKo, forSettled) {
+        if (!isoKo) return {cls: 'lb-ko-pending', label: 'pending'};
+        const ko = new Date(isoKo);
+        if (isNaN(ko)) return {cls: 'lb-ko-pending', label: 'pending'};
+        const deltaMs = ko.getTime() - Date.now();
+        const deltaH = deltaMs / 3_600_000;
+        if (forSettled) {
+            return {cls: 'lb-ko-pending', label: ko.toLocaleDateString(undefined, {month:'short', day:'numeric'})};
+        }
+        if (deltaMs < 0) {
+            const elapsedH = -deltaH;
+            if (elapsedH < 4)  return {cls: 'lb-ko-live',    label: `live, +${Math.floor(elapsedH * 60)}m`};
+            if (elapsedH < 14) return {cls: 'lb-ko-pending', label: `settling (+${Math.round(elapsedH)}h)`};
+            return {cls: 'lb-ko-pending', label: 'awaiting settle'};
+        }
+        if (deltaH < 4)  return {cls: 'lb-ko-imminent', label: `in ${Math.round(deltaH * 60)}m`};
+        if (deltaH < 12) return {cls: 'lb-ko-soon',     label: `in ${deltaH.toFixed(1)}h`};
+        if (deltaH < 48) return {cls: 'lb-ko-future',   label: `in ${deltaH.toFixed(1)}h`};
+        return {cls: 'lb-ko-future', label: `in ${Math.round(deltaH / 24)}d`};
+    }
+
+    function renderFilterChips(containerId, strategies, currentFilter, onSelect) {
+        const c = document.getElementById(containerId);
+        c.innerHTML = '';
+        const totalCount = strategies.reduce((a, s) => a + s.count, 0);
+        const allChip = document.createElement('button');
+        allChip.className = 'lb-chip ' + (currentFilter === 'ALL' ? 'active' : '');
+        allChip.innerHTML = `All<span class="lb-chip-count">${totalCount}</span>`;
+        allChip.addEventListener('click', () => onSelect('ALL'));
+        c.appendChild(allChip);
+        for (const s of strategies) {
+            const chip = document.createElement('button');
+            chip.className = 'lb-chip ' + (currentFilter === s.name ? 'active' : '');
+            chip.innerHTML = `${s.name}<span class="lb-chip-count">${s.count}</span>`;
+            chip.addEventListener('click', () => onSelect(s.name));
+            c.appendChild(chip);
+        }
+    }
+
+    function makeBetRow(b) {
+        const edgeCls = b.edge_pp >= 5 ? 'lb-edge-high' : b.edge_pp >= 2 ? 'lb-edge-medium' : 'lb-edge-low';
+        const settled = b.status === 'settled';
+        const won = b.settle_outcome === 1;
+        const pnl = b.pnl_realised_usdc;
+        const pnlSpan = settled
+            ? `<span class="num ${pnl >= 0 ? 'lb-pl-positive' : 'lb-pl-negative'}">${fmtUsd(pnl)}</span>`
+            : `<span class="num">${fmtUsd(b.size_usdc)}</span>`;
+        const outcome = settled
+            ? `<span class="lb-outcome-pill ${won ? 'lb-outcome-won' : 'lb-outcome-lost'}">${won ? 'WON' : 'LOST'}</span>`
+            : (b.fill_price ? `<span class="num" style="color:var(--text-muted)">${Number(b.fill_price).toFixed(3)}</span>` : `<span class="num" style="color:var(--text-muted)">--</span>`);
+        const timestamp = (settled ? b.settled_at : b.proposed_at || '').slice(5, 16).replace('T', ' ');
+        return `
+            <div class="lb-bet-row">
+                <span class="strat-name">${b.strategy_label || '--'}</span>
+                <span class="side-label">${b.side_label || '--'}</span>
+                <span class="num"><span class="lb-edge-pill ${edgeCls}">+${Number(b.edge_pp).toFixed(1)}pp</span></span>
+                <span class="num">${b.model_prob !== null ? (b.model_prob*100).toFixed(1)+'%' : '--'}</span>
+                <span class="num">${b.market_price_at_proposal !== null ? (b.market_price_at_proposal*100).toFixed(1)+'%' : '--'}</span>
+                <span class="num" style="color:var(--text-muted);font-size:0.72rem">${timestamp}</span>
+                ${pnlSpan}
+                ${outcome}
+            </div>
+        `;
+    }
+
+    // ---- Open Live Bets (grouped by fixture, sorted by kickoff ASC) ----
+    async function fetchOpenBets() {
+        let data;
+        try {
+            const r = await fetch('/api/betting/bets?status=open&limit=200');
+            data = await r.json();
+        } catch (err) {
+            document.getElementById('lb-open-body').innerHTML = '<div class="lb-empty">Error loading open bets</div>';
             return;
         }
-        body.innerHTML = data.bets.map(b => `
-            <tr>
-                <td>${(b.settled_at || '').slice(0, 10)}</td>
-                <td>${b.market_type}</td>
-                <td>${b.side_label || ''} (${b.side})</td>
-                <td>${fmtUsd(b.size_usdc)}</td>
-                <td>${edgeBadge(b.edge_pp)}</td>
-                <td>${b.settle_outcome === 1 ? 'YES' : (b.settle_outcome === 0 ? 'NO' : '--')}</td>
-                <td class="${plClass(b.pnl_realised_usdc)}">${fmtUsd(b.pnl_realised_usdc)}</td>
-            </tr>
-        `).join('');
+        const container = document.getElementById('lb-open-body');
+        const allBets = (data && data.bets) || [];
+        document.getElementById('lb-open-count').textContent = allBets.length
+            ? `\u00b7 ${allBets.length} bets, ${fmtUsd(allBets.reduce((a,b) => a + (b.size_usdc||0), 0))} exposure`
+            : '';
+
+        const stratCounts = {};
+        for (const b of allBets) stratCounts[b.strategy_label] = (stratCounts[b.strategy_label] || 0) + 1;
+        const stratList = Object.entries(stratCounts).sort((a,b) => b[1] - a[1]).map(([name, count]) => ({name, count}));
+        renderFilterChips('lb-open-filter-chips', stratList, openFilterStrategy, (s) => {
+            openFilterStrategy = s; fetchOpenBets();
+        });
+
+        const filtered = openFilterStrategy === 'ALL'
+            ? allBets
+            : allBets.filter(b => b.strategy_label === openFilterStrategy);
+
+        if (!filtered.length) {
+            container.innerHTML = '<div class="lb-empty">No open live bets matching filter</div>';
+            return;
+        }
+
+        const byFixture = {};
+        for (const b of filtered) {
+            const k = b.fixture_key || '?';
+            if (!byFixture[k]) byFixture[k] = [];
+            byFixture[k].push(b);
+        }
+        const fixtures = Object.entries(byFixture).map(([key, bets]) => {
+            const isoKo = kickoffForBet(bets[0]);
+            const koMs = isoKo ? new Date(isoKo).getTime() : Infinity;
+            return {key, bets, koMs};
+        }).sort((a, b) => a.koMs - b.koMs);
+
+        container.innerHTML = '';
+        for (const fx of fixtures) {
+            const isoKo = kickoffForBet(fx.bets[0]);
+            const ko = kickoffBadgeFor(isoKo, false);
+            const totalStake = fx.bets.reduce((a, b) => a + (b.size_usdc || 0), 0);
+            const avgEdge = fx.bets.reduce((a, b) => a + (b.edge_pp || 0), 0) / fx.bets.length;
+            const sides = [...new Set(fx.bets.map(b => b.side_label))];
+            const sideLabel = sides.length === 1 ? sides[0] : `${sides.length} sides`;
+
+            const card = document.createElement('div');
+            card.className = 'lb-card';
+            card.innerHTML = `
+                <div class="lb-card-summary">
+                    <span class="lb-card-chevron">\u25B6</span>
+                    <div class="lb-card-title">
+                        <div class="lb-card-title-main">
+                            ${fixturePrettyName(fx.key)}
+                            <span class="lb-ko-badge ${ko.cls}">${ko.label}</span>
+                            <span style="color:var(--text-muted);font-size:0.7rem;font-weight:400">${tournamentPrefixLabel(fx.key)}</span>
+                        </div>
+                        <div class="lb-card-title-sub">Backing ${sideLabel}</div>
+                    </div>
+                    <div class="lb-card-meta">
+                        <div class="lb-meta-cell"><span class="lb-meta-label">bets</span><span class="lb-meta-value">${fx.bets.length}</span></div>
+                        <div class="lb-meta-cell"><span class="lb-meta-label">stake</span><span class="lb-meta-value">${fmtUsd(totalStake)}</span></div>
+                        <div class="lb-meta-cell"><span class="lb-meta-label">avg edge</span><span class="lb-meta-value">+${avgEdge.toFixed(1)}pp</span></div>
+                    </div>
+                </div>
+                <div class="lb-card-body">
+                    ${fx.bets.map(makeBetRow).join('')}
+                </div>
+            `;
+            card.querySelector('.lb-card-summary').addEventListener('click', () => card.classList.toggle('open'));
+            container.appendChild(card);
+        }
+    }
+
+    // ---- Recent Settled (grouped by day -> fixture -> bet) ----
+    async function fetchSettledBets() {
+        let data;
+        try {
+            const r = await fetch('/api/betting/bets?status=settled&limit=200');
+            data = await r.json();
+        } catch (err) {
+            document.getElementById('lb-settled-body').innerHTML = '<div class="lb-empty">Error loading settled bets</div>';
+            return;
+        }
+        const container = document.getElementById('lb-settled-body');
+        const allBets = (data && data.bets) || [];
+        const totalPnl = allBets.reduce((a, b) => a + (b.pnl_realised_usdc || 0), 0);
+        document.getElementById('lb-settled-count').textContent = allBets.length
+            ? `\u00b7 ${allBets.length} bets, P&L ${fmtUsd(totalPnl)}`
+            : '';
+
+        const stratCounts = {};
+        for (const b of allBets) stratCounts[b.strategy_label] = (stratCounts[b.strategy_label] || 0) + 1;
+        const stratList = Object.entries(stratCounts).sort((a,b) => b[1] - a[1]).map(([name, count]) => ({name, count}));
+        renderFilterChips('lb-settled-filter-chips', stratList, settledFilterStrategy, (s) => {
+            settledFilterStrategy = s; fetchSettledBets();
+        });
+
+        const filtered = settledFilterStrategy === 'ALL'
+            ? allBets
+            : allBets.filter(b => b.strategy_label === settledFilterStrategy);
+
+        if (!filtered.length) {
+            container.innerHTML = '<div class="lb-empty">No settled bets matching filter</div>';
+            return;
+        }
+
+        const byDay = {};
+        for (const b of filtered) {
+            const day = (b.settled_at || '').slice(0, 10);
+            if (!byDay[day]) byDay[day] = {};
+            const fk = b.fixture_key || '?';
+            if (!byDay[day][fk]) byDay[day][fk] = [];
+            byDay[day][fk].push(b);
+        }
+        const days = Object.keys(byDay).sort().reverse();
+
+        container.innerHTML = '';
+        days.forEach((day, dayIdx) => {
+            const fixtures = byDay[day];
+            const allDayBets = Object.values(fixtures).flat();
+            const dayPnl = allDayBets.reduce((a, b) => a + (b.pnl_realised_usdc || 0), 0);
+            const wins = allDayBets.filter(b => b.settle_outcome === 1).length;
+            const losses = allDayBets.length - wins;
+            const dayDate = new Date(day + 'T00:00:00');
+            const dayLabel = dayDate.toLocaleDateString(undefined, {weekday:'short', month:'short', day:'numeric'});
+
+            const card = document.createElement('div');
+            card.className = 'lb-card lb-day-card' + (dayIdx === 0 ? ' open' : '');
+            card.innerHTML = `
+                <div class="lb-card-summary">
+                    <span class="lb-card-chevron">\u25B6</span>
+                    <div class="lb-card-title">
+                        <div class="lb-card-title-main">
+                            ${dayLabel}
+                            <span style="color:var(--text-muted);font-weight:400;font-size:0.78rem">${day}</span>
+                        </div>
+                    </div>
+                    <div class="lb-card-meta">
+                        <div class="lb-meta-cell"><span class="lb-meta-label">record</span><span class="lb-meta-value">${wins}W ${losses}L</span></div>
+                        <div class="lb-meta-cell"><span class="lb-meta-label">bets</span><span class="lb-meta-value">${allDayBets.length}</span></div>
+                        <div class="lb-meta-cell"><span class="lb-meta-label">P&amp;L</span><span class="lb-meta-value ${dayPnl >= 0 ? 'positive' : 'negative'}">${fmtUsd(dayPnl)}</span></div>
+                    </div>
+                </div>
+                <div class="lb-card-body"></div>
+            `;
+            const body = card.querySelector('.lb-card-body');
+            const fxList = Object.entries(fixtures).map(([fk, bets]) => {
+                const pnl = bets.reduce((a, b) => a + (b.pnl_realised_usdc || 0), 0);
+                return {fk, bets, pnl};
+            }).sort((a, b) => b.pnl - a.pnl);
+
+            for (const fx of fxList) {
+                const fxWins = fx.bets.filter(b => b.settle_outcome === 1).length;
+                const fxLosses = fx.bets.length - fxWins;
+                const fxRow = document.createElement('div');
+                fxRow.className = 'lb-fixture-row';
+                fxRow.innerHTML = `
+                    <span class="lb-card-chevron">\u25B6</span>
+                    <div class="lb-fixture-row-head">
+                        <span class="lb-fixture-name">${fixturePrettyName(fx.fk)}</span>
+                        <span class="lb-fixture-tag">${tournamentPrefixLabel(fx.fk)}</span>
+                    </div>
+                    <div class="lb-fixture-meta">
+                        <span style="color:var(--text-muted)">${fxWins}W ${fxLosses}L</span>
+                        <span class="${fx.pnl >= 0 ? 'lb-pl-positive' : 'lb-pl-negative'}" style="font-weight:600">${fmtUsd(fx.pnl)}</span>
+                    </div>
+                `;
+                const betList = document.createElement('div');
+                betList.className = 'lb-fixture-bets';
+                betList.innerHTML = fx.bets.map(makeBetRow).join('');
+                fxRow.addEventListener('click', () => fxRow.classList.toggle('open'));
+                body.appendChild(fxRow);
+                body.appendChild(betList);
+            }
+
+            card.querySelector('.lb-card-summary').addEventListener('click', () => card.classList.toggle('open'));
+            container.appendChild(card);
+        });
     }
 
     document.getElementById('mode-toggle').addEventListener('click', async (e) => {
@@ -553,18 +1214,563 @@
         }
     }
 
+    // ---- Bankroll Over Time Chart (Wave 5.8.3) ----
+    async function loadBankrollChart() {
+        try {
+            const r = await fetch('/api/betting/bankroll-history');
+            const d = await r.json();
+            if (!d.success) return;
+            const history = d.history || {};
+            const canvas = document.getElementById('lb-bankroll-chart');
+            const ctx = canvas.getContext('2d');
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+            const seriesAll = Object.entries(history);
+
+            // Find global time range from settled bets
+            let tMinMs = Infinity, tMaxMs = -Infinity;
+            let yMin = Infinity, yMax = -Infinity;
+            let nSettledTotal = 0;
+            for (const [, pts] of seriesAll) {
+                for (const p of pts) {
+                    if (p.bankroll < yMin) yMin = p.bankroll;
+                    if (p.bankroll > yMax) yMax = p.bankroll;
+                    if (p.timestamp) {
+                        nSettledTotal++;
+                        const t = Date.parse(p.timestamp);
+                        if (!isNaN(t)) {
+                            if (t < tMinMs) tMinMs = t;
+                            if (t > tMaxMs) tMaxMs = t;
+                        }
+                    }
+                }
+            }
+            if (nSettledTotal === 0) {
+                ctx.fillStyle = 'rgba(150,150,150,0.7)';
+                ctx.font = '12px sans-serif';
+                ctx.fillText('No settled live bets yet (bankroll = $100 per strategy)',
+                             12, canvas.height / 2);
+                return;
+            }
+            // Round to 12-hour boundaries, extend to "now"
+            const tNowMs = Date.now();
+            if (tMaxMs < tNowMs) tMaxMs = tNowMs;
+            const TWELVE_H_MS = 12 * 60 * 60 * 1000;
+            tMinMs = Math.floor(tMinMs / TWELVE_H_MS) * TWELVE_H_MS;
+            tMaxMs = Math.ceil(tMaxMs / TWELVE_H_MS) * TWELVE_H_MS;
+            if (tMaxMs - tMinMs < TWELVE_H_MS) tMaxMs = tMinMs + TWELVE_H_MS;
+
+            // Y range padded
+            if (yMin === yMax) { yMin -= 10; yMax += 10; }
+            const yPad = (yMax - yMin) * 0.15;
+            yMin -= yPad; yMax += yPad;
+
+            const colors = ['#10b981', '#f59e0b', '#a5b4fc', '#ef4444', '#06b6d4', '#fbbf24', '#8b5cf6'];
+            const padL = 56, padR = 80, padT = 14, padB = 30;
+            const W = canvas.width, H = canvas.height;
+            const plotW = W - padL - padR;
+            const plotH = H - padT - padB;
+
+            const xOf = (tMs) => padL + ((tMs - tMinMs) / (tMaxMs - tMinMs)) * plotW;
+            const yOf = (v) => padT + plotH - ((v - yMin) / (yMax - yMin)) * plotH;
+
+            // Y gridlines + $ labels
+            ctx.strokeStyle = 'rgba(120,120,120,0.2)';
+            ctx.fillStyle = 'rgba(120,120,120,0.75)';
+            ctx.font = '10px sans-serif';
+            ctx.lineWidth = 1;
+            for (let i = 0; i <= 4; i++) {
+                const y = padT + (plotH / 4) * i;
+                ctx.beginPath();
+                ctx.moveTo(padL, y);
+                ctx.lineTo(W - padR, y);
+                ctx.stroke();
+                const v = yMax - ((yMax - yMin) / 4) * i;
+                ctx.fillText('$' + v.toFixed(0), 6, y + 3);
+            }
+
+            // X tick labels - one tick per 12-hour boundary
+            const nBuckets = Math.round((tMaxMs - tMinMs) / TWELVE_H_MS);
+            const labelEvery = Math.max(1, Math.ceil(nBuckets / 8));
+            for (let i = 0; i <= nBuckets; i++) {
+                const tMs = tMinMs + i * TWELVE_H_MS;
+                const x = padL + ((tMs - tMinMs) / (tMaxMs - tMinMs)) * plotW;
+                // Vertical gridline
+                ctx.strokeStyle = 'rgba(120,120,120,0.12)';
+                ctx.lineWidth = 1;
+                ctx.beginPath();
+                ctx.moveTo(x, padT);
+                ctx.lineTo(x, padT + plotH);
+                ctx.stroke();
+                if (i % labelEvery !== 0) continue;
+                const date = new Date(tMs);
+                const lbl = date.toLocaleString(undefined, {
+                    month: 'short', day: 'numeric',
+                    hour: '2-digit', minute: '2-digit', hour12: false
+                });
+                ctx.fillStyle = 'rgba(120,120,120,0.7)';
+                ctx.font = '10px sans-serif';
+                ctx.fillText(lbl, x - 32, H - 6);
+            }
+
+            // Reference line at starting bankroll (typically $100)
+            const startingBankroll = seriesAll.length > 0 && seriesAll[0][1].length > 0 
+                ? seriesAll[0][1][0].bankroll 
+                : 100;
+            ctx.strokeStyle = 'rgba(120,120,120,0.5)';
+            ctx.setLineDash([4, 4]);
+            ctx.beginPath();
+            const yStart = yOf(startingBankroll);
+            ctx.moveTo(padL, yStart);
+            ctx.lineTo(W - padR, yStart);
+            ctx.stroke();
+            ctx.setLineDash([]);
+
+            // Build one continuous line per strategy
+            const legend = document.getElementById('lb-chart-legend');
+            legend.innerHTML = '';
+            seriesAll.forEach(([name, pts], idx) => {
+                if (!pts.length) return;
+                const color = colors[idx % colors.length];
+                ctx.strokeStyle = color;
+                ctx.fillStyle = color;
+                ctx.lineWidth = 2;
+
+                // Build (xMs, bankroll) points
+                const plotPts = [{xMs: tMinMs, b: pts[0].bankroll}];
+                for (let i = 1; i < pts.length; i++) {
+                    const t = Date.parse(pts[i].timestamp);
+                    if (isNaN(t)) continue;
+                    plotPts.push({xMs: t, b: pts[i].bankroll, raw: pts[i]});
+                }
+                // Final extend to "now"
+                const lastBankroll = pts[pts.length - 1].bankroll;
+                plotPts.push({xMs: tMaxMs, b: lastBankroll});
+
+                ctx.beginPath();
+                plotPts.forEach((p, i) => {
+                    const x = xOf(p.xMs);
+                    const y = yOf(p.b);
+                    if (i === 0) ctx.moveTo(x, y);
+                    else ctx.lineTo(x, y);
+                });
+                ctx.stroke();
+
+                // Dots on each settled-bet point
+                for (const p of plotPts) {
+                    if (!p.raw) continue;
+                    ctx.beginPath();
+                    ctx.arc(xOf(p.xMs), yOf(p.b), 3, 0, Math.PI * 2);
+                    ctx.fill();
+                }
+
+                // Right-edge label
+                const labelY = yOf(lastBankroll);
+                ctx.fillStyle = color;
+                ctx.font = '10px sans-serif';
+                ctx.fillText(name, W - padR + 4, labelY + 3);
+
+                // Legend chip
+                const chip = document.createElement('span');
+                chip.innerHTML = `<span style="display:inline-block;width:12px;height:12px;background:${color};border-radius:3px;vertical-align:middle"></span> <span style="vertical-align:middle">${name} ($${lastBankroll.toFixed(2)})</span>`;
+                chip.style.color = 'var(--text-secondary)';
+                legend.appendChild(chip);
+            });
+
+            // X-axis title
+            ctx.fillStyle = 'rgba(120,120,120,0.5)';
+            ctx.fillText('time →', W / 2 - 16, H - 18);
+        } catch (e) {
+            console.error('loadBankrollChart failed:', e);
+        }
+    }
+
+    // =====================================================================
+    // Upcoming fixtures + Live post-toss modal (mirrors paper trades).
+    // The auto-toss daemon is shared with paper — we just toggle the
+    // `also_live` flag when starting it from this page so the same
+    // daemon drives both paper and live post-toss spawns.
+    // =====================================================================
+
+    let lbUpcomingFixtures = [];
+    let lbModalState = {
+        fixture: null,
+        tossWinner: null,         // 'team1' | 'team2'
+        choseTo: null,            // 'bat' | 'field'
+        team1XiResolved: [],      // [{input, matched, player_id, name}, ...]
+        team2XiResolved: [],
+    };
+
+    // Format a UTC ISO string in the user's selected timezone.
+    // `currentTimezone` is the global from base.html (Australia/Melbourne by
+    // default); the navbar timezone selector dispatches 'timezoneChanged'
+    // when the user picks a different one and we re-render the table on
+    // that event below.
+    function lbFormatKickoff(isoUtc) {
+        if (!isoUtc) return '--';
+        try {
+            const dt = new Date(isoUtc);
+            if (isNaN(dt.getTime())) return isoUtc.slice(0, 16).replace('T', ' ');
+            return dt.toLocaleString('en-AU', {
+                timeZone: currentTimezone,
+                weekday: 'short', day: 'numeric', month: 'short',
+                hour: '2-digit', minute: '2-digit', hour12: false,
+            });
+        } catch (e) {
+            return isoUtc.slice(0, 16).replace('T', ' ');
+        }
+    }
+
+    // Short timezone abbreviation (AEST / IST / GMT etc.) for the column header.
+    function lbTimezoneAbbr() {
+        try {
+            const parts = new Date().toLocaleString('en-AU', {
+                timeZone: currentTimezone, timeZoneName: 'short',
+            }).split(' ');
+            return parts[parts.length - 1];
+        } catch (e) { return ''; }
+    }
+
+    async function fetchUpcomingFixtures() {
+        let data;
+        try {
+            const r = await fetch('/api/betting/upcoming?hours_ahead=72');
+            data = await r.json();
+        } catch (err) {
+            document.getElementById('lb-fixtures-body').innerHTML =
+                '<tr><td colspan="7" style="color:var(--text-muted);text-align:center;padding:1rem">Error loading fixtures</td></tr>';
+            return;
+        }
+        lbUpcomingFixtures = ((data && data.fixtures) || [])
+            .filter(f => f.team1_id && f.team2_id && f.has_moneyline);
+        renderUpcomingFixtures();
+    }
+
+    // Pure render from the in-memory `lbUpcomingFixtures` cache. Called by
+    // both `fetchUpcomingFixtures` (after a network round-trip) and the
+    // 'timezoneChanged' listener (no network — just re-format the times).
+    function renderUpcomingFixtures() {
+        const tbody = document.getElementById('lb-fixtures-body');
+        const koHeader = document.getElementById('lb-fixtures-kickoff-th');
+        if (koHeader) {
+            const tz = lbTimezoneAbbr();
+            koHeader.textContent = tz ? `Kickoff (${tz})` : 'Kickoff';
+        }
+        if (!lbUpcomingFixtures.length) {
+            tbody.innerHTML = '<tr><td colspan="7" style="color:var(--text-muted);text-align:center;padding:1rem">No mappable upcoming fixtures with moneyline</td></tr>';
+            return;
+        }
+        tbody.innerHTML = '';
+        for (const fx of lbUpcomingFixtures) {
+            const t1Px = (fx.moneyline_outcomes || []).find(o => o.label === fx.team1)?.last_price;
+            const t2Px = (fx.moneyline_outcomes || []).find(o => o.label === fx.team2)?.last_price;
+            const tr = document.createElement('tr');
+            tr.innerHTML = `
+                <td><strong>${fx.team1}</strong> vs <strong>${fx.team2}</strong>
+                    <br><span style="color:var(--text-muted);font-size:0.7rem">${fx.tournament_name || ''}</span></td>
+                <td>${fx.format} ${fx.gender}</td>
+                <td title="UTC: ${(fx.scheduled_start_utc || '').replace('T', ' ').slice(0, 16)}">${lbFormatKickoff(fx.scheduled_start_utc)}</td>
+                <td>${typeof t1Px === 'number' ? (t1Px*100).toFixed(1)+'c' : '--'} / ${typeof t2Px === 'number' ? (t2Px*100).toFixed(1)+'c' : '--'}</td>
+                <td style="text-align:right">${fx.pre_toss_real_bets}</td>
+                <td style="text-align:right">${fx.post_toss_real_bets}</td>
+                <td><button class="lb-toss-trigger" data-fixture-key="${fx.fixture_key}">Toss + Re-scan</button></td>
+            `;
+            tbody.appendChild(tr);
+        }
+        tbody.querySelectorAll('.lb-toss-trigger').forEach(btn => {
+            btn.addEventListener('click', () => openLbTossModal(btn.dataset.fixtureKey));
+        });
+    }
+
+    // Re-render kickoff times when the navbar timezone changes (no refetch).
+    window.addEventListener('timezoneChanged', () => renderUpcomingFixtures());
+
+    function openLbTossModal(fixtureKey) {
+        const fx = lbUpcomingFixtures.find(f => f.fixture_key === fixtureKey);
+        if (!fx) return;
+        lbModalState = {fixture: fx, tossWinner: null, choseTo: null, team1XiResolved: [], team2XiResolved: []};
+        document.getElementById('lb-toss-modal-fixture').textContent =
+            `${fx.team1} vs ${fx.team2} (${fx.format} ${fx.gender}, ${fx.tournament_name})`;
+        const wg = document.getElementById('lb-toss-winner-group');
+        wg.innerHTML = `
+            <button type="button" class="lb-winner-btn" data-value="team1">${fx.team1}</button>
+            <button type="button" class="lb-winner-btn" data-value="team2">${fx.team2}</button>
+        `;
+        wg.querySelectorAll('.lb-winner-btn').forEach(b => b.addEventListener('click', () => {
+            lbModalState.tossWinner = b.dataset.value;
+            wg.querySelectorAll('.lb-winner-btn').forEach(x => x.classList.toggle('primary', x === b));
+        }));
+        document.querySelectorAll('.lb-chose-btn').forEach(b => {
+            b.classList.remove('primary');
+            b.onclick = () => {
+                lbModalState.choseTo = b.dataset.value;
+                document.querySelectorAll('.lb-chose-btn').forEach(x => x.classList.toggle('primary', x === b));
+            };
+        });
+        document.getElementById('lb-xi1-label').textContent = `${fx.team1} XI (paste names)`;
+        document.getElementById('lb-xi2-label').textContent = `${fx.team2} XI (paste names)`;
+        document.getElementById('lb-xi1-input').value = '';
+        document.getElementById('lb-xi2-input').value = '';
+        document.getElementById('lb-xi-resolved').innerHTML = '';
+        document.getElementById('lb-toss-modal-toast').innerHTML = '';
+        document.getElementById('lb-fetch-crex-status').textContent = '';
+        document.getElementById('lb-toss-modal').style.display = 'flex';
+    }
+
+    function closeLbTossModal() {
+        document.getElementById('lb-toss-modal').style.display = 'none';
+    }
+
+    async function lbResolveXiNames() {
+        const fx = lbModalState.fixture;
+        if (!fx) return;
+        const t1Names = document.getElementById('lb-xi1-input').value.split('\n').map(s => s.trim()).filter(Boolean);
+        const t2Names = document.getElementById('lb-xi2-input').value.split('\n').map(s => s.trim()).filter(Boolean);
+        if (!t1Names.length && !t2Names.length) {
+            document.getElementById('lb-xi-resolved').innerHTML =
+                '<span style="color:var(--text-muted)">No XI names entered. Submit will use recent-XI proxy.</span>';
+            return;
+        }
+        // Reuse the paper resolve-xi endpoint — same DB query, scoped to team_id/format/gender.
+        const fetchOne = async (teamId, names) => {
+            if (!names.length) return [];
+            const r = await fetch('/api/paper/resolve-xi', {
+                method: 'POST', headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({team_id: teamId, format: fx.format, gender: fx.gender, names: names}),
+            });
+            const d = await r.json();
+            return d.resolved || [];
+        };
+        const [t1r, t2r] = await Promise.all([
+            fetchOne(fx.team1_id, t1Names),
+            fetchOne(fx.team2_id, t2Names),
+        ]);
+        lbModalState.team1XiResolved = t1r;
+        lbModalState.team2XiResolved = t2r;
+        const renderResolved = (label, lst) => {
+            if (!lst.length) return '';
+            const matched = lst.filter(x => x.matched).length;
+            const rows = lst.map(x => x.matched
+                ? `<span style="color:var(--accent-primary)">\u2713 ${x.input} \u2192 ${x.name} (id ${x.player_id})</span>`
+                : `<span style="color:#ef4444">\u2717 ${x.input} - no match</span>`
+            ).join('<br>');
+            return `<div style="margin:0.4rem 0;"><strong>${label}</strong> (${matched}/${lst.length} matched):<br>${rows}</div>`;
+        };
+        document.getElementById('lb-xi-resolved').innerHTML =
+            renderResolved(fx.team1, t1r) + renderResolved(fx.team2, t2r);
+    }
+
+    async function lbFetchCrexXi() {
+        const fx = lbModalState.fixture;
+        if (!fx) return;
+        const btn = document.getElementById('lb-fetch-crex-xi');
+        const status = document.getElementById('lb-fetch-crex-status');
+        btn.disabled = true;
+        const startedAt = Date.now();
+        const tick = setInterval(() => {
+            status.textContent = `Rendering CREX page... ${Math.round((Date.now() - startedAt) / 1000)}s`;
+        }, 1000);
+        try {
+            // Reuse the paper CREX fetcher — same Playwright render, identical output.
+            const r = await fetch('/api/paper/fetch-crex-xi', {
+                method: 'POST', headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({fixture_key: fx.fixture_key}),
+            });
+            const d = await r.json();
+            if (!d.success) throw new Error(d.error || 'CREX fetch failed');
+            const c = d.crex || {};
+            document.getElementById('lb-xi1-input').value = (c.team1_xi || []).join('\n');
+            document.getElementById('lb-xi2-input').value = (c.team2_xi || []).join('\n');
+            const t1n = (c.team1_xi || []).length;
+            const t2n = (c.team2_xi || []).length;
+            status.innerHTML = `<span style="color:var(--accent-primary)">\u2713 CREX returned ${t1n} for ${fx.team1}, ${t2n} for ${fx.team2}.</span> Auto-resolving...`;
+            await lbResolveXiNames();
+        } catch (e) {
+            status.innerHTML = `<span style="color:#ef4444">${e.message}</span>`;
+        } finally {
+            clearInterval(tick);
+            btn.disabled = false;
+        }
+    }
+
+    async function lbSubmitTossScan() {
+        const fx = lbModalState.fixture;
+        const toast = document.getElementById('lb-toss-modal-toast');
+        toast.innerHTML = '';
+        if (!fx) return;
+        if (!lbModalState.tossWinner || !lbModalState.choseTo) {
+            toast.innerHTML = '<div class="lb-toast error">Pick toss winner and chose-to first.</div>';
+            return;
+        }
+        const t1Names = document.getElementById('lb-xi1-input').value.split('\n').map(s => s.trim()).filter(Boolean);
+        const t2Names = document.getElementById('lb-xi2-input').value.split('\n').map(s => s.trim()).filter(Boolean);
+        if ((t1Names.length || t2Names.length)
+            && !lbModalState.team1XiResolved.length && !lbModalState.team2XiResolved.length) {
+            await lbResolveXiNames();
+        }
+        const t1Ids = lbModalState.team1XiResolved.filter(x => x.matched).map(x => x.player_id);
+        const t2Ids = lbModalState.team2XiResolved.filter(x => x.matched).map(x => x.player_id);
+        if ((t1Names.length && t1Ids.length < 11) || (t2Names.length && t2Ids.length < 11)) {
+            toast.innerHTML = `<div class="lb-toast error">Need 11 matched names per team to override (got ${t1Ids.length}/${t1Names.length} for ${fx.team1}, ${t2Ids.length}/${t2Names.length} for ${fx.team2}). Fix names or leave blank to use recent-XI proxy.</div>`;
+            return;
+        }
+        const body = {
+            fixture_key: fx.fixture_key,
+            toss_winner: lbModalState.tossWinner,
+            chose_to: lbModalState.choseTo,
+        };
+        if (t1Ids.length === 11) body.team1_xi = t1Ids;
+        if (t2Ids.length === 11) body.team2_xi = t2Ids;
+
+        toast.innerHTML = '<div class="lb-toast ok">Submitting LIVE post-toss scan...</div>';
+        try {
+            const r = await fetch('/api/betting/post-toss-scan', {
+                method: 'POST', headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify(body),
+            });
+            const d = await r.json();
+            if (!d.success) throw new Error(d.error || 'submit failed');
+            toast.innerHTML = `<div class="lb-toast ok">Started in background (pid ${d.pid}). Polling for completion...</div>`;
+            // Poll the live post-toss status endpoint until summary appears
+            let polls = 0;
+            const interval = setInterval(async () => {
+                polls++;
+                if (polls > 24) {  // 24 * 5s = 2min cap
+                    clearInterval(interval);
+                    toast.innerHTML += '<div class="lb-toast error">Timed out waiting. Check logs/live_post_toss.log.</div>';
+                    return;
+                }
+                const sr = await fetch('/api/betting/post-toss-scan/status').then(r => r.json()).catch(() => null);
+                if (sr && !sr.running) {
+                    clearInterval(interval);
+                    const summaryMatch = (sr.tail || '').match(/LIVE POST-TOSS SCAN SUMMARY[\s\S]*$/);
+                    toast.innerHTML += `<div class="lb-toast ok">Done. Refreshing live data.<br><pre style="font-size:0.7rem;color:var(--text-muted);max-height:200px;overflow:auto">${(summaryMatch?.[0] || '').replace(/[<>]/g, '')}</pre></div>`;
+                    await fetchOpenBets();
+                    await fetchSettledBets();
+                    await fetchStrategies();
+                    await fetchUpcomingFixtures();
+                }
+            }, 5000);
+        } catch (e) {
+            toast.innerHTML = `<div class="lb-toast error">${e.message}</div>`;
+        }
+    }
+
+    document.getElementById('lb-toss-modal-cancel').addEventListener('click', closeLbTossModal);
+    document.getElementById('lb-toss-modal-resolve').addEventListener('click', lbResolveXiNames);
+    document.getElementById('lb-toss-modal-submit').addEventListener('click', lbSubmitTossScan);
+    document.getElementById('lb-fetch-crex-xi').addEventListener('click', lbFetchCrexXi);
+
+    // ---- Auto-toss daemon status + control (shared with paper) ----
+    let lbPollerCurrentlyRunning = false;
+    function lbTimeAgo(isoStr) {
+        if (!isoStr) return '';
+        const ms = Date.now() - new Date(isoStr).getTime();
+        if (ms < 0 || isNaN(ms)) return '';
+        const s = Math.round(ms / 1000);
+        if (s < 60) return s + 's ago';
+        if (s < 3600) return Math.round(s / 60) + 'm ago';
+        return Math.round(s / 3600) + 'h ago';
+    }
+    async function lbFetchPollerStatus() {
+        try {
+            const r = await fetch('/api/paper/auto-poller/status');
+            const d = await r.json();
+            const badge = document.getElementById('lb-poller-badge');
+            const btn = document.getElementById('lb-poller-toggle');
+            if (!d.success) {
+                badge.className = 'lb-poller-badge lb-poller-off';
+                badge.textContent = 'Auto-toss: ?';
+                lbPollerCurrentlyRunning = false;
+                btn.textContent = 'Start auto-toss';
+                return;
+            }
+            lbPollerCurrentlyRunning = d.running;
+            const sd = d.status_data || {};
+            const lastWritten = sd.written_at_utc;
+            const ago = lastWritten ? lbTimeAgo(lastWritten) : '';
+            const stale = lastWritten && (Date.now() - new Date(lastWritten).getTime() > 5 * 60 * 1000);
+            const liveTag = sd.also_live ? '+live' : 'paper-only';
+            if (d.running && !stale) {
+                badge.className = 'lb-poller-badge lb-poller-on';
+                const liveSpawns = sd.live_spawns_total != null ? sd.live_spawns_total : 0;
+                const paperSpawns = sd.spawns_total != null ? sd.spawns_total : 0;
+                badge.textContent = `Auto-toss: ON (${liveTag}, iter ${sd.iter_count || 0}, ${paperSpawns}p / ${liveSpawns}L spawned, last ${ago})`;
+                btn.textContent = 'Stop auto-toss';
+            } else if (d.running && stale) {
+                badge.className = 'lb-poller-badge lb-poller-stale';
+                badge.textContent = `Auto-toss: stale (${liveTag}, last ${ago})`;
+                btn.textContent = 'Stop auto-toss';
+            } else {
+                badge.className = 'lb-poller-badge lb-poller-off';
+                badge.textContent = 'Auto-toss: OFF';
+                btn.textContent = 'Start auto-toss';
+            }
+        } catch (e) { /* keep prior state on transient failure */ }
+    }
+    document.getElementById('lb-poller-toggle').addEventListener('click', async (ev) => {
+        const btn = ev.target;
+        btn.disabled = true;
+        try {
+            if (lbPollerCurrentlyRunning) {
+                const r = await fetch('/api/paper/auto-poller/stop', {method: 'POST'});
+                const d = await r.json();
+                if (d.success && d.stopped) {
+                    showToast(`Auto-toss daemon stopped (pid ${d.pid}).`, 'ok');
+                } else {
+                    showToast(`Stop returned: ${d.reason || JSON.stringify(d)}`, 'error');
+                }
+            } else {
+                // Start with also_live=true so detected tosses spawn BOTH
+                // paper and live post-toss scans. The live half respects
+                // BETTING_MODE / kill switch internally.
+                const r = await fetch('/api/paper/auto-poller/start', {
+                    method: 'POST', headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({
+                        poll_interval: 90, lookback_min: 45,
+                        lookahead_min: 30, also_live: true,
+                    }),
+                });
+                const d = await r.json();
+                if (d.success) {
+                    if (d.already_running) {
+                        showToast(`Daemon already running (pid ${d.pid}). Toggle from /paper-trades to change config.`, 'ok');
+                    } else {
+                        showToast(`Auto-toss daemon started with --also-live (pid ${d.pid}).`, 'ok');
+                    }
+                } else {
+                    showToast(`Start failed: ${d.error}`, 'error');
+                }
+            }
+            await lbFetchPollerStatus();
+        } catch (e) {
+            showToast(e.message, 'error');
+        } finally {
+            btn.disabled = false;
+        }
+    });
+
     fetchStatus();
     fetchWallet();
+    fetchPortfolio();
     fetchStrategies();
-    fetchTodaysBets();
-    fetchRecentSettled();
+    fetchOpenBets();
+    fetchSettledBets();
     fetchDashboard();
+    loadBankrollChart();
+    fetchUpcomingFixtures();
+    lbFetchPollerStatus();
     setInterval(fetchStatus, 10000);
     // Wallet balance hits Polymarket's API on each call; 60s is plenty.
     setInterval(fetchWallet, 60000);
+    // Portfolio queries CLOB midpoints on top of wallet balance; 60s is plenty.
+    setInterval(fetchPortfolio, 60000);
     setInterval(fetchStrategies, 30000);
-    setInterval(fetchTodaysBets, 30000);
-    setInterval(fetchRecentSettled, 60000);
+    setInterval(fetchOpenBets, 30000);
+    setInterval(fetchSettledBets, 60000);
     setInterval(fetchDashboard, 60000);
+    setInterval(loadBankrollChart, 60000);
+    setInterval(fetchUpcomingFixtures, 60000);
+    setInterval(lbFetchPollerStatus, 15000);
 </script>
 {% endblock %}

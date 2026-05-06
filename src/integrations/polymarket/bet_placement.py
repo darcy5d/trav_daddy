@@ -51,6 +51,7 @@ def place_bet(
     xi_signature: Optional[str] = None,
     toss_winner_team_id: Optional[int] = None,
     toss_chose_to: Optional[str] = None,
+    kickoff_at: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Run risk gate + place market order + insert/update bet ledger row.
 
@@ -98,8 +99,8 @@ def place_bet(
                 side, size_usdc, fees_estimated_usdc,
                 status, mode, bet_kind, strategy_label,
                 bankroll_at_proposal, phase, xi_signature,
-                toss_winner_team_id, toss_chose_to
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'proposed', ?, 'real', ?, ?, ?, ?, ?, ?)
+                toss_winner_team_id, toss_chose_to, kickoff_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'proposed', ?, 'real', ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 proposed_at, match_id, fixture_key, market_type,
@@ -108,7 +109,7 @@ def place_bet(
                 side.upper(), size_usdc, fees_est,
                 requested_mode, strategy_label,
                 bankroll_at_proposal, phase, xi_signature,
-                toss_winner_team_id, toss_chose_to,
+                toss_winner_team_id, toss_chose_to, kickoff_at,
             ),
         )
         bet_id = cur.lastrowid

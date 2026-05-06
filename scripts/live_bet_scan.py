@@ -535,6 +535,7 @@ def scan_and_place_live_bets(
                 })
                 continue
 
+            kickoff_iso = kickoff.isoformat() if kickoff else None
             try:
                 result = place_bet(
                     fixture_key=fix["fixture_key"],
@@ -551,6 +552,7 @@ def scan_and_place_live_bets(
                     strategy_label=strat.name,
                     bankroll_at_proposal=bankroll_now,
                     phase="pre_toss",
+                    kickoff_at=kickoff_iso,
                 )
             except Exception as exc:
                 logger.error(f"    [{strat.name}] place_bet raised: {exc}")

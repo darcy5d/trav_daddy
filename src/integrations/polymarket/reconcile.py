@@ -8,9 +8,19 @@ Resolution detection (in priority order):
   1. Gamma /markets/{id} returns `closed: true` + `outcomePrices`.
      This is the canonical resolution signal - clean, deterministic,
      sets outcomePrices to exact ["0","1"] or ["1","0"].
-  2. CLOB /prices-history shows last_price <= 0.02 or >= 0.98 AND the
-     proposal was at least 6h ago. Fallback for markets where Gamma is
-     lagging or the market_id wasn't recorded.
+  2. CLOB /prices-history shows last_price <= SETTLED_PRICE_LOW or
+     >= SETTLED_PRICE_HIGH AND enough real time has passed since
+     scheduled kickoff for the match to definitely be over (per-format
+     duration). Fallback for markets where Gamma is lagging or the
+     market_id wasn't recorded.
+
+The kickoff gate exists because thin-volume markets (women's
+internationals, U19, lower-tier T20s) routinely see in-play price
+spikes past 0.99 the moment one side gets on top. Without the kickoff
+buffer the reconciler would mark a still-live match as settled. See
+the May 2026 Pakistan vs Zimbabwe Women's ODI incident where Pakistan
+went 114-0 in the first innings and the moneyline jumped to 0.99
+within minutes.
 
 Idempotent - already-settled rows are skipped.
 
@@ -24,6 +34,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import sqlite3
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
@@ -38,9 +49,38 @@ from src.integrations.odds.polymarket_compare import (
 logger = logging.getLogger(__name__)
 
 GAMMA_MARKETS_BASE = "https://gamma-api.polymarket.com/markets"
-SETTLED_PRICE_HIGH = 0.98
-SETTLED_PRICE_LOW = 0.02
+
+# Path 2 (price-history fallback) trigger thresholds. Tightened from the
+# original 0.98 / 0.02 after observing in-play moneylines on thin women's
+# ODI markets reach 0.99+ during first-innings dominance.
+SETTLED_PRICE_HIGH = 0.995
+SETTLED_PRICE_LOW = 0.005
+
+# Sanity floor: the bet must be at least this many hours old before Path 2
+# can fire. Cheap defense against same-day mistakes.
 MIN_HOURS_SINCE_PROPOSAL_FOR_PRICE_FALLBACK = 6.0
+
+# Primary defense: how long after scheduled kickoff before Path 2 will trust
+# a settled-looking price as actual resolution. Tuned to comfortably exceed
+# real-world match duration:
+#   T20:  ~3.5h match -> 4h cushion
+#   ODI:  ~7-8h match -> 8h cushion
+#   TEST: 5 days; we don't bet test moneyline at scale, but 24h covers day 1
+MIN_HOURS_SINCE_KICKOFF_BY_FORMAT = {
+    "T20": 4.0,
+    "ODI": 8.0,
+    "TEST": 24.0,
+}
+# Used when format inference fails (e.g. legacy bet with no parseable slug).
+# Defaulting to ODI keeps us on the safe side for the longest realistic
+# format we actually bet on.
+DEFAULT_MIN_HOURS_SINCE_KICKOFF = 8.0
+
+# Conservative fallback when we can't anchor to ANY kickoff time at all
+# (no kickoff_at column AND no parseable date in fixture_key). Tightens
+# the proposal-age gate so degenerate inputs don't silently roll back to
+# the loose 6h floor.
+MIN_HOURS_SINCE_PROPOSAL_FALLBACK_NO_KICKOFF = 24.0
 
 
 def _utc_now_iso() -> str:
@@ -81,22 +121,12 @@ def _hours_since(iso_ts: Optional[str]) -> Optional[float]:
     return (now - d).total_seconds() / 3600.0
 
 
-def _resolve_via_gamma(
-    market_id: str,
-    side_label: str,
-) -> Optional[Tuple[int, float]]:
-    """Query Gamma /markets/<id> and return (settle_outcome, last_traded_price).
-
-    settle_outcome: 1 if OUR side won, 0 if it lost.
-    last_traded_price: outcomePrices entry for OUR side (used as the
-        effective resolution price for P&L verification).
-
-    Returns None if:
-      - the market isn't `closed: true`
-      - we can't match `side_label` to any outcome
-      - the response is malformed
+def _fetch_gamma_market(market_id: str) -> Optional[Dict[str, Any]]:
+    """Fetch /markets/<market_id> from Gamma. Returns the raw dict or None
+    on any network/parse failure. Cached at the call site so we hit Gamma
+    at most once per bet per reconcile pass.
     """
-    if not market_id or not side_label:
+    if not market_id:
         return None
     try:
         r = requests.get(f"{GAMMA_MARKETS_BASE}/{market_id}", timeout=10)
@@ -106,13 +136,32 @@ def _resolve_via_gamma(
     except Exception as exc:
         logger.debug(f"  Gamma /markets/{market_id} fetch failed: {exc}")
         return None
-    if not isinstance(m, dict):
+    return m if isinstance(m, dict) else None
+
+
+def _resolve_via_gamma(
+    market: Dict[str, Any],
+    side_label: str,
+) -> Optional[Tuple[int, float]]:
+    """Given a fetched Gamma market dict, return (settle_outcome, resolved_price)
+    if the market is canonically resolved, else None.
+
+    settle_outcome: 1 if OUR side won, 0 if it lost.
+    resolved_price: outcomePrices entry for OUR side (used as the
+        effective resolution price for P&L verification).
+
+    Returns None if:
+      - the market isn't `closed: true`
+      - we can't match `side_label` to any outcome
+      - the response is malformed
+    """
+    if not market or not side_label:
         return None
-    if not m.get("closed"):
+    if not market.get("closed"):
         return None
 
-    outcomes_raw = m.get("outcomes")
-    prices_raw = m.get("outcomePrices")
+    outcomes_raw = market.get("outcomes")
+    prices_raw = market.get("outcomePrices")
 
     def _parse(value: Any) -> List[Any]:
         if isinstance(value, list):
@@ -153,6 +202,63 @@ def _resolve_via_gamma(
         return None
     settle_outcome = 1 if resolved_price >= 0.5 else 0
     return settle_outcome, resolved_price
+
+
+def _derive_kickoff_iso_from_fixture_key(fixture_key: Optional[str]) -> Optional[str]:
+    """Best-effort kickoff ISO when the bet row's `kickoff_at` is NULL.
+
+    Polymarket cricket slugs trail with the match date (YYYY-MM-DD).
+    Mirror the frontend convention (`live_betting.html#kickoffForBet`)
+    of treating that date as 14:00 UTC kickoff. The exact time is wrong
+    for many fixtures (BBL plays earlier, Asia evening matches later)
+    but the only consumer is a "is enough time elapsed?" gate, so erring
+    LATE simply means we wait slightly longer to settle — the failure
+    mode is a delayed reconcile, not a premature one.
+    """
+    if not fixture_key:
+        return None
+    m = re.search(r"(\d{4}-\d{2}-\d{2})$", fixture_key)
+    if not m:
+        return None
+    return f"{m.group(1)}T14:00:00+00:00"
+
+
+def _format_from_bet(
+    fixture_key: Optional[str],
+    gamma_market: Optional[Dict[str, Any]],
+) -> Optional[str]:
+    """Infer match format ('T20' / 'ODI' / 'TEST') for the kickoff-buffer
+    duration heuristic.
+
+    Tries the slug prefix first via the canonical
+    `TOURNAMENT_PREFIX_MAP`. For ambiguous prefixes (`crint` covers
+    everything from women's T20s to men's ODI World Cup matches), falls
+    back to inferring from the Gamma market question text using the
+    same heuristic the upcoming-fixture pipeline uses for routing.
+    """
+    if not fixture_key:
+        return None
+    prefix = fixture_key.split("-")[0]
+    # Local import: keep `reconcile` importable in lightweight tooling
+    # without dragging the whole upcoming-fixtures stack.
+    from src.integrations.polymarket.upcoming import (
+        TOURNAMENT_PREFIX_MAP,
+        _infer_format_gender_from_title,
+    )
+
+    entry = TOURNAMENT_PREFIX_MAP.get(prefix)
+    if isinstance(entry, tuple):
+        return entry[0]
+
+    if gamma_market:
+        question = gamma_market.get("question") or ""
+        if question:
+            try:
+                fmt, _gender, _name = _infer_format_gender_from_title(question, prefix)
+                return fmt
+            except Exception as exc:
+                logger.debug(f"  format inference from title failed: {exc}")
+    return None
 
 
 def _compute_pnl_for_settled_bet(
@@ -208,15 +314,22 @@ def reconcile_pending_bets(
         settle_outcome: Optional[int] = None
         resolution_method: Optional[str] = None
 
-        # Path 1: Gamma /markets/{id} - canonical resolution signal
-        if market_id:
-            gamma_result = _resolve_via_gamma(str(market_id), side_label)
+        # Fetch Gamma market once per bet — used by Path 1 for resolution
+        # AND by Path 2 for format inference (so we can pick the right
+        # kickoff-buffer duration for ambiguous `crint`-prefix slugs).
+        gamma_market = _fetch_gamma_market(str(market_id)) if market_id else None
+
+        # Path 1: Gamma `closed: true` - canonical resolution signal
+        if gamma_market is not None:
+            gamma_result = _resolve_via_gamma(gamma_market, side_label)
             if gamma_result is not None:
                 settle_outcome, _resolved_price = gamma_result
                 resolution_method = "gamma"
 
-        # Path 2: prices-history fallback (requires a generous time buffer
-        # since we don't have the canonical resolution signal)
+        # Path 2: prices-history fallback. Two stacked time gates protect
+        # against in-play price spikes settling a still-live match:
+        #   (a) proposal-age sanity floor (cheap, format-agnostic)
+        #   (b) kickoff-age buffer sized to format duration (primary defense)
         if settle_outcome is None and token_id:
             try:
                 resp = poly_client.get_prices_history(
@@ -229,10 +342,47 @@ def reconcile_pending_bets(
             last_price = _last_price_from_history(history or [])
             if last_price is None:
                 continue
-            hours_since = _hours_since(bet["proposed_at"])
-            buffer_ok = hours_since is None or hours_since >= MIN_HOURS_SINCE_PROPOSAL_FOR_PRICE_FALLBACK
-            if not buffer_ok:
+
+            hours_since_proposal = _hours_since(bet["proposed_at"])
+            proposal_buffer_ok = (
+                hours_since_proposal is None
+                or hours_since_proposal >= MIN_HOURS_SINCE_PROPOSAL_FOR_PRICE_FALLBACK
+            )
+            if not proposal_buffer_ok:
                 continue
+
+            kickoff_at = bet["kickoff_at"] if "kickoff_at" in bet.keys() else None
+            if not kickoff_at:
+                kickoff_at = _derive_kickoff_iso_from_fixture_key(bet["fixture_key"])
+            hours_since_kickoff = _hours_since(kickoff_at)
+
+            if hours_since_kickoff is not None:
+                fmt = _format_from_bet(bet["fixture_key"], gamma_market)
+                min_hours_kickoff = MIN_HOURS_SINCE_KICKOFF_BY_FORMAT.get(
+                    (fmt or "").upper(), DEFAULT_MIN_HOURS_SINCE_KICKOFF
+                )
+                if hours_since_kickoff < min_hours_kickoff:
+                    logger.debug(
+                        f"  bet_id={bet['bet_id']} skipping price-history fallback: "
+                        f"only {hours_since_kickoff:.2f}h since kickoff, need "
+                        f">= {min_hours_kickoff:.1f}h for {fmt or 'unknown'} format"
+                    )
+                    continue
+            else:
+                # No kickoff to anchor to (no kickoff_at AND no parseable
+                # date in fixture_key). Tighten the proposal-age gate so
+                # we don't silently fall back to the loose 6h floor.
+                if (
+                    hours_since_proposal is None
+                    or hours_since_proposal < MIN_HOURS_SINCE_PROPOSAL_FALLBACK_NO_KICKOFF
+                ):
+                    logger.debug(
+                        f"  bet_id={bet['bet_id']} skipping price-history fallback: "
+                        f"no kickoff anchor and only {hours_since_proposal}h since proposal "
+                        f"(need >= {MIN_HOURS_SINCE_PROPOSAL_FALLBACK_NO_KICKOFF:.1f}h)"
+                    )
+                    continue
+
             if last_price >= SETTLED_PRICE_HIGH:
                 settle_outcome = 1
                 resolution_method = "price-history-high"

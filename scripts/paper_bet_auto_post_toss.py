@@ -72,8 +72,10 @@ STATUS_FILE = LOG_DIR / "paper_auto_post_toss_status.json"
 PID_FILE = LOG_DIR / "paper_auto_post_toss.pid"
 SCRIPT_LOG = LOG_DIR / "paper_auto_post_toss.log"
 POST_TOSS_SCAN_LOG = LOG_DIR / "paper_post_toss.log"
+LIVE_POST_TOSS_SCAN_LOG = LOG_DIR / "live_post_toss.log"
 VENV_PYTHON = REPO_ROOT / "venv311" / "bin" / "python"
 POST_TOSS_SCAN_SCRIPT = REPO_ROOT / "scripts" / "paper_bet_post_toss_scan.py"
+LIVE_POST_TOSS_SCAN_SCRIPT = REPO_ROOT / "scripts" / "live_bet_post_toss_scan.py"
 
 
 logging.basicConfig(
@@ -269,18 +271,24 @@ def _detect_toss_winner_side(
     return None
 
 
-def _spawn_post_toss_scan(
+def _spawn_scan_subprocess(
+    script_path: Path,
+    log_path: Path,
     fixture: Dict[str, Any],
     toss_winner_side: str,
     chose_to: str,
-    team1_xi: Optional[List[int]] = None,
-    team2_xi: Optional[List[int]] = None,
-    dry_run: bool = False,
+    team1_xi: Optional[List[int]],
+    team2_xi: Optional[List[int]],
+    dry_run: bool,
+    log_tag: str,
 ) -> Optional[int]:
-    """Spawn paper_bet_post_toss_scan.py as a detached subprocess.
-    Returns the PID, or None if dry_run."""
+    """Shared spawner for paper / live post-toss scan subprocesses.
+    Both scripts have identical CLIs (fixture-key, toss-winner, chose-to,
+    optional XI overrides), so a single helper avoids drift between the
+    paper and live spawn paths.
+    """
     cmd = [
-        str(VENV_PYTHON), str(POST_TOSS_SCAN_SCRIPT),
+        str(VENV_PYTHON), str(script_path),
         "--fixture-key", fixture["fixture_key"],
         "--toss-winner", toss_winner_side,
         "--chose-to", chose_to,
@@ -291,11 +299,11 @@ def _spawn_post_toss_scan(
         cmd.extend(["--team2-xi", ",".join(str(int(x)) for x in team2_xi)])
     cmd_str = " ".join(cmd)
     if dry_run:
-        logger.info(f"  [DRY-RUN] would spawn: {cmd_str}")
+        logger.info(f"  [DRY-RUN] would spawn ({log_tag}): {cmd_str}")
         return None
-    logger.info(f"  Spawning: {cmd_str}")
-    with POST_TOSS_SCAN_LOG.open("a") as logf:
-        logf.write(f"\n\n=== auto-toss spawn at {datetime.now(timezone.utc).isoformat()} ===\n")
+    logger.info(f"  Spawning ({log_tag}): {cmd_str}")
+    with log_path.open("a") as logf:
+        logf.write(f"\n\n=== auto-toss {log_tag} spawn at {datetime.now(timezone.utc).isoformat()} ===\n")
         logf.write(f"=== cmd: {cmd_str} ===\n")
         logf.flush()
         proc = subprocess.Popen(
@@ -305,12 +313,67 @@ def _spawn_post_toss_scan(
     return proc.pid
 
 
+def _spawn_post_toss_scan(
+    fixture: Dict[str, Any],
+    toss_winner_side: str,
+    chose_to: str,
+    team1_xi: Optional[List[int]] = None,
+    team2_xi: Optional[List[int]] = None,
+    dry_run: bool = False,
+) -> Optional[int]:
+    """Spawn the PAPER post-toss scan as a detached subprocess.
+    Returns the PID, or None if dry_run."""
+    return _spawn_scan_subprocess(
+        script_path=POST_TOSS_SCAN_SCRIPT,
+        log_path=POST_TOSS_SCAN_LOG,
+        fixture=fixture,
+        toss_winner_side=toss_winner_side,
+        chose_to=chose_to,
+        team1_xi=team1_xi,
+        team2_xi=team2_xi,
+        dry_run=dry_run,
+        log_tag="paper",
+    )
+
+
+def _spawn_live_post_toss_scan(
+    fixture: Dict[str, Any],
+    toss_winner_side: str,
+    chose_to: str,
+    team1_xi: Optional[List[int]] = None,
+    team2_xi: Optional[List[int]] = None,
+    dry_run: bool = False,
+) -> Optional[int]:
+    """Spawn the LIVE post-toss scan as a detached subprocess.
+    The live scan has its own internal mode/kill-switch checks so we don't
+    duplicate them here; if BETTING_MODE != AUTO the spawned process will
+    log and exit cleanly without placing any bets.
+    Returns the PID, or None if dry_run."""
+    return _spawn_scan_subprocess(
+        script_path=LIVE_POST_TOSS_SCAN_SCRIPT,
+        log_path=LIVE_POST_TOSS_SCAN_LOG,
+        fixture=fixture,
+        toss_winner_side=toss_winner_side,
+        chose_to=chose_to,
+        team1_xi=team1_xi,
+        team2_xi=team2_xi,
+        dry_run=dry_run,
+        log_tag="live",
+    )
+
+
 def process_fixture(
     fixture: Dict[str, Any],
     handled_set: Set[str],
     dry_run: bool = False,
+    also_live: bool = False,
 ) -> Dict[str, Any]:
-    """Process one upcoming fixture: check toss, fetch XI, spawn scan if applicable."""
+    """Process one upcoming fixture: check toss, fetch XI, spawn scan if applicable.
+
+    If `also_live` is True, ALSO spawn the live post-toss scan so the same
+    toss event triggers both paper analytics and real-money placement.
+    The two subprocesses run independently and write to separate log files
+    (logs/paper_post_toss.log and logs/live_post_toss.log)."""
     fixture_key = fixture["fixture_key"]
     result = {"fixture_key": fixture_key, "action": None, "reason": None}
 
@@ -399,14 +462,28 @@ def process_fixture(
             f"team2 {t2_matched}/{t2_total} (override={'yes' if team2_xi else 'no'})"
         )
 
-    # Spawn the post-toss scan
+    # Spawn the paper post-toss scan
     pid = _spawn_post_toss_scan(
         fixture, side, chose_to,
         team1_xi=team1_xi, team2_xi=team2_xi, dry_run=dry_run,
     )
+    # Optionally spawn the LIVE post-toss scan in parallel. Independent
+    # subprocess so a paper-side crash can't block the live placement
+    # (and vice versa). The live script's own mode/kill-switch checks
+    # decide whether the spawned process actually places anything.
+    live_pid: Optional[int] = None
+    if also_live:
+        try:
+            live_pid = _spawn_live_post_toss_scan(
+                fixture, side, chose_to,
+                team1_xi=team1_xi, team2_xi=team2_xi, dry_run=dry_run,
+            )
+        except Exception as exc:
+            logger.error(f"  live post-toss spawn failed for {fixture_key}: {exc}")
     handled_set.add(fixture_key)
     result["action"] = "spawned" if pid else "dry-run"
     result["pid"] = pid
+    result["live_pid"] = live_pid
     result["toss_winner_side"] = side
     result["chose_to"] = chose_to
     result["team1_xi_override"] = bool(team1_xi)
@@ -420,6 +497,7 @@ def run_single_iteration(
     lookback_min: int,
     lookahead_min: int,
     dry_run: bool = False,
+    also_live: bool = False,
 ) -> Dict[str, Any]:
     """One scan iteration. Returns a per-iteration summary dict."""
     iter_summary: Dict[str, Any] = {
@@ -427,6 +505,7 @@ def run_single_iteration(
         "fixtures_seen": 0,
         "fixtures_in_window": 0,
         "fixtures_processed": [],
+        "also_live": also_live,
     }
 
     try:
@@ -457,7 +536,7 @@ def run_single_iteration(
 
     for fx in in_window:
         try:
-            res = process_fixture(fx, handled_set, dry_run=dry_run)
+            res = process_fixture(fx, handled_set, dry_run=dry_run, also_live=also_live)
         except Exception as exc:
             tb = traceback.format_exc()
             logger.error(f"  process_fixture crashed for {fx.get('fixture_key')}: {exc}\n{tb}")
@@ -466,8 +545,9 @@ def run_single_iteration(
 
         emoji = {"spawned": "✓", "dry-run": "[dry]", "skip": "·", "wait": "...", "error": "!"}
         marker = emoji.get(res.get("action") or "", "?")
+        live_tag = " +live" if res.get("live_pid") else ""
         logger.info(
-            f"  {marker} {fx['team1_db_name']} vs {fx['team2_db_name']}: "
+            f"  {marker} {fx['team1_db_name']} vs {fx['team2_db_name']}{live_tag}: "
             f"{res.get('action')} ({res.get('reason') or '-'})"
         )
 
@@ -482,6 +562,11 @@ def main() -> int:
     parser.add_argument("--lookahead-min", type=int, default=30, help="Also look at fixtures up to N min AFTER kickoff (toss may be late)")
     parser.add_argument("--once", action="store_true", help="Run a single iteration and exit (cron-friendly)")
     parser.add_argument("--dry-run", action="store_true", help="Don't actually spawn post-toss scans, just log")
+    parser.add_argument("--also-live", action="store_true",
+                        help=("Also spawn the LIVE post-toss scan (scripts/live_bet_post_toss_scan.py) "
+                              "for each detected toss. The live scan respects BETTING_MODE / kill switch / "
+                              "BETTING_LIVE_STRATEGIES, so leaving it on without configuring real betting "
+                              "is safe (it'll just log 'mode_off' and exit)."))
     args = parser.parse_args()
 
     # PID-file lifecycle (only for daemon mode, not --once)
@@ -509,11 +594,12 @@ def main() -> int:
     handled_set: Set[str] = set()
     n_iters = 0
     n_spawns_total = 0
+    n_live_spawns_total = 0
 
     logger.info(
         f"Auto-toss daemon starting (poll_interval={args.poll_interval}s, "
         f"window=[T-{args.lookback_min}m, T+{args.lookahead_min}m], "
-        f"dry_run={args.dry_run}, once={args.once})"
+        f"dry_run={args.dry_run}, once={args.once}, also_live={args.also_live})"
     )
 
     try:
@@ -522,18 +608,25 @@ def main() -> int:
             n_iters += 1
             try:
                 iter_summary = run_single_iteration(
-                    handled_set, args.lookback_min, args.lookahead_min, args.dry_run,
+                    handled_set, args.lookback_min, args.lookahead_min,
+                    args.dry_run, args.also_live,
                 )
                 spawns_this_iter = sum(
                     1 for f in iter_summary.get("fixtures_processed", [])
                     if f.get("action") == "spawned"
                 )
+                live_spawns_this_iter = sum(
+                    1 for f in iter_summary.get("fixtures_processed", [])
+                    if f.get("live_pid")
+                )
                 n_spawns_total += spawns_this_iter
+                n_live_spawns_total += live_spawns_this_iter
             except Exception as exc:
                 tb = traceback.format_exc()
                 logger.error(f"Iteration {n_iters} crashed: {exc}\n{tb}")
                 iter_summary = {"error": str(exc)}
                 spawns_this_iter = 0
+                live_spawns_this_iter = 0
 
             elapsed = time.time() - iter_started
             _write_status({
@@ -542,6 +635,8 @@ def main() -> int:
                 "iter_count": n_iters,
                 "spawns_total": n_spawns_total,
                 "spawns_this_iter": spawns_this_iter,
+                "live_spawns_total": n_live_spawns_total,
+                "live_spawns_this_iter": live_spawns_this_iter,
                 "iter_elapsed_s": round(elapsed, 1),
                 "handled_session": sorted(handled_set),
                 "last_iter": iter_summary,
@@ -549,15 +644,20 @@ def main() -> int:
                 "lookback_min": args.lookback_min,
                 "lookahead_min": args.lookahead_min,
                 "dry_run": args.dry_run,
+                "also_live": args.also_live,
             })
 
             if args.once:
-                logger.info(f"--once: exiting after 1 iteration ({elapsed:.1f}s, {spawns_this_iter} spawns)")
+                logger.info(
+                    f"--once: exiting after 1 iteration ({elapsed:.1f}s, "
+                    f"{spawns_this_iter} paper spawns, {live_spawns_this_iter} live spawns)"
+                )
                 break
 
             sleep_s = max(0, args.poll_interval - elapsed)
             logger.info(
-                f"Iteration {n_iters} done in {elapsed:.1f}s (spawned {spawns_this_iter}). "
+                f"Iteration {n_iters} done in {elapsed:.1f}s "
+                f"(spawned {spawns_this_iter} paper, {live_spawns_this_iter} live). "
                 f"Sleeping {sleep_s:.1f}s..."
             )
             # Sleep in 1s chunks so signal handlers get a chance
@@ -571,6 +671,8 @@ def main() -> int:
             "running": False,
             "iter_count": n_iters,
             "spawns_total": n_spawns_total,
+            "live_spawns_total": n_live_spawns_total,
+            "also_live": args.also_live,
             "shutdown_at_utc": datetime.now(timezone.utc).isoformat(),
         })
         if not args.once and PID_FILE.exists():
@@ -580,7 +682,10 @@ def main() -> int:
             except Exception:
                 pass
 
-    logger.info(f"Daemon exiting after {n_iters} iterations ({n_spawns_total} total spawns)")
+    logger.info(
+        f"Daemon exiting after {n_iters} iterations "
+        f"({n_spawns_total} total paper spawns, {n_live_spawns_total} total live spawns)"
+    )
     return 0
 
 
