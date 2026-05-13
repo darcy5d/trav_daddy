@@ -444,7 +444,11 @@ class PolymarketClient:
     def get_open_orders(self) -> Any:
         """Return all open orders for this wallet."""
         client = self._get_clob_sdk_client()
-        return client.get_orders()
+        if hasattr(client, "get_open_orders"):
+            return client.get_open_orders()
+        if hasattr(client, "get_orders"):
+            return client.get_orders()
+        return []
 
     def get_positions(self) -> Any:
         """Return current positions (token holdings) for this wallet."""
