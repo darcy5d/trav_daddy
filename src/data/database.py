@@ -502,6 +502,10 @@ def init_betting_tables(db_path: Optional[Path] = None) -> bool:
                 # kickoff" per bet and post-hoc-bucket bets by actual
                 # time-to-match relative to the paper-trading comparison.
                 ("kickoff_at",            "TEXT"),
+                # Wave 5.9.1: compact JSON snapshot of active model versions
+                # at bet time, e.g. '{"t20_male":"male_t20_20260416",...}'.
+                # Enables per-model-version calibration grouping in rollups.
+                ("model_snapshot",        "TEXT"),
             ]
             for col_name, col_type in paper_columns:
                 if not _column_exists(conn, "bet_ledger", col_name):
@@ -516,6 +520,32 @@ def init_betting_tables(db_path: Optional[Path] = None) -> bool:
         return True
     except Exception as e:
         logger.error(f"Failed to initialize betting schema: {e}")
+        import traceback
+        traceback.print_exc()
+        return False
+
+
+def init_twap_tables(db_path: Optional[Path] = None) -> bool:
+    """Wave 5.9: TWAP order execution tables (order_plans + order_chunks).
+
+    Idempotent. Safe to call on every app startup.
+    """
+    if db_path is None:
+        db_path = DATABASE_PATH
+
+    schema_path = Path(__file__).parent / "schema_v7_twap.sql"
+    if not schema_path.exists():
+        logger.error(f"Schema file not found: {schema_path}")
+        return False
+
+    try:
+        schema_sql = schema_path.read_text()
+        with get_db_connection(db_path) as conn:
+            conn.executescript(schema_sql)
+            logger.info("TWAP tables (V7) initialized")
+        return True
+    except Exception as e:
+        logger.error(f"Failed to initialize TWAP tables: {e}")
         import traceback
         traceback.print_exc()
         return False
@@ -595,6 +625,37 @@ def get_model_versions(
         rows = cursor.fetchall()
         
         return [dict(row) for row in rows]
+
+
+def get_active_model_snapshot(conn=None, db_path: Optional[Path] = None) -> str:
+    """Return a compact JSON string of currently active model versions.
+
+    Keyed by '{format_type}_{gender}'.lower(), e.g.:
+        '{"t20_male":"male_t20_20260416","odi_male":"male_odi_20260416",...}'
+
+    Used to stamp each bet_ledger row so calibration can be grouped by the
+    exact model instance that made the prediction. Pass an open connection
+    or db_path; if neither, uses the default DATABASE_PATH.
+    """
+    import json as _json
+
+    def _fetch(c):
+        c.execute(
+            "SELECT format_type, gender, model_name FROM model_versions "
+            "WHERE is_active = 1 ORDER BY format_type, gender"
+        )
+        return {
+            f"{row[0].lower()}_{row[1].lower()}": row[2]
+            for row in c.fetchall()
+        }
+
+    if conn is not None:
+        snapshot = _fetch(conn.cursor())
+    else:
+        with get_db_connection(db_path) as _conn:
+            snapshot = _fetch(_conn.cursor())
+
+    return _json.dumps(snapshot, sort_keys=True)
 
 
 def save_model_version(

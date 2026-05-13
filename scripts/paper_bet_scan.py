@@ -33,7 +33,7 @@ from typing import Any, Dict, List, Optional
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from src.data.database import get_connection
+from src.data.database import get_connection, get_active_model_snapshot
 from src.integrations.polymarket import PolymarketClient
 from src.integrations.polymarket.upcoming import (
     find_upcoming_cricket_events,
@@ -178,6 +178,7 @@ def _insert_paper_bet(
     xi_signature: Optional[str] = None,
     toss_winner_team_id: Optional[int] = None,
     toss_chose_to: Optional[str] = None,
+    model_snapshot: Optional[str] = None,
 ) -> int:
     """Insert a paper bet at status='filled' (paper fills instantly)."""
     now_iso = datetime.now(timezone.utc).isoformat()
@@ -193,7 +194,8 @@ def _insert_paper_bet(
             fill_price, fill_size_usdc,
             status, mode, bet_kind, strategy_label,
             bankroll_at_proposal,
-            phase, xi_signature, toss_winner_team_id, toss_chose_to
+            phase, xi_signature, toss_winner_team_id, toss_chose_to,
+            model_snapshot
         ) VALUES (
             ?, ?, ?,
             ?, ?, ?,
@@ -203,7 +205,8 @@ def _insert_paper_bet(
             ?, ?,
             ?, ?, ?, ?,
             ?,
-            ?, ?, ?, ?
+            ?, ?, ?, ?,
+            ?
         )
         """,
         (
@@ -216,6 +219,7 @@ def _insert_paper_bet(
             "filled", "manual", "paper", strategy.name,
             bankroll_at_proposal,
             phase, xi_signature, toss_winner_team_id, toss_chose_to,
+            model_snapshot,
         ),
     )
     return cur.lastrowid
@@ -275,6 +279,10 @@ def scan_and_place_paper_bets(
     if not enabled_strats:
         logger.warning("No enabled strategies match filter; nothing to do")
         return summary
+
+    # Capture active model snapshot once per scan run so every bet in this
+    # batch has the same snapshot string for post-hoc version grouping.
+    model_snapshot = get_active_model_snapshot()
 
     needs_v2 = any(s.model_version in ("v2", "consensus") for s in enabled_strats)
     needs_v3 = any(s.model_version in ("v3", "consensus") for s in enabled_strats)
@@ -466,6 +474,21 @@ def scan_and_place_paper_bets(
                     "side_label": side_label,
                 })
                 continue
+            # Model probability bounds: exclude coin-flip zone and overconfident bets.
+            if strat.min_model_prob is not None and model_prob < strat.min_model_prob:
+                summary["bets_skipped"].append({
+                    "strategy": strat.name, "fixture": fix["fixture_key"],
+                    "reason": f"model_prob {model_prob:.3f} < min {strat.min_model_prob}",
+                    "side_label": side_label,
+                })
+                continue
+            if strat.max_model_prob is not None and model_prob > strat.max_model_prob:
+                summary["bets_skipped"].append({
+                    "strategy": strat.name, "fixture": fix["fixture_key"],
+                    "reason": f"model_prob {model_prob:.3f} > max {strat.max_model_prob}",
+                    "side_label": side_label,
+                })
+                continue
 
             # Idempotent dedup
             with get_connection() as conn:
@@ -504,6 +527,7 @@ def scan_and_place_paper_bets(
                     bet_id = _insert_paper_bet(
                         conn, strat, fix, ml, side_label, side_token_id,
                         model_prob, market_price, edge_pp, stake, bankroll_now,
+                        model_snapshot=model_snapshot,
                     )
                     conn.commit()
                     logger.info(

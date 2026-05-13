@@ -159,8 +159,8 @@
     .lb-card.open .lb-card-body { display: block; }
     .lb-bet-row {
         display: grid;
-        grid-template-columns: 110px 1fr 95px 60px 60px 100px 75px 90px;
-        gap: 0.6rem; align-items: center;
+        grid-template-columns: 100px 1fr 80px 55px 55px 88px 55px 58px 72px;
+        gap: 0.5rem; align-items: center;
         padding: 0.45rem 0; font-size: 0.78rem;
         border-bottom: 1px solid var(--border-color);
     }
@@ -168,6 +168,14 @@
     .lb-bet-row .strat-name { font-weight: 600; }
     .lb-bet-row .side-label { color: var(--text-secondary); }
     .lb-bet-row .num { text-align: right; font-variant-numeric: tabular-nums; }
+    .lb-bet-row-header {
+        border-bottom: 1px solid var(--border-color); padding-bottom: 0.3rem; margin-bottom: 0.2rem;
+    }
+    .lb-bet-row-header span {
+        color: var(--text-muted); font-size: 0.62rem; text-transform: uppercase;
+        letter-spacing: 0.4px; font-weight: 600;
+    }
+    .lb-bet-row-header .num { text-align: right; }
 
     .lb-edge-pill {
         display: inline-block; padding: 0.05rem 0.5rem; border-radius: 999px;
@@ -186,6 +194,12 @@
     }
     .lb-outcome-won  { background: rgba(16, 185, 129, 0.2); color: var(--accent-primary); border-color: rgba(16, 185, 129, 0.35); }
     .lb-outcome-lost { background: rgba(239, 68, 68, 0.2);  color: #ef4444;               border-color: rgba(239, 68, 68, 0.35); }
+    .lb-phase-badge {
+        display: inline-block; margin-left: 0.35rem; padding: 0.05rem 0.42rem; border-radius: 999px;
+        font-size: 0.6rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.3px;
+        background: rgba(139, 92, 246, 0.18); color: #a78bfa;
+        border: 1px solid rgba(139, 92, 246, 0.35); vertical-align: middle;
+    }
     .lb-empty {
         padding: 1.5rem; text-align: center; color: var(--text-muted); font-size: 0.85rem;
         background: var(--bg-secondary); border: 1px solid var(--border-color); border-radius: 12px;
@@ -293,6 +307,7 @@
     @media (max-width: 800px) {
         .lb-bet-row { grid-template-columns: 1fr 1fr; gap: 0.3rem; font-size: 0.75rem; padding: 0.3rem 0; }
         .lb-bet-row .num { text-align: left; }
+        .lb-bet-row-header { display: none; }
     }
 </style>
 {% endblock %}
@@ -876,27 +891,45 @@
         }
     }
 
+    function betRowHeader(settled) {
+        return `<div class="lb-bet-row lb-bet-row-header">
+            <span>Strategy</span>
+            <span>Side</span>
+            <span class="num">Edge</span>
+            <span class="num">Model %</span>
+            <span class="num">Market %</span>
+            <span class="num">Date</span>
+            <span class="num">Stake</span>
+            <span class="num">${settled ? 'P&L' : 'Fill Price'}</span>
+            <span class="num">Result</span>
+        </div>`;
+    }
+
     function makeBetRow(b) {
         const edgeCls = b.edge_pp >= 5 ? 'lb-edge-high' : b.edge_pp >= 2 ? 'lb-edge-medium' : 'lb-edge-low';
         const settled = b.status === 'settled';
         const won = b.settle_outcome === 1;
         const pnl = b.pnl_realised_usdc;
-        const pnlSpan = settled
+        const pnlCol = settled
             ? `<span class="num ${pnl >= 0 ? 'lb-pl-positive' : 'lb-pl-negative'}">${fmtUsd(pnl)}</span>`
-            : `<span class="num">${fmtUsd(b.size_usdc)}</span>`;
+            : (b.fill_price ? `<span class="num" style="color:var(--text-muted)">${Number(b.fill_price).toFixed(3)}</span>` : `<span class="num" style="color:var(--text-muted)">--</span>`);
         const outcome = settled
             ? `<span class="lb-outcome-pill ${won ? 'lb-outcome-won' : 'lb-outcome-lost'}">${won ? 'WON' : 'LOST'}</span>`
-            : (b.fill_price ? `<span class="num" style="color:var(--text-muted)">${Number(b.fill_price).toFixed(3)}</span>` : `<span class="num" style="color:var(--text-muted)">--</span>`);
+            : '';
         const timestamp = (settled ? b.settled_at : b.proposed_at || '').slice(5, 16).replace('T', ' ');
+        const phaseBadge = b.phase === 'post_toss'
+            ? '<span class="lb-phase-badge">post-toss</span>'
+            : '';
         return `
             <div class="lb-bet-row">
-                <span class="strat-name">${b.strategy_label || '--'}</span>
+                <span class="strat-name">${b.strategy_label || '--'}${phaseBadge}</span>
                 <span class="side-label">${b.side_label || '--'}</span>
                 <span class="num"><span class="lb-edge-pill ${edgeCls}">+${Number(b.edge_pp).toFixed(1)}pp</span></span>
                 <span class="num">${b.model_prob !== null ? (b.model_prob*100).toFixed(1)+'%' : '--'}</span>
                 <span class="num">${b.market_price_at_proposal !== null ? (b.market_price_at_proposal*100).toFixed(1)+'%' : '--'}</span>
                 <span class="num" style="color:var(--text-muted);font-size:0.72rem">${timestamp}</span>
-                ${pnlSpan}
+                <span class="num">${fmtUsd(b.size_usdc)}</span>
+                ${pnlCol}
                 ${outcome}
             </div>
         `;
@@ -975,6 +1008,7 @@
                     </div>
                 </div>
                 <div class="lb-card-body">
+                    ${betRowHeader(false)}
                     ${fx.bets.map(makeBetRow).join('')}
                 </div>
             `;
@@ -1079,7 +1113,7 @@
                 `;
                 const betList = document.createElement('div');
                 betList.className = 'lb-fixture-bets';
-                betList.innerHTML = fx.bets.map(makeBetRow).join('');
+                betList.innerHTML = betRowHeader(true) + fx.bets.map(makeBetRow).join('');
                 fxRow.addEventListener('click', () => fxRow.classList.toggle('open'));
                 body.appendChild(fxRow);
                 body.appendChild(betList);

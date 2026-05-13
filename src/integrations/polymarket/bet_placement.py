@@ -9,6 +9,10 @@ writes to Polymarket. Sequence:
     4. Update ledger row to "placed" (or "filled" if synchronous fill).
     5. On exception: ledger row gets status='errored' and error_message.
 
+Wave 5.9 adds `place_bet_twap()` for thin markets: instead of an immediate
+FOK order, it writes an order_plan + pre-computed chunk schedule to the DB.
+The post-toss daemon picks up pending plans and executes them over time.
+
 The function is intentionally serial (no async); CLOB calls are
 ~100-500ms each and we want strict ordering so risk-gate decisions
 read consistent state.
@@ -17,6 +21,7 @@ read consistent state.
 from __future__ import annotations
 
 import logging
+import math
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 
@@ -25,6 +30,8 @@ from src.integrations.polymarket.risk_gate import can_place_bet
 from src.integrations.odds.polymarket_compare import POLYMARKET_TAKER_FEE
 
 logger = logging.getLogger(__name__)
+
+POLYMARKET_MIN_ORDER_USDC = 5.0
 
 
 def _utc_now_iso() -> str:
@@ -52,6 +59,7 @@ def place_bet(
     toss_winner_team_id: Optional[int] = None,
     toss_chose_to: Optional[str] = None,
     kickoff_at: Optional[str] = None,
+    model_snapshot: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Run risk gate + place market order + insert/update bet ledger row.
 
@@ -99,8 +107,8 @@ def place_bet(
                 side, size_usdc, fees_estimated_usdc,
                 status, mode, bet_kind, strategy_label,
                 bankroll_at_proposal, phase, xi_signature,
-                toss_winner_team_id, toss_chose_to, kickoff_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'proposed', ?, 'real', ?, ?, ?, ?, ?, ?, ?)
+                toss_winner_team_id, toss_chose_to, kickoff_at, model_snapshot
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'proposed', ?, 'real', ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 proposed_at, match_id, fixture_key, market_type,
@@ -109,7 +117,7 @@ def place_bet(
                 side.upper(), size_usdc, fees_est,
                 requested_mode, strategy_label,
                 bankroll_at_proposal, phase, xi_signature,
-                toss_winner_team_id, toss_chose_to, kickoff_at,
+                toss_winner_team_id, toss_chose_to, kickoff_at, model_snapshot,
             ),
         )
         bet_id = cur.lastrowid
@@ -224,4 +232,193 @@ def place_bet(
         "status": new_status,
         "reason": "placed" if new_status == "placed" else "filled",
         "placement_response": placement_response,
+    }
+
+
+def place_bet_twap(
+    *,
+    fixture_key: str,
+    match_id: Optional[int],
+    market_type: str,
+    polymarket_market_id: str,
+    polymarket_token_id: str,
+    side_label: str,
+    model_prob: float,
+    market_price_at_proposal: float,
+    side: str,
+    size_usdc: float,
+    max_acceptable_price: float,
+    base_price: float,
+    best_ask_size: float,
+    requested_mode: str = "auto",
+    strategy_label: Optional[str] = None,
+    bankroll_at_proposal: Optional[float] = None,
+    phase: Optional[str] = None,
+    xi_signature: Optional[str] = None,
+    toss_winner_team_id: Optional[int] = None,
+    toss_chose_to: Optional[str] = None,
+    kickoff_at: Optional[str] = None,
+    model_snapshot: Optional[str] = None,
+    price_step_pp: Optional[float] = None,
+) -> Dict[str, Any]:
+    """Write an order plan to the DB for TWAP execution by the daemon.
+
+    Instead of placing a FOK market order immediately, this function:
+      1. Runs the risk gate (same as place_bet).
+      2. Inserts a 'proposed' row in bet_ledger (bet is tracked but not yet on-chain).
+      3. Computes chunk sizing and price escalation schedule.
+      4. Writes to order_plans + order_chunks tables.
+
+    The post-toss daemon picks up pending plans each tick and places
+    limit orders chunk-by-chunk.
+
+    Returns: dict with success, bet_id, plan_id, chunks_total.
+    """
+    import os
+    edge_pp = (model_prob - market_price_at_proposal) * 100.0
+
+    # Step 1: risk gate
+    decision = can_place_bet(
+        size_usdc, market_type, edge_pp, requested_mode,
+        strategy_label=strategy_label,
+    )
+    if not decision.allowed:
+        return {
+            "success": False,
+            "bet_id": None,
+            "plan_id": None,
+            "status": "rejected",
+            "reason": decision.reason,
+        }
+
+    from src.data.database import get_connection
+
+    proposed_at = _utc_now_iso()
+    fees_est = round(size_usdc * POLYMARKET_TAKER_FEE, 4)
+
+    # Step 2: insert proposed bet_ledger row (status='proposed', not placed yet)
+    conn = get_connection()
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            """
+            INSERT INTO bet_ledger (
+                proposed_at, match_id, fixture_key, market_type,
+                polymarket_market_id, polymarket_token_id,
+                side_label, model_prob, market_price_at_proposal, edge_pp,
+                side, size_usdc, fees_estimated_usdc,
+                status, mode, bet_kind, strategy_label,
+                bankroll_at_proposal, phase, xi_signature,
+                toss_winner_team_id, toss_chose_to, kickoff_at, model_snapshot
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'proposed', ?, 'real', ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                proposed_at, match_id, fixture_key, market_type,
+                polymarket_market_id, polymarket_token_id,
+                side_label, model_prob, market_price_at_proposal, edge_pp,
+                side.upper(), size_usdc, fees_est,
+                requested_mode, strategy_label,
+                bankroll_at_proposal, phase, xi_signature,
+                toss_winner_team_id, toss_chose_to, kickoff_at, model_snapshot,
+            ),
+        )
+        bet_id = cur.lastrowid
+        conn.commit()
+    except Exception as exc:
+        conn.close()
+        logger.error(f"Failed to insert proposed TWAP bet: {exc}")
+        return {
+            "success": False,
+            "bet_id": None,
+            "plan_id": None,
+            "status": "errored",
+            "reason": f"DB insert failed: {exc}",
+        }
+
+    # Step 3: compute chunk sizing
+    if price_step_pp is None:
+        price_step_pp = float(os.getenv("TWAP_PRICE_STEP_PP", "2"))
+
+    chunk_size = min(size_usdc, best_ask_size * 0.5 * base_price)
+    chunk_size = max(chunk_size, POLYMARKET_MIN_ORDER_USDC)
+    chunks_total = max(1, math.ceil(size_usdc / chunk_size))
+    chunk_size = round(size_usdc / chunks_total, 4)
+
+    # Derive price_step dynamically: walk from base_price to max_acceptable_price
+    price_range = max_acceptable_price - base_price
+    if chunks_total > 1 and price_range > 0:
+        computed_step_pp = (price_range * 100.0) / chunks_total
+    else:
+        computed_step_pp = price_step_pp
+
+    # Step 4: write order_plan
+    try:
+        cur.execute(
+            """
+            INSERT INTO order_plans (
+                bet_ledger_id, fixture_key, strategy_label, token_id, side,
+                total_size_usdc, chunk_size_usdc, chunks_total,
+                max_acceptable_price, base_price, price_step_pp,
+                kickoff_at, model_prob, market_price_at_plan,
+                status, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)
+            """,
+            (
+                bet_id, fixture_key, strategy_label or "",
+                polymarket_token_id, side.upper(),
+                size_usdc, chunk_size, chunks_total,
+                max_acceptable_price, base_price, computed_step_pp,
+                kickoff_at, model_prob, market_price_at_proposal,
+                proposed_at,
+            ),
+        )
+        plan_id = cur.lastrowid
+
+        # Step 5: pre-compute chunk schedule
+        for i in range(chunks_total):
+            limit_price = base_price + ((i + 1) * computed_step_pp / 100.0)
+            limit_price = min(limit_price, max_acceptable_price)
+            limit_price = round(limit_price, 4)
+            this_chunk_usdc = chunk_size if i < chunks_total - 1 else round(size_usdc - chunk_size * (chunks_total - 1), 4)
+            size_shares = round(this_chunk_usdc / limit_price, 4) if limit_price > 0 else 0
+
+            cur.execute(
+                """
+                INSERT INTO order_chunks (
+                    plan_id, chunk_index, limit_price, size_usdc, size_shares, status
+                ) VALUES (?, ?, ?, ?, ?, 'pending')
+                """,
+                (plan_id, i, limit_price, this_chunk_usdc, size_shares),
+            )
+
+        conn.commit()
+    except Exception as exc:
+        conn.rollback()
+        conn.close()
+        logger.error(f"Failed to write TWAP order plan: {exc}")
+        return {
+            "success": False,
+            "bet_id": bet_id,
+            "plan_id": None,
+            "status": "errored",
+            "reason": f"Order plan write failed: {exc}",
+        }
+
+    conn.close()
+
+    logger.info(
+        f"TWAP plan #{plan_id} created: {chunks_total} chunks x ${chunk_size:.2f} "
+        f"for {side_label} @ base={base_price:.4f} -> max={max_acceptable_price:.4f} "
+        f"step={computed_step_pp:.2f}pp"
+    )
+
+    return {
+        "success": True,
+        "bet_id": bet_id,
+        "plan_id": plan_id,
+        "status": "twap_queued",
+        "reason": f"TWAP plan queued ({chunks_total} chunks)",
+        "chunks_total": chunks_total,
+        "chunk_size_usdc": chunk_size,
+        "price_step_pp": computed_step_pp,
     }

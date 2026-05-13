@@ -50,7 +50,7 @@ from typing import Any, Dict, List, Optional
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from src.data.database import get_connection
+from src.data.database import get_connection, get_active_model_snapshot
 from src.integrations.polymarket import PolymarketClient
 from src.integrations.polymarket.bet_placement import place_bet
 from src.integrations.polymarket.paper_inputs import (
@@ -168,6 +168,9 @@ def post_toss_live_scan(
         "bets_skipped": [],
         "bets_rejected": [],
     }
+
+    # Capture active model snapshot once per scan for bet_ledger stamping.
+    model_snapshot = get_active_model_snapshot()
 
     # Mode gate up-front so cron-style logs make it obvious when betting
     # is disabled. Same enforcement as live_bet_scan.scan_and_place_live_bets.
@@ -374,6 +377,19 @@ def post_toss_live_scan(
     kickoff_iso = kickoff.isoformat() if kickoff else None
 
     for strat in enabled_strats:
+        # Post-toss eligibility gate: V2-based strategies cannot condition on
+        # the toss (V2 sim ignores toss kwargs), so their "edge" post-toss is
+        # illusory — the market has already priced in the toss outcome. Only
+        # strategies explicitly marked post_toss_eligible=True may place real
+        # money here. Paper bets are handled by paper_bet_post_toss_scan.py
+        # which has its own (unrestricted) eligibility logic.
+        if not strat.post_toss_eligible:
+            summary["bets_skipped"].append({
+                "strategy": strat.name,
+                "reason": "post_toss_eligible=False (strategy uses V2 which is toss-blind)",
+            })
+            continue
+
         # Filter checks (format, gender, tournament). Same precedence
         # as live_bet_scan / paper_bet_post_toss_scan.
         if strat.enabled_formats and fmt not in strat.enabled_formats:
@@ -436,6 +452,37 @@ def post_toss_live_scan(
                 "reason": f"market_price {market_price:.3f} outside lottery filter",
             })
             continue
+        # Model probability bounds: exclude coin-flip zone.
+        if strat.min_model_prob is not None and model_prob < strat.min_model_prob:
+            summary["bets_skipped"].append({
+                "strategy": strat.name,
+                "reason": f"model_prob {model_prob:.3f} < min {strat.min_model_prob}",
+                "side_label": side_label,
+            })
+            continue
+        if strat.max_model_prob is not None and model_prob > strat.max_model_prob:
+            summary["bets_skipped"].append({
+                "strategy": strat.name,
+                "reason": f"model_prob {model_prob:.3f} > max {strat.max_model_prob}",
+                "side_label": side_label,
+            })
+            continue
+        # Fill-gap guard: if model_prob vs market_price gap is too large the market
+        # has moved on information our model doesn't have (toss impact not fully
+        # captured, late XI news, pitch reports). Block to avoid chasing ghost edge.
+        if strat.max_model_minus_fill_pp is not None:
+            gap_pp = (model_prob - market_price) * 100
+            if gap_pp > strat.max_model_minus_fill_pp:
+                summary["bets_skipped"].append({
+                    "strategy": strat.name,
+                    "reason": (
+                        f"fill-gap {gap_pp:.1f}pp > max {strat.max_model_minus_fill_pp}pp "
+                        f"(market moved on info model doesn't have)"
+                    ),
+                    "side_label": side_label, "model_prob": round(model_prob, 4),
+                    "market_price": market_price,
+                })
+                continue
 
         with get_connection() as conn:
             if _already_live_bet_for_phase(
@@ -486,6 +533,7 @@ def post_toss_live_scan(
                 xi_signature=xi_sig,
                 toss_winner_team_id=toss_winner_team_id,
                 toss_chose_to=chose_to,
+                model_snapshot=model_snapshot,
             )
         except Exception as exc:
             logger.error(f"    [{strat.name}] place_bet raised: {exc}")

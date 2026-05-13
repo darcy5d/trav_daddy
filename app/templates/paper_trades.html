@@ -216,8 +216,8 @@
 
     .pt-bet-row {
         display: grid;
-        grid-template-columns: 100px 1fr 95px 60px 60px 65px 75px 90px;
-        gap: 0.6rem; align-items: center;
+        grid-template-columns: 95px 1fr 80px 55px 55px 80px 55px 58px 72px;
+        gap: 0.5rem; align-items: center;
         padding: 0.45rem 0; font-size: 0.78rem;
         border-bottom: 1px solid var(--border-color);
     }
@@ -225,6 +225,14 @@
     .pt-bet-row .strat-name { font-weight: 600; }
     .pt-bet-row .side-label { color: var(--text-secondary); }
     .pt-bet-row .num { text-align: right; font-variant-numeric: tabular-nums; }
+    .pt-bet-row-header {
+        border-bottom: 1px solid var(--border-color); padding-bottom: 0.3rem; margin-bottom: 0.2rem;
+    }
+    .pt-bet-row-header span {
+        color: var(--text-muted); font-size: 0.62rem; text-transform: uppercase;
+        letter-spacing: 0.4px; font-weight: 600;
+    }
+    .pt-bet-row-header .num { text-align: right; }
 
     .pt-edge-pill {
         display: inline-block; padding: 0.05rem 0.5rem; border-radius: 999px;
@@ -243,6 +251,12 @@
     }
     .pt-outcome-won  { background: rgba(16, 185, 129, 0.2); color: var(--accent-primary); border-color: rgba(16, 185, 129, 0.35); }
     .pt-outcome-lost { background: rgba(239, 68, 68, 0.2);  color: #ef4444;               border-color: rgba(239, 68, 68, 0.35); }
+    .pt-phase-badge {
+        display: inline-block; margin-left: 0.35rem; padding: 0.05rem 0.42rem; border-radius: 999px;
+        font-size: 0.6rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.3px;
+        background: rgba(139, 92, 246, 0.18); color: #a78bfa;
+        border: 1px solid rgba(139, 92, 246, 0.35); vertical-align: middle;
+    }
 
     .pt-empty {
         padding: 1.5rem; text-align: center; color: var(--text-muted); font-size: 0.85rem;
@@ -285,6 +299,7 @@
             font-size: 0.75rem; padding: 0.3rem 0;
         }
         .pt-bet-row .num { text-align: left; }
+        .pt-bet-row-header { display: none; }
     }
 </style>
 {% endblock %}
@@ -617,26 +632,44 @@
         }
     }
 
+    function betRowHeader(settled) {
+        return `<div class="pt-bet-row pt-bet-row-header">
+            <span>Strategy</span>
+            <span>Side</span>
+            <span class="num">Edge</span>
+            <span class="num">Model %</span>
+            <span class="num">Market %</span>
+            <span class="num">Date</span>
+            <span class="num">Stake</span>
+            <span class="num">${settled ? 'P&L' : 'Bankroll'}</span>
+            <span class="num">Result</span>
+        </div>`;
+    }
+
     function makeBetRow(b) {
         const edgeCls = b.edge_pp >= 5 ? 'pt-edge-high' : b.edge_pp >= 2 ? 'pt-edge-medium' : 'pt-edge-low';
         const settled = b.status === 'settled';
         const won = b.settle_outcome === 1;
         const pnl = b.pnl_realised_usdc;
-        const pnlSpan = settled
+        const pnlCol = settled
             ? `<span class="num ${pnl >= 0 ? 'pt-pl-positive' : 'pt-pl-negative'}">${fmtMoney(pnl)}</span>`
-            : `<span class="num">${fmtMoney(b.size_usdc)}</span>`;
+            : `<span class="num" style="color:var(--text-muted)">${fmtMoney(b.bankroll_at_proposal)}</span>`;
         const outcome = settled
             ? `<span class="pt-outcome-pill ${won ? 'pt-outcome-won' : 'pt-outcome-lost'}">${won ? 'WON' : 'LOST'}</span>`
-            : `<span class="num" style="color:var(--text-muted)">${fmtMoney(b.bankroll_at_proposal)}</span>`;
+            : '';
+        const phaseBadge = b.phase === 'post_toss'
+            ? '<span class="pt-phase-badge">post-toss</span>'
+            : '';
         return `
             <div class="pt-bet-row">
-                <span class="strat-name">${b.strategy_label}</span>
+                <span class="strat-name">${b.strategy_label}${phaseBadge}</span>
                 <span class="side-label">${b.side_label || '--'}</span>
                 <span class="num"><span class="pt-edge-pill ${edgeCls}">+${Number(b.edge_pp).toFixed(1)}pp</span></span>
                 <span class="num">${(b.model_prob*100).toFixed(1)}%</span>
                 <span class="num">${(b.market_price_at_proposal*100).toFixed(1)}%</span>
                 <span class="num" style="color:var(--text-muted);font-size:0.72rem">${(settled ? b.settled_at : b.proposed_at || '').slice(5,16).replace('T',' ')}</span>
-                ${pnlSpan}
+                <span class="num">${fmtMoney(b.size_usdc)}</span>
+                ${pnlCol}
                 ${outcome}
             </div>
         `;
@@ -719,6 +752,7 @@
                     </div>
                 </div>
                 <div class="pt-card-body">
+                    ${betRowHeader(false)}
                     ${fx.bets.map(makeBetRow).join('')}
                 </div>
             `;
@@ -829,7 +863,7 @@
                 `;
                 const fxBets = document.createElement('div');
                 fxBets.className = 'pt-fixture-bets';
-                fxBets.innerHTML = fx.bets.map(makeBetRow).join('');
+                fxBets.innerHTML = betRowHeader(true) + fx.bets.map(makeBetRow).join('');
                 fxRow.addEventListener('click', () => fxRow.classList.toggle('open'));
                 body.appendChild(fxRow);
                 body.appendChild(fxBets);

@@ -36,7 +36,7 @@ import json
 import logging
 import re
 import sqlite3
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
 import requests
@@ -278,6 +278,103 @@ def _compute_pnl_for_settled_bet(
     return round(gross_payout - fill_size_usdc - fee, 4)
 
 
+def _reconcile_stale_twap_plans(conn: sqlite3.Connection) -> int:
+    """Finalize orphaned TWAP plans whose kickoff has passed.
+
+    If a plan is still 'pending' or 'executing' but the kickoff was > 2h ago,
+    the daemon must have missed it. Aggregate whatever filled and update
+    the bet_ledger row accordingly.
+
+    Returns the number of plans finalized.
+    """
+    cur = conn.cursor()
+    try:
+        cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='order_plans'")
+        if not cur.fetchone():
+            return 0
+    except Exception:
+        return 0
+
+    now_iso = datetime.now(timezone.utc).isoformat()
+    two_hours_ago = (datetime.now(timezone.utc) - timedelta(hours=2)).isoformat()
+
+    cur.execute(
+        """
+        SELECT plan_id, bet_ledger_id FROM order_plans
+        WHERE status IN ('pending', 'executing')
+          AND kickoff_at IS NOT NULL
+          AND kickoff_at < ?
+        """,
+        (two_hours_ago,),
+    )
+    stale_plans = cur.fetchall()
+    n_finalized = 0
+
+    for plan in stale_plans:
+        plan_id = plan["plan_id"]
+        bet_id = plan["bet_ledger_id"]
+
+        # Cancel any placed-but-unfilled chunks (don't bother with CLOB cancel
+        # since the market is likely resolved or close to it)
+        cur.execute(
+            "UPDATE order_chunks SET status = 'cancelled' WHERE plan_id = ? AND status IN ('pending', 'placed')",
+            (plan_id,),
+        )
+
+        # Aggregate filled chunks
+        cur.execute(
+            """
+            SELECT COUNT(*) as cnt,
+                   COALESCE(SUM(fill_size_usdc), 0) as total_usdc,
+                   COALESCE(SUM(fill_price * fill_size_usdc), 0) as weighted_price
+            FROM order_chunks
+            WHERE plan_id = ? AND status = 'filled'
+            """,
+            (plan_id,),
+        )
+        agg = cur.fetchone()
+        filled_count = agg["cnt"] if agg else 0
+        total_filled_usdc = agg["total_usdc"] if agg else 0
+        weighted_price_sum = agg["weighted_price"] if agg else 0
+
+        avg_fill = (weighted_price_sum / total_filled_usdc) if total_filled_usdc > 0 else None
+        final_status = "completed" if filled_count > 0 else "cancelled"
+
+        cur.execute(
+            """
+            UPDATE order_plans
+            SET status = ?, chunks_filled = ?, filled_size_usdc = ?, avg_fill_price = ?, updated_at = ?
+            WHERE plan_id = ?
+            """,
+            (final_status, filled_count, total_filled_usdc, avg_fill, now_iso, plan_id),
+        )
+
+        # Update bet_ledger
+        if bet_id:
+            if total_filled_usdc > 0:
+                cur.execute(
+                    """
+                    UPDATE bet_ledger
+                    SET status = 'filled', filled_at = ?, fill_price = ?, fill_size_usdc = ?
+                    WHERE bet_id = ? AND status = 'proposed'
+                    """,
+                    (now_iso, avg_fill, total_filled_usdc, bet_id),
+                )
+            else:
+                cur.execute(
+                    "UPDATE bet_ledger SET status = 'cancelled' WHERE bet_id = ? AND status = 'proposed'",
+                    (bet_id,),
+                )
+
+        n_finalized += 1
+
+    if n_finalized > 0:
+        conn.commit()
+        logger.info(f"Reconciled {n_finalized} stale TWAP plans (kickoff passed)")
+
+    return n_finalized
+
+
 def reconcile_pending_bets(
     conn: Optional[sqlite3.Connection] = None,
     poly_client: Optional[PolymarketClient] = None,
@@ -289,6 +386,7 @@ def reconcile_pending_bets(
             "n_checked": int,
             "n_settled": int,
             "n_still_pending": int,
+            "n_twap_finalized": int,
             "errors": [(bet_id, message), ...]
         }
     """
@@ -300,6 +398,14 @@ def reconcile_pending_bets(
 
     if poly_client is None:
         poly_client = PolymarketClient()
+
+    # First pass: finalize any stale TWAP plans so their bet_ledger rows
+    # become 'filled' and eligible for settlement in the main pass below.
+    n_twap_finalized = 0
+    try:
+        n_twap_finalized = _reconcile_stale_twap_plans(conn)
+    except Exception as exc:
+        logger.warning(f"TWAP plan reconciliation failed: {exc}")
 
     bets = _fetch_unsettled_bets(conn)
     n_checked = len(bets)
@@ -459,5 +565,6 @@ def reconcile_pending_bets(
         "n_checked": n_checked,
         "n_settled": n_settled,
         "n_still_pending": n_checked - n_settled,
+        "n_twap_finalized": n_twap_finalized,
         "errors": errors,
     }

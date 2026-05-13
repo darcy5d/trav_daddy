@@ -184,6 +184,119 @@ class PolymarketClient:
         return self._get_json(url, params=params)
 
     # ------------------------------------------------------------------
+    # Wave 5.9: Order-book analysis helpers for TWAP routing
+    # ------------------------------------------------------------------
+
+    def get_book_spread(self, token_id: str) -> Dict[str, Any]:
+        """Analyze the order book and return spread/liquidity metrics.
+
+        Returns:
+            {
+                "bid": float or None,         # best bid price
+                "ask": float or None,         # best ask price
+                "spread_pp": float or None,   # spread in percentage points (ask - bid) * 100
+                "best_bid_size": float,       # total size at best bid level
+                "best_ask_size": float,       # total size at best ask level
+                "midpoint": float or None,    # (bid + ask) / 2
+            }
+        """
+        book = self.get_clob_order_book(token_id)
+        bids = book.get("bids", []) if isinstance(book, dict) else []
+        asks = book.get("asks", []) if isinstance(book, dict) else []
+
+        best_bid = float(bids[0]["price"]) if bids else None
+        best_ask = float(asks[0]["price"]) if asks else None
+        best_bid_size = float(bids[0].get("size", 0)) if bids else 0.0
+        best_ask_size = float(asks[0].get("size", 0)) if asks else 0.0
+
+        spread_pp = None
+        midpoint = None
+        if best_bid is not None and best_ask is not None:
+            spread_pp = (best_ask - best_bid) * 100.0
+            midpoint = (best_bid + best_ask) / 2.0
+
+        return {
+            "bid": best_bid,
+            "ask": best_ask,
+            "spread_pp": spread_pp,
+            "best_bid_size": best_bid_size,
+            "best_ask_size": best_ask_size,
+            "midpoint": midpoint,
+        }
+
+    def get_effective_fill_price(self, token_id: str, size_usdc: float) -> Dict[str, Any]:
+        """Walk the ask side of the book to compute the VWAP for a given stake.
+
+        Simulates what a FOK market buy of `size_usdc` would actually pay by
+        walking ask levels from best to worst.
+
+        Returns:
+            {
+                "vwap": float or None,       # volume-weighted average price
+                "total_fillable": float,     # max USDC fillable from current asks
+                "levels_consumed": int,      # number of ask levels eaten into
+                "slippage_pp": float or None, # (vwap - best_ask) * 100
+                "asks_below_price": list,    # asks below a given price (for TWAP sizing)
+            }
+        """
+        book = self.get_clob_order_book(token_id)
+        asks = book.get("asks", []) if isinstance(book, dict) else []
+
+        if not asks:
+            return {
+                "vwap": None,
+                "total_fillable": 0.0,
+                "levels_consumed": 0,
+                "slippage_pp": None,
+                "asks_below_price": [],
+            }
+
+        remaining = float(size_usdc)
+        total_cost = 0.0
+        total_shares = 0.0
+        levels_consumed = 0
+
+        for level in asks:
+            price = float(level["price"])
+            level_size_shares = float(level.get("size", 0))
+            level_cost_capacity = level_size_shares * price
+
+            if remaining <= 0:
+                break
+
+            fill_cost = min(remaining, level_cost_capacity)
+            fill_shares = fill_cost / price
+            total_cost += fill_cost
+            total_shares += fill_shares
+            remaining -= fill_cost
+            levels_consumed += 1
+
+        vwap = (total_cost / total_shares) if total_shares > 0 else None
+        best_ask = float(asks[0]["price"]) if asks else None
+        slippage_pp = ((vwap - best_ask) * 100.0) if (vwap and best_ask) else None
+
+        return {
+            "vwap": round(vwap, 6) if vwap else None,
+            "total_fillable": round(total_cost + (size_usdc - remaining) if remaining < 0 else total_cost, 4),
+            "levels_consumed": levels_consumed,
+            "slippage_pp": round(slippage_pp, 2) if slippage_pp is not None else None,
+            "asks_below_price": asks,
+        }
+
+    def get_asks_below_price(self, token_id: str, max_price: float) -> List[Dict[str, Any]]:
+        """Return all ask levels priced at or below `max_price`.
+
+        Each entry: {"price": float, "size": float (shares)}
+        """
+        book = self.get_clob_order_book(token_id)
+        asks = book.get("asks", []) if isinstance(book, dict) else []
+        return [
+            {"price": float(a["price"]), "size": float(a.get("size", 0))}
+            for a in asks
+            if float(a["price"]) <= max_price
+        ]
+
+    # ------------------------------------------------------------------
     # Wave 5 Phase 6a: Write-path via py-clob-client
     # ------------------------------------------------------------------
 

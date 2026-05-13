@@ -39,9 +39,9 @@ from typing import Any, Dict, List, Optional
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from src.data.database import get_connection
+from src.data.database import get_connection, get_active_model_snapshot
 from src.integrations.polymarket import PolymarketClient
-from src.integrations.polymarket.bet_placement import place_bet
+from src.integrations.polymarket.bet_placement import place_bet, place_bet_twap
 from src.integrations.polymarket.upcoming import (
     find_upcoming_cricket_events,
     attach_db_team_ids,
@@ -169,6 +169,8 @@ def _already_bet_live(conn, strategy_label: str, fixture_key: str, market_id: st
     reject, CLOB error, etc.) should be retryable on the next cron tick
     since nothing actually hit the exchange. Filled / placed / settled /
     cancelled bets DO block retry (otherwise we'd double-bet).
+
+    Also checks order_plans for pending/executing TWAP plans on this fixture.
     """
     cur = conn.cursor()
     cur.execute(
@@ -185,7 +187,26 @@ def _already_bet_live(conn, strategy_label: str, fixture_key: str, market_id: st
         """,
         (strategy_label, fixture_key, market_id, side_label, phase),
     )
-    return cur.fetchone() is not None
+    if cur.fetchone() is not None:
+        return True
+
+    # Check for active TWAP plans on this fixture/strategy
+    try:
+        cur.execute(
+            """
+            SELECT plan_id FROM order_plans
+            WHERE strategy_label = ?
+              AND fixture_key = ?
+              AND status IN ('pending', 'executing')
+            LIMIT 1
+            """,
+            (strategy_label, fixture_key),
+        )
+        if cur.fetchone() is not None:
+            return True
+    except Exception:
+        pass
+    return False
 
 
 def _strategy_has_any_live_bet_on_fixture(conn, strategy_label: str,
@@ -326,6 +347,9 @@ def scan_and_place_live_bets(
         f"LIVE scanner active. Strategies: {[s.name for s in enabled_strats]}  "
         f"(mode={mode}, kill_switch={kill_switch})"
     )
+
+    # Capture active model snapshot once per scan run for bet_ledger stamping.
+    model_snapshot = get_active_model_snapshot()
 
     needs_v2 = any(s.model_version in ("v2", "consensus") for s in enabled_strats)
     needs_v3 = any(s.model_version in ("v3", "consensus") for s in enabled_strats)
@@ -494,6 +518,21 @@ def scan_and_place_live_bets(
                     "side_label": side_label,
                 })
                 continue
+            # Model probability bounds: exclude coin-flip zone and overconfident bets.
+            if strat.min_model_prob is not None and model_prob < strat.min_model_prob:
+                summary["bets_skipped"].append({
+                    "strategy": strat.name, "fixture": fix["fixture_key"],
+                    "reason": f"model_prob {model_prob:.3f} < min {strat.min_model_prob}",
+                    "side_label": side_label,
+                })
+                continue
+            if strat.max_model_prob is not None and model_prob > strat.max_model_prob:
+                summary["bets_skipped"].append({
+                    "strategy": strat.name, "fixture": fix["fixture_key"],
+                    "reason": f"model_prob {model_prob:.3f} > max {strat.max_model_prob}",
+                    "side_label": side_label,
+                })
+                continue
 
             with get_connection() as conn:
                 if _already_bet_live(conn, strat.name, fix["fixture_key"],
@@ -536,24 +575,91 @@ def scan_and_place_live_bets(
                 continue
 
             kickoff_iso = kickoff.isoformat() if kickoff else None
+
+            # --- TWAP routing: check order book spread ---
+            import os
+            twap_fok_threshold_pp = float(os.getenv("TWAP_FOK_THRESHOLD_PP", "5"))
+            max_acceptable_price = model_prob - (strat.min_edge_pp / 100.0)
+
+            use_twap = False
+            book_info = None
             try:
-                result = place_bet(
-                    fixture_key=fix["fixture_key"],
-                    match_id=None,
-                    market_type="moneyline",
-                    polymarket_market_id=ml.get("market_id") or "",
-                    polymarket_token_id=side_token_id or "",
-                    side_label=side_label or "",
-                    model_prob=model_prob,
-                    market_price_at_proposal=market_price,
-                    side="BUY",
-                    size_usdc=stake,
-                    requested_mode="auto",
-                    strategy_label=strat.name,
-                    bankroll_at_proposal=bankroll_now,
-                    phase="pre_toss",
-                    kickoff_at=kickoff_iso,
-                )
+                book_info = pm_client.get_book_spread(side_token_id)
+            except Exception as exc:
+                logger.warning(f"    [{strat.name}] book spread fetch failed: {exc} — defaulting to FOK")
+
+            if book_info and book_info.get("spread_pp") is not None:
+                spread_pp = book_info["spread_pp"]
+                best_ask = book_info.get("ask")
+                best_bid = book_info.get("bid")
+                best_ask_size = book_info.get("best_ask_size", 0)
+
+                if spread_pp <= twap_fok_threshold_pp and best_ask is not None and best_ask <= max_acceptable_price:
+                    use_twap = False
+                    logger.info(
+                        f"    [{strat.name}] Spread={spread_pp:.1f}pp <= {twap_fok_threshold_pp}pp, "
+                        f"ask={best_ask:.4f} <= max={max_acceptable_price:.4f} -> FOK"
+                    )
+                elif best_ask is not None and best_ask <= max_acceptable_price:
+                    use_twap = True
+                    logger.info(
+                        f"    [{strat.name}] Spread={spread_pp:.1f}pp > {twap_fok_threshold_pp}pp, "
+                        f"asks exist below max={max_acceptable_price:.4f} -> TWAP"
+                    )
+                elif best_bid is not None:
+                    use_twap = True
+                    logger.info(
+                        f"    [{strat.name}] No asks below max={max_acceptable_price:.4f}, "
+                        f"but posting limit orders at ceiling -> TWAP (passive)"
+                    )
+                else:
+                    logger.info(
+                        f"    [{strat.name}] Empty book — no bids or asks -> FOK fallback"
+                    )
+
+            try:
+                if use_twap and book_info:
+                    base_price_for_plan = book_info.get("bid") or market_price
+                    result = place_bet_twap(
+                        fixture_key=fix["fixture_key"],
+                        match_id=None,
+                        market_type="moneyline",
+                        polymarket_market_id=ml.get("market_id") or "",
+                        polymarket_token_id=side_token_id or "",
+                        side_label=side_label or "",
+                        model_prob=model_prob,
+                        market_price_at_proposal=market_price,
+                        side="BUY",
+                        size_usdc=stake,
+                        max_acceptable_price=max_acceptable_price,
+                        base_price=base_price_for_plan,
+                        best_ask_size=book_info.get("best_ask_size", 10.0),
+                        requested_mode="auto",
+                        strategy_label=strat.name,
+                        bankroll_at_proposal=bankroll_now,
+                        phase="pre_toss",
+                        kickoff_at=kickoff_iso,
+                        model_snapshot=model_snapshot,
+                    )
+                else:
+                    result = place_bet(
+                        fixture_key=fix["fixture_key"],
+                        match_id=None,
+                        market_type="moneyline",
+                        polymarket_market_id=ml.get("market_id") or "",
+                        polymarket_token_id=side_token_id or "",
+                        side_label=side_label or "",
+                        model_prob=model_prob,
+                        market_price_at_proposal=market_price,
+                        side="BUY",
+                        size_usdc=stake,
+                        requested_mode="auto",
+                        strategy_label=strat.name,
+                        bankroll_at_proposal=bankroll_now,
+                        phase="pre_toss",
+                        kickoff_at=kickoff_iso,
+                        model_snapshot=model_snapshot,
+                    )
             except Exception as exc:
                 logger.error(f"    [{strat.name}] place_bet raised: {exc}")
                 summary["bets_rejected"].append({
@@ -563,9 +669,14 @@ def scan_and_place_live_bets(
                 continue
 
             if result.get("success"):
+                route_tag = "TWAP" if use_twap else "FOK"
+                status_str = result.get("status", "placed")
+                extra = ""
+                if use_twap:
+                    extra = f"  plan_id={result.get('plan_id')} chunks={result.get('chunks_total')}"
                 logger.info(
-                    f"    [{strat.name}] LIVE BET #{result['bet_id']}: BACK {side_label} @ {market_price:.3f} "
-                    f"size=${stake:.2f}  edge=+{edge_pp:.1f}pp  bank=${bankroll_now:.2f}  status={result['status']}"
+                    f"    [{strat.name}] LIVE BET #{result['bet_id']} ({route_tag}): BACK {side_label} @ {market_price:.3f} "
+                    f"size=${stake:.2f}  edge=+{edge_pp:.1f}pp  bank=${bankroll_now:.2f}  status={status_str}{extra}"
                 )
                 summary["bets_placed"].append({
                     "bet_id": result["bet_id"], "strategy": strat.name,
@@ -575,7 +686,8 @@ def scan_and_place_live_bets(
                     "market_price": market_price, "edge_pp": edge_pp,
                     "stake_usdc": stake, "bankroll_at_proposal": bankroll_now,
                     "kickoff_utc": kickoff.isoformat(),
-                    "status": result["status"],
+                    "status": status_str,
+                    "route": route_tag,
                 })
             else:
                 logger.warning(

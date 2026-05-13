@@ -11,7 +11,7 @@ Why multiple strategies:
 
 Strategy templates (default starting bankroll $1000 each):
     v2_odi_t3h_3pp        -- the historical winner (V2 / ODI men / T-3h / 3pp+ edge)
-    v2_any_t3h_5pp        -- broader: V2 any-tournament T-3h with high 5pp threshold
+    v2_any_t3h_5pp        -- broader: V2 any-tournament T-3h with high 5pp threshold (RETIRED)
     v3_marg_t3h_3pp       -- V3 marginalised / any / T-3h / 3pp+
     consensus_5pp         -- V2 AND V3 agree on same side, both >= 5pp edge
 
@@ -39,11 +39,25 @@ class PaperStrategy:
     min_market_price: float = 0.08
     max_market_price: float = 0.92
     min_edge_pp: float = 3.0      # percentage points (model_prob - market_price) * 100
+    # model_prob bounds: skip bets outside this range (None = no bound).
+    # Used to exclude the coin-flip zone [0.45, 0.55] where calibration shows
+    # no edge, and to prevent chasing markets where model is overconfident.
+    min_model_prob: Optional[float] = None
+    max_model_prob: Optional[float] = None
+    # Fill-gap guard: skip if (model_prob - market_price)*100 exceeds this.
+    # Catches cases where the market has moved sharply on information the model
+    # doesn't have (e.g. toss outcome for V2 strategies, late XI news).
+    # None = no limit.
+    max_model_minus_fill_pp: Optional[float] = None
 
     # Model
     model_version: str = "v2"          # "v2" or "v3"
     toss_mode: str = "marginalised"     # "marginalised" or "pinned" (V3 only)
     require_consensus_with: Optional[str] = None  # name of another strategy that must agree
+    # Post-toss real-bet eligibility. Set False for V2-based strategies that
+    # cannot condition on the toss outcome (V2 sim ignores toss kwargs).
+    # Paper bets are always placed regardless of this flag.
+    post_toss_eligible: bool = True
 
     # Entry timing
     lookback_hours: float = 3.0         # bet within this window before scheduled start
@@ -90,7 +104,8 @@ STRATEGIES: List[PaperStrategy] = [
         name="v2_any_5pp",
         description=(
             "V2 any tournament + moneyline + high 5pp edge threshold. "
-            "Broader than ODI-only but stricter on edge."
+            "RETIRED: 25% win rate, no demonstrated edge. "
+            "Also excluded from post-toss real bets (V2 is toss-blind)."
         ),
         enabled_market_types=["moneyline"],
         min_edge_pp=5.0,
@@ -99,12 +114,15 @@ STRATEGIES: List[PaperStrategy] = [
         lookback_hours_min=0.0,
         starting_bankroll_usdc=1000.0,
         kelly_mult=0.5,
+        post_toss_eligible=False,
+        enabled=False,
     ),
     PaperStrategy(
         name="v3_marg_3pp",
         description=(
             "V3 (marginalised toss) any tournament + moneyline + 3pp edge. "
-            "Tests V3-vs-V2 lift hypothesised in Wave 5.5."
+            "Tests V3-vs-V2 lift hypothesised in Wave 5.5. "
+            "Post-toss eligible: uses toss_pinned=True in live_bet_post_toss_scan."
         ),
         enabled_market_types=["moneyline"],
         min_edge_pp=3.0,
@@ -114,12 +132,17 @@ STRATEGIES: List[PaperStrategy] = [
         lookback_hours_min=0.0,
         starting_bankroll_usdc=1000.0,
         kelly_mult=0.5,
+        min_model_prob=0.55,
+        post_toss_eligible=True,
+        max_model_minus_fill_pp=20.0,
     ),
     PaperStrategy(
         name="consensus_5pp",
         description=(
             "V2 AND V3 both pick the same side with at least 5pp edge each. "
-            "Robust signal filter; expected to fire rarely but with higher hit rate."
+            "Robust signal filter; best ROI of all strategies (-20%). "
+            "Excluded from post-toss real bets: V2 half is toss-blind and "
+            "contaminates the consensus signal post-toss."
         ),
         enabled_market_types=["moneyline"],
         min_edge_pp=5.0,
@@ -128,6 +151,8 @@ STRATEGIES: List[PaperStrategy] = [
         lookback_hours_min=0.0,
         starting_bankroll_usdc=1000.0,
         kelly_mult=0.5,
+        min_model_prob=0.60,
+        post_toss_eligible=False,
     ),
     # Diagnostic: low-edge wide-window quarter-Kelly to capture max data.
     PaperStrategy(
@@ -135,7 +160,8 @@ STRATEGIES: List[PaperStrategy] = [
         description=(
             "DIAGNOSTIC: V2 any tournament with very low 2pp threshold and "
             "quarter-Kelly. Captures more data points for calibration; "
-            "ROI signal expected to be noisier but bet count higher."
+            "ROI signal expected to be noisier but bet count higher. "
+            "Excluded from post-toss real bets (V2 is toss-blind)."
         ),
         enabled_market_types=["moneyline"],
         min_edge_pp=2.0,
@@ -145,6 +171,7 @@ STRATEGIES: List[PaperStrategy] = [
         starting_bankroll_usdc=1000.0,
         kelly_mult=0.25,
         max_stake_usdc=50.0,
+        post_toss_eligible=False,
     ),
 ]
 

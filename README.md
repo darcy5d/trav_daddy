@@ -202,6 +202,96 @@ python scripts/bootstrap_polymarket_wallet.py --approve
 # 5. Restart Flask, navigate to /live-betting; mode defaults to OFF
 ```
 
+## Daily startup (after reboot / Cursor restart)
+
+Three processes need to be running for live trading to operate:
+
+```bash
+cd /Users/darcy5d/Desktop/DD_AI_models/indias_dad
+
+# 1. Flask web app (port 5001) — dashboard + API
+FLASK_PORT=5001 venv311/bin/python -m flask --app app.main run --port 5001 --host 127.0.0.1
+
+# 2. Post-toss daemon — detects toss, spawns paper+live scans, executes TWAP plans
+venv311/bin/python scripts/paper_bet_auto_post_toss.py \
+    --poll-interval 90 --lookback-min 45 --lookahead-min 30 --also-live
+
+# 3. Cron jobs (already installed, verify with `crontab -l`):
+#    :00 — paper_bet_daily.py (paper trade scanner, hourly)
+#    :30 — live_bet_scan.py (live trade scanner with TWAP routing, hourly)
+```
+
+### Quick start (copy-paste)
+
+Run Flask and the daemon as background processes:
+
+```bash
+cd /Users/darcy5d/Desktop/DD_AI_models/indias_dad
+
+# Start daemon (backgrounded, logs to logs/paper_auto_post_toss.log)
+nohup venv311/bin/python scripts/paper_bet_auto_post_toss.py \
+    --poll-interval 90 --lookback-min 45 --lookahead-min 30 --also-live \
+    >> logs/paper_auto_post_toss.log 2>&1 &
+
+# Start Flask (backgrounded, logs to logs/flask.log)
+FLASK_PORT=5001 nohup venv311/bin/python -m flask --app app.main run \
+    --port 5001 --host 127.0.0.1 >> logs/flask.log 2>&1 &
+```
+
+### Health checks
+
+```bash
+# Daemon alive?
+cat logs/paper_auto_post_toss_status.json | python3 -m json.tool | head -5
+
+# Flask alive?
+curl -s http://127.0.0.1:5001/api/betting/config | python3 -m json.tool | head -3
+
+# Cron installed?
+crontab -l | grep -E "(paper_bet|live_bet)"
+
+# Active TWAP plans?
+sqlite3 cricket.db "SELECT plan_id, fixture_key, status, chunks_placed, chunks_filled FROM order_plans WHERE status IN ('pending','executing');"
+```
+
+### Troubleshooting
+
+| Symptom | Cause | Fix |
+|---------|-------|-----|
+| Flask hangs on startup (>30s) | TensorFlow rebuilding .pyc cache after pip changes | Wait 60s for first startup; subsequent starts are fast |
+| Daemon won't start ("already running") | Stale PID file | `rm logs/paper_auto_post_toss.pid` then restart |
+| Port 5001 in use | Old Flask process | `lsof -ti :5001 \| xargs kill -9` then restart |
+| `py-clob-client-v2` import error | Package uninstalled | `venv311/bin/pip install py-clob-client-v2` |
+| Playwright not found | Binary missing | `venv311/bin/python -m playwright install chromium` |
+
+### Process architecture
+
+```
+┌─────────────────────────────────────────────────────────┐
+│ Cron (:00)  paper_bet_daily.py    → paper bets to DB    │
+│ Cron (:30)  live_bet_scan.py      → FOK or TWAP plans   │
+│                                                         │
+│ Daemon (90s) paper_bet_auto_post_toss.py                │
+│   ├─ Detect toss → spawn paper + live post-toss scans  │
+│   └─ Process TWAP plans → place/check limit orders     │
+│                                                         │
+│ Flask (:5001) app/main.py                               │
+│   └─ Dashboard, API, reconciliation                    │
+└─────────────────────────────────────────────────────────┘
+```
+
+### TWAP execution (Wave 5.9)
+
+The live bet scanner routes orders based on order-book spread:
+- **Spread ≤ 5pp** → instant FOK (fill-or-kill) market order
+- **Spread > 5pp** → TWAP plan written to `order_plans` table; daemon places limit order chunks every 90s up to `max_acceptable_price = model_prob - min_edge_pp/100`
+
+Config in `.env`:
+```
+TWAP_FOK_THRESHOLD_PP=5    # spread threshold for FOK vs TWAP routing
+TWAP_PRICE_STEP_PP=2       # default price step (overridden dynamically per plan)
+```
+
 ## Data model
 
 Schema files live in [`src/data/`](src/data/):
@@ -211,6 +301,8 @@ Schema files live in [`src/data/`](src/data/):
 - `schema_v3_tiered_elo.sql` — tiered team ELO + cross-pool normalisation
 - `schema_v4_franchise.sql` — `team_groups`, `team_external_ids`, franchise unification
 - `schema_v5_betting.sql` — `bet_ledger` (Wave 5 Phase 6b)
+- `schema_v6_paper_betting.sql` — paper-bet columns + indices
+- `schema_v7_twap.sql` — `order_plans`, `order_chunks` (Wave 5.9 TWAP execution)
 - `schema_model_versions.sql` — `model_versions`, training metadata
 
 See [`docs/DATABASE_SCHEMA.md`](docs/DATABASE_SCHEMA.md) for the full

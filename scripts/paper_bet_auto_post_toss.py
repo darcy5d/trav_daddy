@@ -492,6 +492,370 @@ def process_fixture(
     return result
 
 
+def _process_twap_plans(dry_run: bool = False) -> Dict[str, Any]:
+    """Execute pending TWAP order plans: place next chunk, check fills, cancel stale.
+
+    Called once per daemon iteration. For each active plan:
+      1. Re-read the order book (adaptive pricing).
+      2. Check fill status of previously-placed chunks.
+      3. Place the next pending chunk as a limit order.
+      4. Cancel unfilled orders approaching kickoff deadline.
+
+    Returns a summary dict for logging.
+    """
+    twap_summary: Dict[str, Any] = {"plans_processed": 0, "chunks_placed": 0, "chunks_filled": 0, "plans_completed": 0, "plans_cancelled": 0}
+
+    try:
+        conn = get_connection()
+    except Exception as exc:
+        logger.error(f"TWAP: DB connection failed: {exc}")
+        return twap_summary
+
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            """
+            SELECT * FROM order_plans
+            WHERE status IN ('pending', 'executing')
+            ORDER BY created_at ASC
+            """
+        )
+        plans = cur.fetchall()
+    except Exception as exc:
+        logger.error(f"TWAP: query order_plans failed: {exc}")
+        conn.close()
+        return twap_summary
+
+    if not plans:
+        conn.close()
+        return twap_summary
+
+    pm_client = PolymarketClient()
+
+    for plan in plans:
+        plan_id = plan["plan_id"]
+        token_id = plan["token_id"]
+        max_price = plan["max_acceptable_price"]
+        base_price = plan["base_price"]
+        chunks_total = plan["chunks_total"]
+        chunks_placed = plan["chunks_placed"]
+        chunks_filled = plan["chunks_filled"]
+        kickoff_at = plan["kickoff_at"]
+        twap_summary["plans_processed"] += 1
+
+        # Check kickoff deadline (cancel 30min before kickoff)
+        if kickoff_at:
+            try:
+                kickoff_dt = datetime.fromisoformat(kickoff_at.replace("Z", "+00:00"))
+                now_utc = datetime.now(timezone.utc)
+                minutes_to_kickoff = (kickoff_dt - now_utc).total_seconds() / 60.0
+                if minutes_to_kickoff <= 30:
+                    logger.info(f"TWAP plan #{plan_id}: {minutes_to_kickoff:.0f}min to kickoff — cancelling unfilled")
+                    _cancel_plan_unfilled_chunks(conn, cur, pm_client, plan_id, dry_run)
+                    _finalize_plan(conn, cur, plan_id)
+                    twap_summary["plans_cancelled"] += 1
+                    continue
+            except (ValueError, TypeError):
+                pass
+
+        # Move from pending -> executing on first tick
+        if plan["status"] == "pending":
+            cur.execute(
+                "UPDATE order_plans SET status = 'executing', updated_at = ? WHERE plan_id = ?",
+                (_utc_now_iso(), plan_id),
+            )
+            conn.commit()
+
+        # Check fill status of previously placed chunks
+        _check_chunk_fills(conn, cur, pm_client, plan_id)
+
+        # Recount after fill checks
+        cur.execute(
+            "SELECT COUNT(*) FROM order_chunks WHERE plan_id = ? AND status = 'filled'",
+            (plan_id,),
+        )
+        current_filled = cur.fetchone()[0]
+        cur.execute(
+            "SELECT COALESCE(SUM(fill_size_usdc), 0) FROM order_chunks WHERE plan_id = ? AND status = 'filled'",
+            (plan_id,),
+        )
+        filled_usdc = cur.fetchone()[0]
+        twap_summary["chunks_filled"] += max(0, current_filled - chunks_filled)
+
+        # Update plan filled counts
+        cur.execute(
+            "UPDATE order_plans SET chunks_filled = ?, filled_size_usdc = ?, updated_at = ? WHERE plan_id = ?",
+            (current_filled, filled_usdc, _utc_now_iso(), plan_id),
+        )
+        conn.commit()
+
+        # If all chunks filled or placed and filled, mark completed
+        if current_filled >= chunks_total:
+            _finalize_plan(conn, cur, plan_id)
+            twap_summary["plans_completed"] += 1
+            continue
+
+        # Place next pending chunk
+        cur.execute(
+            """
+            SELECT * FROM order_chunks
+            WHERE plan_id = ? AND status = 'pending'
+            ORDER BY chunk_index ASC
+            LIMIT 1
+            """,
+            (plan_id,),
+        )
+        next_chunk = cur.fetchone()
+        if next_chunk is None:
+            # All chunks are either placed, filled, or cancelled
+            cur.execute(
+                "SELECT COUNT(*) FROM order_chunks WHERE plan_id = ? AND status = 'placed'",
+                (plan_id,),
+            )
+            still_open = cur.fetchone()[0]
+            if still_open == 0:
+                _finalize_plan(conn, cur, plan_id)
+                twap_summary["plans_completed"] += 1
+            continue
+
+        # Adaptive re-pricing: re-read the book for current spread
+        try:
+            book = pm_client.get_book_spread(token_id)
+            current_bid = book.get("bid")
+            current_ask = book.get("ask")
+            current_spread_pp = book.get("spread_pp")
+
+            # If spread has tightened below FOK threshold and remaining stake
+            # is small enough, we could switch to FOK — but for simplicity
+            # we keep placing limit orders at the planned price.
+        except Exception as exc:
+            logger.warning(f"TWAP plan #{plan_id}: book read failed ({exc}), using planned price")
+            current_bid = None
+            current_ask = None
+
+        chunk_id = next_chunk["chunk_id"]
+        planned_limit_price = next_chunk["limit_price"]
+
+        # Adaptive: if the current ask is better (lower) than our planned
+        # limit, use the ask. If current bid moved up, we can be more
+        # aggressive. Cap at max_acceptable_price always.
+        effective_price = planned_limit_price
+        if current_ask is not None and current_ask < planned_limit_price:
+            effective_price = current_ask
+        effective_price = min(effective_price, max_price)
+        effective_price = round(effective_price, 4)
+
+        size_usdc = next_chunk["size_usdc"]
+        size_shares = round(size_usdc / effective_price, 4) if effective_price > 0 else 0
+
+        if dry_run:
+            logger.info(
+                f"TWAP plan #{plan_id} chunk #{next_chunk['chunk_index']}: "
+                f"DRY-RUN limit {plan['side']} {size_shares:.2f} shares @ {effective_price:.4f} "
+                f"(${size_usdc:.2f})"
+            )
+            continue
+
+        # Place the limit order
+        try:
+            resp = pm_client.place_limit_order(
+                token_id=token_id,
+                side=plan["side"],
+                price=effective_price,
+                size_shares=size_shares,
+            )
+            order_id = resp.get("orderID") or resp.get("orderId") or resp.get("id")
+            placed_at = _utc_now_iso()
+
+            cur.execute(
+                """
+                UPDATE order_chunks
+                SET status = 'placed', polymarket_order_id = ?, placed_at = ?,
+                    limit_price = ?, size_shares = ?
+                WHERE chunk_id = ?
+                """,
+                (order_id, placed_at, effective_price, size_shares, chunk_id),
+            )
+            cur.execute(
+                "UPDATE order_plans SET chunks_placed = chunks_placed + 1, updated_at = ? WHERE plan_id = ?",
+                (placed_at, plan_id),
+            )
+            conn.commit()
+            twap_summary["chunks_placed"] += 1
+
+            logger.info(
+                f"TWAP plan #{plan_id} chunk #{next_chunk['chunk_index']}: "
+                f"placed limit {plan['side']} {size_shares:.2f} shares @ {effective_price:.4f} "
+                f"(${size_usdc:.2f}) order_id={order_id}"
+            )
+
+            # Check if it filled immediately (some limit orders fill on post)
+            if isinstance(resp, dict) and resp.get("status") == "matched":
+                _mark_chunk_filled(conn, cur, chunk_id, resp)
+                twap_summary["chunks_filled"] += 1
+
+        except Exception as exc:
+            logger.error(f"TWAP plan #{plan_id} chunk #{next_chunk['chunk_index']}: order failed: {exc}")
+            # Don't mark chunk as errored — it'll retry next iteration
+
+    conn.close()
+    return twap_summary
+
+
+def _check_chunk_fills(conn, cur, pm_client: PolymarketClient, plan_id: int) -> None:
+    """Check fill status of all 'placed' chunks for a plan."""
+    cur.execute(
+        "SELECT * FROM order_chunks WHERE plan_id = ? AND status = 'placed'",
+        (plan_id,),
+    )
+    placed_chunks = cur.fetchall()
+    if not placed_chunks:
+        return
+
+    try:
+        open_orders = pm_client.get_open_orders()
+    except Exception as exc:
+        logger.warning(f"TWAP plan #{plan_id}: get_open_orders failed: {exc}")
+        return
+
+    open_order_ids = set()
+    if isinstance(open_orders, list):
+        for o in open_orders:
+            oid = o.get("id") or o.get("orderID") or o.get("orderId")
+            if oid:
+                open_order_ids.add(str(oid))
+
+    for chunk in placed_chunks:
+        order_id = chunk["polymarket_order_id"]
+        if not order_id:
+            continue
+        if str(order_id) not in open_order_ids:
+            # Order no longer open — assume filled (Polymarket removes filled
+            # orders from the open-orders list)
+            _mark_chunk_filled(conn, cur, chunk["chunk_id"], None)
+
+
+def _mark_chunk_filled(conn, cur, chunk_id: int, resp: Optional[Dict[str, Any]]) -> None:
+    """Mark a chunk as filled with optional fill details from the response."""
+    fill_price = None
+    fill_size = None
+    if resp and isinstance(resp, dict):
+        making = resp.get("makingAmount")
+        taking = resp.get("takingAmount")
+        try:
+            if making and taking:
+                fill_size = float(making)
+                taking_f = float(taking)
+                if taking_f > 0:
+                    fill_price = fill_size / taking_f
+        except (TypeError, ValueError):
+            pass
+
+    # If we don't have fill details from the response, use the planned values
+    cur.execute("SELECT limit_price, size_usdc FROM order_chunks WHERE chunk_id = ?", (chunk_id,))
+    chunk_row = cur.fetchone()
+    if chunk_row:
+        if fill_price is None:
+            fill_price = chunk_row["limit_price"]
+        if fill_size is None:
+            fill_size = chunk_row["size_usdc"]
+
+    cur.execute(
+        """
+        UPDATE order_chunks
+        SET status = 'filled', filled_at = ?, fill_price = ?, fill_size_usdc = ?
+        WHERE chunk_id = ?
+        """,
+        (_utc_now_iso(), fill_price, fill_size, chunk_id),
+    )
+    conn.commit()
+
+
+def _cancel_plan_unfilled_chunks(conn, cur, pm_client: PolymarketClient, plan_id: int, dry_run: bool) -> None:
+    """Cancel all placed-but-unfilled chunks for a plan."""
+    cur.execute(
+        "SELECT * FROM order_chunks WHERE plan_id = ? AND status = 'placed'",
+        (plan_id,),
+    )
+    to_cancel = cur.fetchall()
+    for chunk in to_cancel:
+        order_id = chunk["polymarket_order_id"]
+        if order_id and not dry_run:
+            try:
+                pm_client.cancel_order(order_id)
+            except Exception as exc:
+                logger.warning(f"  Failed to cancel order {order_id}: {exc}")
+        cur.execute(
+            "UPDATE order_chunks SET status = 'cancelled' WHERE chunk_id = ?",
+            (chunk["chunk_id"],),
+        )
+    # Also cancel any pending (not-yet-placed) chunks
+    cur.execute(
+        "UPDATE order_chunks SET status = 'cancelled' WHERE plan_id = ? AND status = 'pending'",
+        (plan_id,),
+    )
+    conn.commit()
+
+
+def _finalize_plan(conn, cur, plan_id: int) -> None:
+    """Mark a plan as completed or cancelled based on fill status, and update bet_ledger."""
+    cur.execute(
+        "SELECT COUNT(*) FROM order_chunks WHERE plan_id = ? AND status = 'filled'",
+        (plan_id,),
+    )
+    filled_count = cur.fetchone()[0]
+    cur.execute(
+        "SELECT COALESCE(SUM(fill_size_usdc), 0), COALESCE(SUM(fill_price * fill_size_usdc), 0) "
+        "FROM order_chunks WHERE plan_id = ? AND status = 'filled'",
+        (plan_id,),
+    )
+    row = cur.fetchone()
+    total_filled_usdc = row[0]
+    weighted_price_sum = row[1]
+
+    avg_fill = (weighted_price_sum / total_filled_usdc) if total_filled_usdc > 0 else None
+    final_status = "completed" if filled_count > 0 else "cancelled"
+
+    cur.execute(
+        """
+        UPDATE order_plans
+        SET status = ?, chunks_filled = ?, filled_size_usdc = ?, avg_fill_price = ?, updated_at = ?
+        WHERE plan_id = ?
+        """,
+        (final_status, filled_count, total_filled_usdc, avg_fill, _utc_now_iso(), plan_id),
+    )
+
+    # Update the corresponding bet_ledger row
+    cur.execute("SELECT bet_ledger_id FROM order_plans WHERE plan_id = ?", (plan_id,))
+    plan_row = cur.fetchone()
+    if plan_row and plan_row["bet_ledger_id"]:
+        bet_id = plan_row["bet_ledger_id"]
+        if total_filled_usdc > 0:
+            cur.execute(
+                """
+                UPDATE bet_ledger
+                SET status = 'filled', filled_at = ?, fill_price = ?, fill_size_usdc = ?
+                WHERE bet_id = ?
+                """,
+                (_utc_now_iso(), avg_fill, total_filled_usdc, bet_id),
+            )
+        else:
+            cur.execute(
+                "UPDATE bet_ledger SET status = 'cancelled' WHERE bet_id = ?",
+                (bet_id,),
+            )
+    conn.commit()
+
+    logger.info(
+        f"TWAP plan #{plan_id} finalized: status={final_status}, "
+        f"filled={filled_count} chunks, ${total_filled_usdc:.2f} @ avg={avg_fill or 0:.4f}"
+    )
+
+
+def _utc_now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
 def run_single_iteration(
     handled_set: Set[str],
     lookback_min: int,
@@ -628,6 +992,22 @@ def main() -> int:
                 spawns_this_iter = 0
                 live_spawns_this_iter = 0
 
+            # Wave 5.9: Process TWAP order plans each iteration
+            twap_result = {"plans_processed": 0}
+            try:
+                twap_result = _process_twap_plans(dry_run=args.dry_run)
+                if twap_result["plans_processed"] > 0:
+                    logger.info(
+                        f"  TWAP: processed {twap_result['plans_processed']} plans, "
+                        f"placed {twap_result['chunks_placed']} chunks, "
+                        f"filled {twap_result['chunks_filled']}, "
+                        f"completed {twap_result['plans_completed']}, "
+                        f"cancelled {twap_result['plans_cancelled']}"
+                    )
+            except Exception as exc:
+                logger.error(f"  TWAP processing crashed: {exc}")
+                twap_result = {"error": str(exc)}
+
             elapsed = time.time() - iter_started
             _write_status({
                 "pid": os.getpid(),
@@ -640,6 +1020,7 @@ def main() -> int:
                 "iter_elapsed_s": round(elapsed, 1),
                 "handled_session": sorted(handled_set),
                 "last_iter": iter_summary,
+                "twap_last_iter": twap_result,
                 "poll_interval": args.poll_interval,
                 "lookback_min": args.lookback_min,
                 "lookahead_min": args.lookahead_min,
