@@ -526,11 +526,23 @@ def _process_twap_plans(dry_run: bool = False) -> Dict[str, Any]:
         conn.close()
         return twap_summary
 
+    pm_client = PolymarketClient()
+
     if not plans:
         conn.close()
         return twap_summary
 
-    pm_client = PolymarketClient()
+    # Sweep orphaned chunks that are hopelessly far below the current market
+    # before processing plans (avoids processing chunks we're about to cancel)
+    try:
+        _sweep_orphan_chunks(conn, cur, pm_client, dry_run=dry_run)
+        # Re-fetch plans after sweep (some may have been finalized)
+        cur.execute(
+            "SELECT * FROM order_plans WHERE status IN ('pending', 'executing') ORDER BY created_at ASC"
+        )
+        plans = cur.fetchall()
+    except Exception as exc:
+        logger.warning(f"TWAP orphan sweep failed: {exc}")
 
     for plan in plans:
         plan_id = plan["plan_id"]
@@ -558,12 +570,18 @@ def _process_twap_plans(dry_run: bool = False) -> Dict[str, Any]:
             except (ValueError, TypeError):
                 pass
 
-        # Move from pending -> executing on first tick
+        # Move from pending -> executing on first tick; mirror in bet_ledger
         if plan["status"] == "pending":
             cur.execute(
                 "UPDATE order_plans SET status = 'executing', updated_at = ? WHERE plan_id = ?",
                 (_utc_now_iso(), plan_id),
             )
+            bet_ledger_id = plan["bet_ledger_id"]
+            if bet_ledger_id:
+                cur.execute(
+                    "UPDATE bet_ledger SET status = 'twap_active' WHERE bet_id = ? AND status = 'proposed'",
+                    (bet_ledger_id,),
+                )
             conn.commit()
 
         # Check fill status of previously placed chunks
@@ -771,6 +789,89 @@ def _mark_chunk_filled(conn, cur, chunk_id: int, resp: Optional[Dict[str, Any]])
     conn.commit()
 
 
+def _sweep_orphan_chunks(
+    conn, cur, pm_client: PolymarketClient, dry_run: bool,
+    stale_pp_threshold: float = 20.0,
+) -> int:
+    """Cancel placed chunks whose limit_price is >= stale_pp_threshold below
+    the current market mid. These will never fill and just waste capital.
+
+    Also handles plans that are 'executing' but have no pending/placed chunks
+    left (daemon restart races). Returns number of chunks cancelled.
+    """
+    cur.execute(
+        """
+        SELECT oc.chunk_id, oc.plan_id, oc.polymarket_order_id, oc.limit_price,
+               op.token_id, op.kickoff_at, op.bet_ledger_id, op.fixture_key
+        FROM order_chunks oc
+        JOIN order_plans op ON op.plan_id = oc.plan_id
+        WHERE oc.status = 'placed'
+          AND op.status = 'executing'
+        """
+    )
+    placed_chunks = cur.fetchall()
+    if not placed_chunks:
+        return 0
+
+    # Batch-fetch midpoints for all unique tokens
+    token_ids = list({r["token_id"] for r in placed_chunks if r["token_id"]})
+    try:
+        mids = pm_client.get_token_midpoints(token_ids)
+    except Exception as exc:
+        logger.warning(f"Orphan sweep: midpoint fetch failed: {exc}")
+        return 0
+
+    n_cancelled = 0
+    for chunk in placed_chunks:
+        token_id = chunk["token_id"]
+        mid = mids.get(token_id)
+        if mid is None:
+            continue
+        gap_pp = (mid - chunk["limit_price"]) * 100.0
+        if gap_pp < stale_pp_threshold:
+            continue  # Close enough to market — leave it
+
+        order_id = chunk["polymarket_order_id"]
+        logger.info(
+            f"Orphan sweep: plan #{chunk['plan_id']} chunk #{chunk['chunk_id']} "
+            f"at {chunk['limit_price']:.3f} ({chunk['limit_price']*100:.1f}c) is {gap_pp:.1f}pp below mid "
+            f"{mid:.3f} ({mid*100:.1f}c) — cancelling ({chunk['fixture_key']})"
+        )
+        if order_id and not dry_run:
+            try:
+                pm_client.cancel_order(order_id)
+            except Exception as exc:
+                logger.warning(f"  Cancel failed for {order_id}: {exc}")
+        if not dry_run:
+            cur.execute(
+                "UPDATE order_chunks SET status = 'cancelled' WHERE chunk_id = ?",
+                (chunk["chunk_id"],),
+            )
+            n_cancelled += 1
+
+    if n_cancelled > 0:
+        conn.commit()
+        # Finalize plans where all chunks are now cancelled/filled
+        cur.execute(
+            """
+            SELECT DISTINCT plan_id FROM order_chunks
+            WHERE plan_id IN (
+                SELECT DISTINCT plan_id FROM order_chunks WHERE status = 'cancelled'
+            )
+            AND plan_id NOT IN (
+                SELECT DISTINCT plan_id FROM order_chunks WHERE status IN ('pending', 'placed')
+            )
+            AND plan_id IN (SELECT plan_id FROM order_plans WHERE status = 'executing')
+            """
+        )
+        plans_to_finalize = [r["plan_id"] for r in cur.fetchall()]
+        for pid in plans_to_finalize:
+            _finalize_plan(conn, cur, pid)
+        logger.info(f"Orphan sweep: cancelled {n_cancelled} chunk(s), finalized {len(plans_to_finalize)} plan(s)")
+
+    return n_cancelled
+
+
 def _cancel_plan_unfilled_chunks(conn, cur, pm_client: PolymarketClient, plan_id: int, dry_run: bool) -> None:
     """Cancel all placed-but-unfilled chunks for a plan."""
     cur.execute(
@@ -841,7 +942,7 @@ def _finalize_plan(conn, cur, plan_id: int) -> None:
             )
         else:
             cur.execute(
-                "UPDATE bet_ledger SET status = 'cancelled' WHERE bet_id = ?",
+                "UPDATE bet_ledger SET status = 'cancelled' WHERE bet_id = ? AND status IN ('proposed', 'twap_active')",
                 (bet_id,),
             )
     conn.commit()

@@ -433,8 +433,14 @@ class PolymarketClient:
 
     def cancel_order(self, order_id: str) -> Dict[str, Any]:
         """Cancel an open order by its ID."""
+        from py_clob_client_v2.clob_types import OrderPayload
         client = self._get_clob_sdk_client()
-        return client.cancel(order_id=order_id)
+        return client.cancel_order(OrderPayload(orderID=order_id))
+
+    def cancel_orders(self, order_ids: List[str]) -> Dict[str, Any]:
+        """Cancel multiple open orders by ID in a single call."""
+        client = self._get_clob_sdk_client()
+        return client.cancel_orders(order_ids)
 
     def cancel_all_orders(self) -> Dict[str, Any]:
         """Cancel ALL open orders for this wallet (kill-switch helper)."""

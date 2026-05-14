@@ -619,7 +619,12 @@ def scan_and_place_live_bets(
 
             try:
                 if use_twap and book_info:
-                    base_price_for_plan = book_info.get("bid") or market_price
+                    # Anchor TWAP start to at most 10pp below mid. The raw
+                    # book bid can be near 0 on thin/lopsided markets, which
+                    # would result in chunks placed at 3c on a 90c market.
+                    _raw_bid = book_info.get("bid") or 0.0
+                    _twap_discount = float(os.getenv("TWAP_START_DISCOUNT_PP", "10")) / 100.0
+                    base_price_for_plan = max(_raw_bid, market_price - _twap_discount)
                     result = place_bet_twap(
                         fixture_key=fix["fixture_key"],
                         match_id=None,
