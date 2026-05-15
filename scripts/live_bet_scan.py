@@ -58,11 +58,13 @@ from src.integrations.polymarket.paper_strategies import (
 # Polymarket CLOB minimum order is $1 USDC; orders below this get rejected.
 POLYMARKET_MIN_ORDER_USDC = 1.0
 
-# Live sizing mirrors paper at a 1/10 scale. Paper's $5 min / $100 max on a
-# $1000 bankroll = 0.5% / 10% of bankroll. We apply those same ratios to
-# live's smaller bankroll so live is a clean scaled-down mirror of paper.
+# Sizing fractions applied to the live bankroll.
+# Min: 0.5% — below this Kelly is too thin to bother placing.
+# Max: 25% — matches the kelly_fraction_cap in PaperStrategy so high-edge bets
+#   get proportionally larger stakes rather than all hitting a flat 10% cap.
+#   (Previously 10%, which made every bet with >10pp edge identical in size.)
 LIVE_MIN_STAKE_FRACTION = 0.005
-LIVE_MAX_STAKE_FRACTION = 0.10
+LIVE_MAX_STAKE_FRACTION = 0.25
 
 
 def live_scaled_kelly_stake(
