@@ -4883,10 +4883,16 @@ def betting_bankroll_history():
         from src.data.database import get_connection
         from config import BETTING_CONFIG
         
+        import os
         # Get live strategies from config
         live_strategies = BETTING_CONFIG.get('live_strategies', []) or []
-        starting_per_strategy = float(BETTING_CONFIG.get('max_deposit_per_strategy_usdc', 100))
-        
+        default_starting = float(BETTING_CONFIG.get('max_deposit_per_strategy_usdc', 100))
+
+        def _strat_starting(name: str) -> float:
+            key = f"BETTING_MAX_DEPOSIT_{name.upper().replace('-', '_')}"
+            v = os.getenv(key)
+            return float(v) if v is not None else default_starting
+
         with get_connection() as conn:
             cur = conn.cursor()
             cur.execute(
@@ -4905,7 +4911,7 @@ def betting_bankroll_history():
         for strat_name in live_strategies:
             by_strategy[strat_name] = [{
                 "timestamp": None,
-                "bankroll": starting_per_strategy,
+                "bankroll": _strat_starting(strat_name),
                 "side_label": "starting",
                 "fixture_key": "",
                 "pnl": 0.0,
@@ -4919,7 +4925,7 @@ def betting_bankroll_history():
         
         # Build cumulative bankroll timeline
         for name, lst in grouped.items():
-            base = starting_per_strategy
+            base = _strat_starting(name)
             running = base
             if name not in by_strategy:
                 by_strategy[name] = [{

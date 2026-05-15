@@ -394,8 +394,15 @@ def get_strategy_breakdown() -> Dict[str, Any]:
     from config import BETTING_CONFIG
     from src.data.database import get_connection
 
+    import os
     live_strategies = list(BETTING_CONFIG.get("live_strategies", []) or [])
-    strategy_cap = float(BETTING_CONFIG.get("max_deposit_per_strategy_usdc", 0))
+    default_cap = float(BETTING_CONFIG.get("max_deposit_per_strategy_usdc", 0))
+
+    def _strategy_starting(label: str) -> float:
+        """Per-strategy starting bankroll: env override takes priority over global default."""
+        env_key = f"BETTING_MAX_DEPOSIT_{label.upper().replace('-', '_')}"
+        override = os.getenv(env_key)
+        return float(override) if override is not None else default_cap
 
     conn = get_connection()
     try:
@@ -414,6 +421,7 @@ def get_strategy_breakdown() -> Dict[str, Any]:
 
         rows = []
         for label in all_labels:
+            strategy_cap = _strategy_starting(label)
             cur.execute(
                 """
                 SELECT
