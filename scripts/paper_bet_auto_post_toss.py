@@ -570,18 +570,12 @@ def _process_twap_plans(dry_run: bool = False) -> Dict[str, Any]:
             except (ValueError, TypeError):
                 pass
 
-        # Move from pending -> executing on first tick; mirror in bet_ledger
+        # Move from pending -> executing on first tick
         if plan["status"] == "pending":
             cur.execute(
                 "UPDATE order_plans SET status = 'executing', updated_at = ? WHERE plan_id = ?",
                 (_utc_now_iso(), plan_id),
             )
-            bet_ledger_id = plan["bet_ledger_id"]
-            if bet_ledger_id:
-                cur.execute(
-                    "UPDATE bet_ledger SET status = 'twap_active' WHERE bet_id = ? AND status = 'proposed'",
-                    (bet_ledger_id,),
-                )
             conn.commit()
 
         # Check fill status of previously placed chunks
@@ -942,7 +936,7 @@ def _finalize_plan(conn, cur, plan_id: int) -> None:
             )
         else:
             cur.execute(
-                "UPDATE bet_ledger SET status = 'cancelled' WHERE bet_id = ? AND status IN ('proposed', 'twap_active')",
+                "UPDATE bet_ledger SET status = 'cancelled' WHERE bet_id = ? AND status = 'proposed'",
                 (bet_id,),
             )
     conn.commit()
