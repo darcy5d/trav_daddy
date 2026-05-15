@@ -4946,7 +4946,13 @@ def betting_bankroll_history():
                     "pnl": round(pnl, 2),
                 })
         
-        return jsonify({"success": True, "history": by_strategy})
+        starting_map = {name: _strat_starting(name) for name in list(set(live_strategies) | set(by_strategy.keys()))}
+        return jsonify({
+            "success": True,
+            "history": by_strategy,
+            "live_strategies": list(live_strategies),
+            "starting_by_strategy": starting_map,
+        })
     except Exception as e:
         logger.error(f"Error in /api/betting/bankroll-history: {e}")
         return jsonify({"success": False, "error": str(e)}), 500

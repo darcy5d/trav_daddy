@@ -1248,18 +1248,24 @@
         }
     }
 
-    // ---- Bankroll Over Time Chart (Wave 5.8.3) ----
+    // ---- Bankroll Over Time Chart ----
     async function loadBankrollChart() {
         try {
             const r = await fetch('/api/betting/bankroll-history');
             const d = await r.json();
             if (!d.success) return;
             const history = d.history || {};
+            const liveSet = new Set(d.live_strategies || []);
+            const startingMap = d.starting_by_strategy || {};
+
             const canvas = document.getElementById('lb-bankroll-chart');
             const ctx = canvas.getContext('2d');
             ctx.clearRect(0, 0, canvas.width, canvas.height);
 
-            const seriesAll = Object.entries(history);
+            // Active strategies first, then retired (sorted within each group)
+            const activeEntries  = Object.entries(history).filter(([n]) =>  liveSet.has(n)).sort((a,b) => a[0].localeCompare(b[0]));
+            const retiredEntries = Object.entries(history).filter(([n]) => !liveSet.has(n)).sort((a,b) => a[0].localeCompare(b[0]));
+            const seriesAll = [...activeEntries, ...retiredEntries];
 
             // Find global time range from settled bets
             let tMinMs = Infinity, tMaxMs = -Infinity;
@@ -1282,8 +1288,7 @@
             if (nSettledTotal === 0) {
                 ctx.fillStyle = 'rgba(150,150,150,0.7)';
                 ctx.font = '12px sans-serif';
-                ctx.fillText('No settled live bets yet (bankroll = $100 per strategy)',
-                             12, canvas.height / 2);
+                ctx.fillText('No settled live bets yet', 12, canvas.height / 2);
                 return;
             }
             // Round to 12-hour boundaries, extend to "now"
@@ -1294,13 +1299,22 @@
             tMaxMs = Math.ceil(tMaxMs / TWELVE_H_MS) * TWELVE_H_MS;
             if (tMaxMs - tMinMs < TWELVE_H_MS) tMaxMs = tMinMs + TWELVE_H_MS;
 
-            // Y range padded
+            // Ensure starting values are within y-range
+            for (const [name] of seriesAll) {
+                const sv = startingMap[name];
+                if (sv != null) {
+                    if (sv < yMin) yMin = sv;
+                    if (sv > yMax) yMax = sv;
+                }
+            }
             if (yMin === yMax) { yMin -= 10; yMax += 10; }
             const yPad = (yMax - yMin) * 0.15;
             yMin -= yPad; yMax += yPad;
 
-            const colors = ['#10b981', '#f59e0b', '#a5b4fc', '#ef4444', '#06b6d4', '#fbbf24', '#8b5cf6'];
-            const padL = 56, padR = 80, padT = 14, padB = 30;
+            // Active strategies get vibrant colours; retired get a muted grey palette
+            const activeColors  = ['#10b981', '#f59e0b', '#06b6d4'];
+            const retiredColors = ['#6b7280', '#9ca3af', '#4b5563'];
+            const padL = 56, padR = 90, padT = 14, padB = 30;
             const W = canvas.width, H = canvas.height;
             const plotW = W - padL - padR;
             const plotH = H - padT - padB;
@@ -1315,104 +1329,114 @@
             ctx.lineWidth = 1;
             for (let i = 0; i <= 4; i++) {
                 const y = padT + (plotH / 4) * i;
-                ctx.beginPath();
-                ctx.moveTo(padL, y);
-                ctx.lineTo(W - padR, y);
-                ctx.stroke();
+                ctx.beginPath(); ctx.moveTo(padL, y); ctx.lineTo(W - padR, y); ctx.stroke();
                 const v = yMax - ((yMax - yMin) / 4) * i;
                 ctx.fillText('$' + v.toFixed(0), 6, y + 3);
             }
 
-            // X tick labels - one tick per 12-hour boundary
+            // X tick labels
             const nBuckets = Math.round((tMaxMs - tMinMs) / TWELVE_H_MS);
             const labelEvery = Math.max(1, Math.ceil(nBuckets / 8));
             for (let i = 0; i <= nBuckets; i++) {
                 const tMs = tMinMs + i * TWELVE_H_MS;
                 const x = padL + ((tMs - tMinMs) / (tMaxMs - tMinMs)) * plotW;
-                // Vertical gridline
                 ctx.strokeStyle = 'rgba(120,120,120,0.12)';
                 ctx.lineWidth = 1;
-                ctx.beginPath();
-                ctx.moveTo(x, padT);
-                ctx.lineTo(x, padT + plotH);
-                ctx.stroke();
+                ctx.beginPath(); ctx.moveTo(x, padT); ctx.lineTo(x, padT + plotH); ctx.stroke();
                 if (i % labelEvery !== 0) continue;
-                const date = new Date(tMs);
-                const lbl = date.toLocaleString(undefined, {
-                    month: 'short', day: 'numeric',
-                    hour: '2-digit', minute: '2-digit', hour12: false
+                const lbl = new Date(tMs).toLocaleString(undefined, {
+                    month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', hour12: false
                 });
                 ctx.fillStyle = 'rgba(120,120,120,0.7)';
                 ctx.font = '10px sans-serif';
                 ctx.fillText(lbl, x - 32, H - 6);
             }
 
-            // Reference line at starting bankroll (typically $100)
-            const startingBankroll = seriesAll.length > 0 && seriesAll[0][1].length > 0 
-                ? seriesAll[0][1][0].bankroll 
-                : 100;
-            ctx.strokeStyle = 'rgba(120,120,120,0.5)';
-            ctx.setLineDash([4, 4]);
-            ctx.beginPath();
-            const yStart = yOf(startingBankroll);
-            ctx.moveTo(padL, yStart);
-            ctx.lineTo(W - padR, yStart);
-            ctx.stroke();
-            ctx.setLineDash([]);
+            // Per-strategy starting reference lines (dashed, colour-matched, faint)
+            const drawnStartingLines = new Set();
+            for (const [name, pts] of seriesAll) {
+                const sv = startingMap[name] ?? (pts[0] && pts[0].bankroll);
+                if (sv == null || drawnStartingLines.has(sv)) continue;
+                drawnStartingLines.add(sv);
+                ctx.strokeStyle = 'rgba(120,120,120,0.35)';
+                ctx.setLineDash([3, 5]);
+                ctx.lineWidth = 1;
+                ctx.beginPath();
+                ctx.moveTo(padL, yOf(sv)); ctx.lineTo(W - padR, yOf(sv));
+                ctx.stroke();
+                ctx.setLineDash([]);
+                ctx.fillStyle = 'rgba(120,120,120,0.5)';
+                ctx.font = '9px sans-serif';
+                ctx.fillText('$' + sv.toFixed(0) + ' start', padL + 2, yOf(sv) - 3);
+            }
 
-            // Build one continuous line per strategy
+            // Draw series — active solid, retired dashed + muted
             const legend = document.getElementById('lb-chart-legend');
             legend.innerHTML = '';
-            seriesAll.forEach(([name, pts], idx) => {
-                if (!pts.length) return;
-                const color = colors[idx % colors.length];
-                ctx.strokeStyle = color;
-                ctx.fillStyle = color;
-                ctx.lineWidth = 2;
+            let activeIdx = 0, retiredIdx = 0;
 
-                // Build (xMs, bankroll) points
+            seriesAll.forEach(([name, pts]) => {
+                if (!pts.length) return;
+                const isActive = liveSet.has(name);
+                const color = isActive
+                    ? activeColors[activeIdx++ % activeColors.length]
+                    : retiredColors[retiredIdx++ % retiredColors.length];
+
+                // Build plot points
                 const plotPts = [{xMs: tMinMs, b: pts[0].bankroll}];
                 for (let i = 1; i < pts.length; i++) {
                     const t = Date.parse(pts[i].timestamp);
                     if (isNaN(t)) continue;
                     plotPts.push({xMs: t, b: pts[i].bankroll, raw: pts[i]});
                 }
-                // Final extend to "now"
                 const lastBankroll = pts[pts.length - 1].bankroll;
                 plotPts.push({xMs: tMaxMs, b: lastBankroll});
 
+                ctx.strokeStyle = color;
+                ctx.fillStyle   = color;
+                ctx.lineWidth   = isActive ? 2 : 1;
+                ctx.globalAlpha = isActive ? 1.0 : 0.45;
+                if (!isActive) ctx.setLineDash([5, 4]);
+
                 ctx.beginPath();
                 plotPts.forEach((p, i) => {
-                    const x = xOf(p.xMs);
-                    const y = yOf(p.b);
-                    if (i === 0) ctx.moveTo(x, y);
-                    else ctx.lineTo(x, y);
+                    const x = xOf(p.xMs), y = yOf(p.b);
+                    i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
                 });
                 ctx.stroke();
+                ctx.setLineDash([]);
 
-                // Dots on each settled-bet point
-                for (const p of plotPts) {
-                    if (!p.raw) continue;
-                    ctx.beginPath();
-                    ctx.arc(xOf(p.xMs), yOf(p.b), 3, 0, Math.PI * 2);
-                    ctx.fill();
+                // Dots on settled points (active only, to avoid clutter)
+                if (isActive) {
+                    for (const p of plotPts) {
+                        if (!p.raw) continue;
+                        ctx.beginPath();
+                        ctx.arc(xOf(p.xMs), yOf(p.b), 3, 0, Math.PI * 2);
+                        ctx.fill();
+                    }
                 }
 
+                ctx.globalAlpha = 1.0;
+
                 // Right-edge label
-                const labelY = yOf(lastBankroll);
+                const labelSuffix = isActive ? '' : ' ✕';
                 ctx.fillStyle = color;
+                ctx.globalAlpha = isActive ? 1.0 : 0.55;
+                ctx.font = isActive ? 'bold 10px sans-serif' : '10px sans-serif';
+                ctx.fillText(name + labelSuffix, W - padR + 4, yOf(lastBankroll) + 3);
+                ctx.globalAlpha = 1.0;
                 ctx.font = '10px sans-serif';
-                ctx.fillText(name, W - padR + 4, labelY + 3);
 
                 // Legend chip
                 const chip = document.createElement('span');
-                chip.innerHTML = `<span style="display:inline-block;width:12px;height:12px;background:${color};border-radius:3px;vertical-align:middle"></span> <span style="vertical-align:middle">${name} ($${lastBankroll.toFixed(2)})</span>`;
+                const retiredTag = isActive ? '' : ' <span style="opacity:0.55;font-size:0.75em">(retired)</span>';
+                chip.innerHTML = `<span style="display:inline-block;width:10px;height:10px;background:${color};border-radius:2px;vertical-align:middle;opacity:${isActive?1:0.55}"></span> <span style="vertical-align:middle;opacity:${isActive?1:0.6}">${name} ($${lastBankroll.toFixed(2)})${retiredTag}</span>`;
                 chip.style.color = 'var(--text-secondary)';
                 legend.appendChild(chip);
             });
 
-            // X-axis title
             ctx.fillStyle = 'rgba(120,120,120,0.5)';
+            ctx.font = '10px sans-serif';
             ctx.fillText('time →', W / 2 - 16, H - 18);
         } catch (e) {
             console.error('loadBankrollChart failed:', e);
