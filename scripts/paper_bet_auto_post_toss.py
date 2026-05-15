@@ -581,6 +581,9 @@ def _process_twap_plans(dry_run: bool = False) -> Dict[str, Any]:
         # Check fill status of previously placed chunks
         _check_chunk_fills(conn, cur, pm_client, plan_id)
 
+        # Reprice any placed chunks that have drifted far from market
+        _reprice_placed_chunks(conn, cur, pm_client, plan, dry_run=dry_run)
+
         # Recount after fill checks
         cur.execute(
             "SELECT COUNT(*) FROM order_chunks WHERE plan_id = ? AND status = 'filled'",
@@ -658,7 +661,7 @@ def _process_twap_plans(dry_run: bool = False) -> Dict[str, Any]:
         effective_price = round(effective_price, 4)
 
         size_usdc = next_chunk["size_usdc"]
-        size_shares = round(size_usdc / effective_price, 4) if effective_price > 0 else 0
+        size_shares = max(round(size_usdc / effective_price, 4), 5.0) if effective_price > 0 else 0
 
         if dry_run:
             logger.info(
@@ -712,6 +715,104 @@ def _process_twap_plans(dry_run: bool = False) -> Dict[str, Any]:
 
     conn.close()
     return twap_summary
+
+
+def _reprice_placed_chunks(
+    conn, cur, pm_client: PolymarketClient, plan: sqlite3.Row, dry_run: bool,
+    reprice_threshold_pp: float = 5.0,
+    reprice_discount_pp: float = 2.0,
+) -> int:
+    """For any placed chunk whose limit_price is more than reprice_threshold_pp
+    below the current market mid, cancel it and repost at mid - reprice_discount_pp.
+
+    This keeps us actively working orders rather than leaving stale limits far
+    below market. Called every daemon iteration after fill checks.
+
+    Returns number of chunks repriced.
+    """
+    plan_id = plan["plan_id"]
+    token_id = plan["token_id"]
+    max_price = plan["max_acceptable_price"]
+
+    cur.execute(
+        "SELECT * FROM order_chunks WHERE plan_id = ? AND status = 'placed'",
+        (plan_id,),
+    )
+    placed = cur.fetchall()
+    if not placed:
+        return 0
+
+    try:
+        book = pm_client.get_book_spread(token_id)
+        mid = book.get("midpoint") or book.get("ask") or book.get("bid")
+        if mid is None:
+            return 0
+    except Exception as exc:
+        logger.debug(f"TWAP plan #{plan_id} reprice: book read failed: {exc}")
+        return 0
+
+    n_repriced = 0
+    for chunk in placed:
+        gap_pp = (mid - chunk["limit_price"]) * 100.0
+        if gap_pp <= reprice_threshold_pp:
+            continue  # Close enough — leave it
+
+        new_price = round(min(mid - reprice_discount_pp / 100.0, max_price), 4)
+        if new_price <= 0 or new_price <= chunk["limit_price"]:
+            continue  # Can't improve price
+
+        old_order_id = chunk["polymarket_order_id"]
+        logger.info(
+            f"TWAP plan #{plan_id} chunk #{chunk['chunk_index']}: repricing "
+            f"{chunk['limit_price']*100:.1f}c -> {new_price*100:.1f}c "
+            f"(mid={mid*100:.1f}c, gap was {gap_pp:.1f}pp)"
+        )
+
+        if dry_run:
+            continue
+
+        # Cancel old order
+        if old_order_id:
+            try:
+                pm_client.cancel_order(old_order_id)
+            except Exception as exc:
+                logger.warning(f"  Reprice cancel failed for {old_order_id}: {exc}")
+
+        # Place new order at improved price
+        size_usdc = chunk["size_usdc"]
+        size_shares = max(round(size_usdc / new_price, 4), 5.0) if new_price > 0 else 0
+        try:
+            from py_clob_client_v2.clob_types import OrderArgs, PartialCreateOrderOptions
+            sdk_client = pm_client._get_clob_sdk_client()
+            args = OrderArgs(
+                token_id=token_id,
+                price=new_price,
+                size=size_shares,
+                side=plan["side"],
+                expiration="0",
+            )
+            signed = sdk_client.create_order(args)
+            resp = sdk_client.post_order(signed)
+            new_order_id = None
+            if isinstance(resp, dict):
+                new_order_id = resp.get("orderID") or resp.get("id") or resp.get("order_id")
+
+            cur.execute(
+                "UPDATE order_chunks SET limit_price = ?, size_shares = ?, polymarket_order_id = ? WHERE chunk_id = ?",
+                (new_price, size_shares, new_order_id, chunk["chunk_id"]),
+            )
+            conn.commit()
+            n_repriced += 1
+            logger.info(f"  Repriced -> new order_id={new_order_id}")
+
+            # Check immediate fill
+            if isinstance(resp, dict) and resp.get("status") == "matched":
+                _mark_chunk_filled(conn, cur, chunk["chunk_id"], resp)
+
+        except Exception as exc:
+            logger.error(f"  Reprice order placement failed: {exc}")
+
+    return n_repriced
 
 
 def _check_chunk_fills(conn, cur, pm_client: PolymarketClient, plan_id: int) -> None:

@@ -32,6 +32,7 @@ from src.integrations.odds.polymarket_compare import POLYMARKET_TAKER_FEE
 logger = logging.getLogger(__name__)
 
 POLYMARKET_MIN_ORDER_USDC = 5.0
+POLYMARKET_MIN_SHARES = 5.0  # Polymarket enforces >= 5 shares per order
 
 
 def _utc_now_iso() -> str:
@@ -380,7 +381,7 @@ def place_bet_twap(
             limit_price = min(limit_price, max_acceptable_price)
             limit_price = round(limit_price, 4)
             this_chunk_usdc = chunk_size if i < chunks_total - 1 else round(size_usdc - chunk_size * (chunks_total - 1), 4)
-            size_shares = round(this_chunk_usdc / limit_price, 4) if limit_price > 0 else 0
+            size_shares = max(round(this_chunk_usdc / limit_price, 4), POLYMARKET_MIN_SHARES) if limit_price > 0 else 0
 
             cur.execute(
                 """
