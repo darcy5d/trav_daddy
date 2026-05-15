@@ -87,8 +87,10 @@ STRATEGIES: List[PaperStrategy] = [
     PaperStrategy(
         name="v2_odi_3pp",
         description=(
-            "V2 / ODI men / moneyline / 3pp edge. The Wave 5.6 winner cell: "
-            "9 of 9 historical bets won, 88% strike rate. Forward-test."
+            "V2 / ODI men / moneyline / 3pp edge. RETIRED: -$157 paper PnL "
+            "on 7 bets (43% win rate), only 2 live bets placed in months. "
+            "ODI fixtures are too rare on Polymarket for meaningful edge. "
+            "Bankroll reallocated to v3_marg_3pp and consensus_5pp."
         ),
         enabled_market_types=["moneyline"],
         enabled_formats=["ODI"],
@@ -99,6 +101,7 @@ STRATEGIES: List[PaperStrategy] = [
         lookback_hours_min=0.0,
         starting_bankroll_usdc=1000.0,
         kelly_mult=0.5,
+        enabled=False,
     ),
     PaperStrategy(
         name="v2_any_5pp",

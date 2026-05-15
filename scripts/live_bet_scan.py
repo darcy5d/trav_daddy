@@ -240,14 +240,22 @@ def _strategy_has_any_live_bet_on_fixture(conn, strategy_label: str,
 def get_live_strategy_bankroll(strategy_name: str, conn) -> float:
     """Compute the current live bankroll for a strategy.
 
-    Starting bankroll = BETTING_MAX_DEPOSIT_PER_STRATEGY from .env.
+    Starting bankroll: checks BETTING_MAX_DEPOSIT_<STRATEGY_NAME_UPPER> first
+    (per-strategy override), then falls back to BETTING_MAX_DEPOSIT_PER_STRATEGY.
     Realised P&L on live (bet_kind='real') settled bets compounds on top.
     Open positions are NOT subtracted (they don't reduce the Kelly basis;
     the risk gate's per-strategy open-exposure cap enforces concentration).
     """
+    import os
     from config import BETTING_CONFIG
 
-    starting = float(BETTING_CONFIG.get("max_deposit_per_strategy_usdc", 100))
+    # Per-strategy override: e.g. BETTING_MAX_DEPOSIT_V3_MARG_3PP=146
+    env_key = f"BETTING_MAX_DEPOSIT_{strategy_name.upper().replace('-', '_')}"
+    override = os.getenv(env_key)
+    if override is not None:
+        starting = float(override)
+    else:
+        starting = float(BETTING_CONFIG.get("max_deposit_per_strategy_usdc", 100))
     cur = conn.cursor()
     cur.execute(
         """
