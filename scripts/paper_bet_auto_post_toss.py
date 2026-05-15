@@ -581,6 +581,13 @@ def _process_twap_plans(dry_run: bool = False) -> Dict[str, Any]:
         # Check fill status of previously placed chunks
         _check_chunk_fills(conn, cur, pm_client, plan_id)
 
+        # Re-size stake if bankroll has shifted significantly since plan creation
+        resized = _resize_plan_to_bankroll(conn, cur, pm_client, plan, dry_run=dry_run)
+        if resized:
+            # Re-fetch plan row so reprice/placement uses updated totals
+            cur.execute("SELECT * FROM order_plans WHERE plan_id = ?", (plan_id,))
+            plan = cur.fetchone()
+
         # Reprice any placed chunks that have drifted far from market
         _reprice_placed_chunks(conn, cur, pm_client, plan, dry_run=dry_run)
 
@@ -715,6 +722,144 @@ def _process_twap_plans(dry_run: bool = False) -> Dict[str, Any]:
 
     conn.close()
     return twap_summary
+
+
+def _resize_plan_to_bankroll(
+    conn, cur, pm_client: PolymarketClient, plan: sqlite3.Row, dry_run: bool,
+    resize_threshold: float = 0.20,
+) -> bool:
+    """Re-size a TWAP plan's unfilled chunks if Kelly stake vs current bankroll
+    has drifted more than resize_threshold (default 20%) from the locked-in size.
+
+    Flow:
+      1. Re-compute current bankroll (starting + net_pnl - open_exposure).
+      2. Re-run Kelly using stored model_prob and fresh market midpoint.
+      3. If new_stake differs >20% from plan's total_size_usdc:
+         - Cancel any 'placed' (unfilled) Polymarket orders.
+         - Reset those chunks to 'pending' with the new size.
+         - Update plan's total_size_usdc / chunk_size_usdc.
+      4. Return True if a resize occurred.
+    """
+    import os
+    from config import BETTING_CONFIG
+    from src.integrations.polymarket.paper_strategies import STRATEGIES
+
+    LIVE_MIN_STAKE_FRACTION = 0.005
+    LIVE_MAX_STAKE_FRACTION = 0.25
+    POLYMARKET_MIN_ORDER_USDC = 1.0
+
+    strategy_label = plan["strategy_label"]
+    strat = next((s for s in STRATEGIES if s.name == strategy_label), None)
+    if strat is None or not strat.enabled:
+        return False
+
+    # Current market midpoint
+    token_id = plan["token_id"]
+    try:
+        book = pm_client.get_book_spread(token_id)
+        market_price = book.get("midpoint") or plan["market_price_at_plan"]
+    except Exception:
+        market_price = plan["market_price_at_plan"]
+
+    if not market_price or market_price <= 0 or market_price >= 1:
+        return False
+
+    # Current bankroll for this strategy
+    default_cap = float(BETTING_CONFIG.get("max_deposit_per_strategy_usdc", 0))
+    env_key = f"BETTING_MAX_DEPOSIT_{strategy_label.upper().replace('-', '_')}"
+    starting = float(os.getenv(env_key) or default_cap)
+
+    cur.execute(
+        """
+        SELECT COALESCE(SUM(pnl_realised_usdc), 0) AS net_pnl,
+               COALESCE(SUM(CASE WHEN filled_at IS NOT NULL AND settled_at IS NULL
+                                 THEN fill_size_usdc ELSE 0 END), 0) AS open_exp
+        FROM bet_ledger
+        WHERE COALESCE(bet_kind, 'real') = 'real' AND strategy_label = ?
+        """,
+        (strategy_label,),
+    )
+    row = cur.fetchone()
+    net_pnl     = float(row["net_pnl"]  or 0)
+    open_exp    = float(row["open_exp"] or 0)
+    bankroll    = starting + net_pnl - open_exp
+    if bankroll <= 0:
+        return False
+
+    # Kelly stake
+    model_prob = plan["model_prob"]
+    f_star  = (model_prob - market_price) / (1.0 - market_price)
+    f_star  = max(0.0, min(f_star, 1.0))
+    f_capped = min(f_star * strat.kelly_mult, strat.kelly_fraction_cap)
+    raw_stake = f_capped * bankroll
+    scaled_min = max(LIVE_MIN_STAKE_FRACTION * bankroll, POLYMARKET_MIN_ORDER_USDC)
+    scaled_max = LIVE_MAX_STAKE_FRACTION * bankroll
+
+    new_stake = 0.0 if raw_stake < scaled_min else min(raw_stake, scaled_max)
+    current_stake = plan["total_size_usdc"] or 0
+
+    if new_stake <= 0 or current_stake <= 0:
+        return False
+
+    deviation = abs(new_stake - current_stake) / current_stake
+    if deviation < resize_threshold:
+        return False
+
+    logger.info(
+        f"TWAP plan #{plan['plan_id']} ({strategy_label}): resizing "
+        f"${current_stake:.2f} → ${new_stake:.2f} "
+        f"(bankroll=${bankroll:.2f}, deviation={deviation:.1%})"
+    )
+    if dry_run:
+        return True
+
+    # Cancel any placed (unfilled) chunks and reset to pending at new size
+    cur.execute(
+        "SELECT * FROM order_chunks WHERE plan_id = ? AND status = 'placed'",
+        (plan["plan_id"],),
+    )
+    placed = cur.fetchall()
+    reset_count = 0
+    for chunk in placed:
+        oid = chunk["polymarket_order_id"]
+        if oid:
+            try:
+                pm_client.cancel_order(oid)
+            except Exception as exc:
+                logger.warning(f"  cancel chunk {chunk['chunk_id']} failed: {exc}")
+        # Reset chunk to pending with new size (keeps the chunk record, just updates stake)
+        new_shares = max(round(new_stake / chunk["limit_price"], 4), 5.0) if chunk["limit_price"] else 5.0
+        cur.execute(
+            """
+            UPDATE order_chunks
+            SET status = 'pending', size_usdc = ?, size_shares = ?,
+                polymarket_order_id = NULL, placed_at = NULL
+            WHERE chunk_id = ?
+            """,
+            (new_stake, new_shares, chunk["chunk_id"]),
+        )
+        reset_count += 1
+
+    # Update pending chunks that haven't been placed yet
+    cur.execute(
+        "UPDATE order_chunks SET size_usdc = ? WHERE plan_id = ? AND status = 'pending'",
+        (new_stake, plan["plan_id"]),
+    )
+
+    # Update plan totals and adjust placed count
+    cur.execute(
+        """
+        UPDATE order_plans
+        SET total_size_usdc = ?, chunk_size_usdc = ?,
+            chunks_placed = MAX(0, chunks_placed - ?),
+            updated_at = ?
+        WHERE plan_id = ?
+        """,
+        (new_stake, new_stake, reset_count, _utc_now_iso(), plan["plan_id"]),
+    )
+    conn.commit()
+    logger.info(f"  reset {reset_count} placed chunk(s) to pending at ${new_stake:.2f}")
+    return True
 
 
 def _reprice_placed_chunks(
