@@ -525,6 +525,45 @@ def init_betting_tables(db_path: Optional[Path] = None) -> bool:
         return False
 
 
+def init_cashout_columns(db_path: Optional[Path] = None) -> bool:
+    """Wave 5.10: add in-game cashout columns + index to bet_ledger.
+
+    Idempotent. Safe to call on every app startup.
+    """
+    if db_path is None:
+        db_path = DATABASE_PATH
+
+    cashout_columns = [
+        ("cashout_triggered_at",  "TEXT"),
+        ("cashout_price",         "REAL"),
+        ("cashout_pnl_usdc",      "REAL"),
+        ("cashout_threshold_used","REAL"),
+    ]
+
+    schema_path = Path(__file__).parent / "schema_v8_cashout.sql"
+
+    try:
+        with get_db_connection(db_path) as conn:
+            for col_name, col_type in cashout_columns:
+                if not _column_exists(conn, "bet_ledger", col_name):
+                    conn.execute(
+                        f"ALTER TABLE bet_ledger ADD COLUMN {col_name} {col_type}"
+                    )
+                    logger.info(f"Added bet_ledger.{col_name} column")
+
+            # Apply schema file for the partial index (idempotent).
+            if schema_path.exists():
+                conn.executescript(schema_path.read_text())
+
+            logger.info("Cashout columns (V8) initialized")
+        return True
+    except Exception as e:
+        logger.error(f"Failed to initialize cashout columns: {e}")
+        import traceback
+        traceback.print_exc()
+        return False
+
+
 def init_twap_tables(db_path: Optional[Path] = None) -> bool:
     """Wave 5.9: TWAP order execution tables (order_plans + order_chunks).
 

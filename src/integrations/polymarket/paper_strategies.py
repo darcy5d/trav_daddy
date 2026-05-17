@@ -70,6 +70,12 @@ class PaperStrategy:
     min_stake_usdc: float = 5.0
     max_stake_usdc: float = 100.0
 
+    # In-game cashout
+    # Sell the position when (current_market_price / fill_price) >= this value.
+    # e.g. 1.5 = lock in profit once position is worth 150% of entry cost.
+    # None = hold to settlement (original behaviour).
+    cashout_return_threshold: Optional[float] = None
+
     # Lifecycle
     enabled: bool = True
 
@@ -138,6 +144,7 @@ STRATEGIES: List[PaperStrategy] = [
         min_model_prob=0.55,
         post_toss_eligible=True,
         max_model_minus_fill_pp=20.0,
+        cashout_return_threshold=1.3,
     ),
     PaperStrategy(
         name="consensus_5pp",
@@ -156,6 +163,7 @@ STRATEGIES: List[PaperStrategy] = [
         kelly_mult=0.5,
         min_model_prob=0.60,
         post_toss_eligible=False,
+        cashout_return_threshold=1.3,
     ),
     # Diagnostic: low-edge wide-window quarter-Kelly to capture max data.
     PaperStrategy(
