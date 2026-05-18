@@ -219,6 +219,7 @@ venv311/bin/python scripts/paper_bet_auto_post_toss.py \
 # 3. Cron jobs (already installed, verify with `crontab -l`):
 #    :00 — paper_bet_daily.py (paper trade scanner, hourly)
 #    :30 — live_bet_scan.py (live trade scanner with TWAP routing, hourly)
+#    */3 — inplay_cashout_scan.py (in-game cashout, every 3 min while matches live)
 ```
 
 ### Quick start (copy-paste)
@@ -270,6 +271,7 @@ sqlite3 cricket.db "SELECT plan_id, fixture_key, status, chunks_placed, chunks_f
 ┌─────────────────────────────────────────────────────────┐
 │ Cron (:00)  paper_bet_daily.py    → paper bets to DB    │
 │ Cron (:30)  live_bet_scan.py      → FOK or TWAP plans   │
+│ Cron (*/3)  inplay_cashout_scan.py → tiered SELL orders │
 │                                                         │
 │ Daemon (90s) paper_bet_auto_post_toss.py                │
 │   ├─ Detect toss → spawn paper + live post-toss scans  │
@@ -282,7 +284,70 @@ sqlite3 cricket.db "SELECT plan_id, fixture_key, status, chunks_placed, chunks_f
 
 ### TWAP execution (Wave 5.9)
 
-The live bet scanner routes orders based on order-book spread:
+### In-game cashout (Wave 5.10)
+
+During a live match the cashout scanner polls every 3 minutes for filled
+positions whose current CLOB midpoint has risen enough relative to the fill
+price to justify locking in profit.
+
+Thresholds are **tiered by entry price** (optimised on a 14-day, 388-bet
+backtest; improvement over flat 1.3x: +$700 per two weeks):
+
+| Entry price bucket | Threshold | Rationale |
+|---|---|---|
+| Heavy underdog 5–20¢ | **1.30x** | Brief spikes rarely last past 1.3x — snap fast |
+| Underdog 20–35¢ | **1.20x** | Peak PnL; drops sharply above 1.2x |
+| Slight underdog 35–50¢ | **1.25x** | Best balance of capture vs reversal risk |
+| Coin flip 50–65¢ | **hold** | Price physically capped; cashout costs money |
+| Slight favourite 65–80¢ | **hold** | Rarely moves enough to benefit |
+| Heavy favourite 80–95¢ | **hold** | Never moves; ceiling too close |
+
+Kelly criterion already sizes underdog bets conservatively — the threshold
+is about capturing the spike when it comes, not managing downside.
+
+**Running manually:**
+
+```bash
+# Dry-run — shows what would fire without placing real orders
+venv311/bin/python scripts/inplay_cashout_scan.py --dry-run
+
+# Live — executes SELL orders for real bets, simulates for paper
+venv311/bin/python scripts/inplay_cashout_scan.py
+```
+
+**Cron entry (every 3 minutes):**
+
+```cron
+*/3 * * * * cd /Users/darcy5d/Desktop/DD_AI_models/indias_dad && \
+    venv311/bin/python scripts/inplay_cashout_scan.py >> logs/cashout_scan.log 2>&1
+```
+
+**Backtesting the cashout strategy:**
+
+```bash
+# Simulate all flat thresholds + the live tiered config against recent bets
+venv311/bin/python scripts/backtest_inplay_cashout.py --days 14
+
+# Paper bets only, last 30 days
+venv311/bin/python scripts/backtest_inplay_cashout.py --days 30 --bet-kind paper
+```
+
+**Key files:**
+
+| File | Purpose |
+|---|---|
+| `src/integrations/polymarket/cashout.py` | `tiered_cashout_threshold()`, `scan_for_cashouts()`, `execute_cashout()` |
+| `scripts/inplay_cashout_scan.py` | Thin cron wrapper |
+| `scripts/backtest_inplay_cashout.py` | Backtesting harness |
+| `src/data/schema_v8_cashout.sql` | `cashout_triggered_at`, `cashout_price`, `cashout_pnl_usdc` columns on `bet_ledger` |
+
+**Cashed-out rows** are distinguishable from naturally-settled rows by:
+
+```sql
+SELECT * FROM bet_ledger WHERE cashout_triggered_at IS NOT NULL;
+```
+
+### TWAP execution (Wave 5.9)
 - **Spread ≤ 5pp** → instant FOK (fill-or-kill) market order
 - **Spread > 5pp** → TWAP plan written to `order_plans` table; daemon places limit order chunks every 90s up to `max_acceptable_price = model_prob - min_edge_pp/100`
 
@@ -303,6 +368,7 @@ Schema files live in [`src/data/`](src/data/):
 - `schema_v5_betting.sql` — `bet_ledger` (Wave 5 Phase 6b)
 - `schema_v6_paper_betting.sql` — paper-bet columns + indices
 - `schema_v7_twap.sql` — `order_plans`, `order_chunks` (Wave 5.9 TWAP execution)
+- `schema_v8_cashout.sql` — `cashout_triggered_at`, `cashout_price`, `cashout_pnl_usdc`, `cashout_threshold_used` on `bet_ledger` (Wave 5.10)
 - `schema_model_versions.sql` — `model_versions`, training metadata
 
 See [`docs/DATABASE_SCHEMA.md`](docs/DATABASE_SCHEMA.md) for the full
@@ -321,7 +387,7 @@ backlog and history. Headline waves:
 | 3.5 | Match-level backtest harness | Done |
 | 4 | Cricket Model V2 strategic rewrite | Done |
 | 4.5 | V2 score-MAE fix (V2 now beats V1 on every metric) | Done |
-| **5** | **Multi-market simulator + Polymarket compare + guarded write-path** | **Current** |
+| **5** | **Multi-market simulator + Polymarket compare + guarded write-path + in-game cashout** | **Current** |
 | 6 | Polymarket liquidity provision (LP) | Parking lot |
 | 7 | V2 productionisation (GUI integration, debug UI, etc.) | Parking lot |
 | 8 | Advanced model + new data sources | Parking lot |

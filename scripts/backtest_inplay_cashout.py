@@ -32,6 +32,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from src.data.database import get_connection
 from src.integrations.polymarket import PolymarketClient
 from src.integrations.odds.polymarket_compare import POLYMARKET_TAKER_FEE
+from src.integrations.polymarket.cashout import tiered_cashout_threshold
 
 logging.basicConfig(
     level=logging.INFO,
@@ -39,7 +40,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Cashout return-ratio thresholds to simulate
+# Flat thresholds to simulate alongside the tiered strategy
 THRESHOLDS = [1.2, 1.3, 1.4, 1.5, 1.6, 1.8, 2.0, 2.5]
 
 # Polymarket CLOB rate-limit: leave a small gap between price-history calls
@@ -280,38 +281,62 @@ def _print_aggregate(analyses: List[BetAnalysis]) -> None:
     print(f"\n{'═' * 72}")
     print("  AGGREGATE SUMMARY")
     print(f"  Total bets: {len(analyses)}")
-    print(f"  {'Threshold':>10}  "
+    print(f"  {'Threshold':>12}  "
           f"{'Triggered':>10}  {'Total Cashout $':>16}  "
           f"{'Actual PnL $':>13}  {'Net Improvement $':>18}")
-    print(f"  {'-'*10}  {'-'*10}  {'-'*16}  {'-'*13}  {'-'*18}")
+    print(f"  {'-'*12}  {'-'*10}  {'-'*16}  {'-'*13}  {'-'*18}")
 
     total_actual = sum(a.bet.actual_pnl for a in analyses)
 
+    # Flat threshold rows
     for i, threshold in enumerate(THRESHOLDS):
         n_triggered = 0
         total_cashout = 0.0
-        total_improvement = 0.0
 
         for analysis in analyses:
             r = analysis.results[i]
             if r.triggered and r.cashout_pnl is not None:
                 n_triggered += 1
                 total_cashout += r.cashout_pnl
-                # For non-triggered bets, actual PnL counts as-is
             else:
                 total_cashout += analysis.bet.actual_pnl
-            total_improvement = total_cashout - total_actual
+        total_improvement = total_cashout - total_actual
 
-        print(f"  {threshold:>10.1f}x  {n_triggered:>10}  "
+        print(f"  {threshold:>11.1f}x  {n_triggered:>10}  "
               f"${total_cashout:>+14.2f}  "
               f"${total_actual:>+11.2f}  "
               f"${total_improvement:>+16.2f}")
 
-    print(f"  {'–'*10}  {'–'*10}  {'–'*16}  {'–'*13}  {'–'*18}")
-    print(f"  {'Hold all':>10}   {'–':>9}  {'–':>16}  "
+    # Tiered strategy row
+    n_tiered = 0
+    total_tiered = 0.0
+    for analysis in analyses:
+        thr = tiered_cashout_threshold(analysis.bet.fill_price)
+        if thr is None:
+            total_tiered += analysis.bet.actual_pnl
+            continue
+        # Find the simulated result closest to this threshold
+        best_r = min(
+            (r for r in analysis.results if r.threshold == thr),
+            key=lambda r: abs(r.threshold - thr),
+            default=None,
+        )
+        if best_r and best_r.triggered and best_r.cashout_pnl is not None:
+            n_tiered += 1
+            total_tiered += best_r.cashout_pnl
+        else:
+            total_tiered += analysis.bet.actual_pnl
+    tiered_improvement = total_tiered - total_actual
+
+    print(f"  {'─'*12}  {'─'*10}  {'─'*16}  {'─'*13}  {'─'*18}")
+    print(f"  {'tiered (live)':>12}  {n_tiered:>10}  "
+          f"${total_tiered:>+14.2f}  "
+          f"${total_actual:>+11.2f}  "
+          f"${tiered_improvement:>+16.2f}  ◀ current config")
+    print(f"  {'Hold all':>12}   {'–':>9}  {'–':>16}  "
           f"${total_actual:>+11.2f}  {'$0.00':>18}")
 
-    # Highlight the best threshold
+    # Highlight the best flat threshold
     best_threshold = None
     best_improvement = float("-inf")
     for i, threshold in enumerate(THRESHOLDS):
@@ -328,9 +353,11 @@ def _print_aggregate(analyses: List[BetAnalysis]) -> None:
             best_threshold = threshold
 
     if best_threshold and best_improvement > 0:
-        print(f"\n  >>> Best threshold: {best_threshold}x  "
+        print(f"\n  >>> Best flat threshold: {best_threshold}x  "
               f"(+${best_improvement:.2f} over hold-all) <<<")
-    else:
+    if tiered_improvement > 0:
+        print(f"  >>> Tiered strategy:     +${tiered_improvement:.2f} over hold-all <<<")
+    if tiered_improvement <= 0 and (not best_threshold or best_improvement <= 0):
         print("\n  >>> No threshold improved on hold-all for this dataset <<<")
 
 

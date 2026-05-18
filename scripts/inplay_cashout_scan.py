@@ -2,8 +2,13 @@
 """Wave 5.10: In-game cashout scanner.
 
 Polls all open (filled) positions and triggers a SELL order whenever
-the return ratio (current_price / fill_price) meets the strategy's
-cashout_return_threshold.
+the return ratio (current_price / fill_price) meets the tiered threshold
+for that entry price bucket:
+
+    Heavy underdog  5–20¢  → cash out at 1.30x
+    Underdog       20–35¢  → cash out at 1.20x
+    Slight underdog35–50¢  → cash out at 1.25x
+    Coin flip+     50–95¢  → hold to settlement (no cashout)
 
 Run every 2–5 minutes while matches are live:
 
@@ -12,9 +17,6 @@ Run every 2–5 minutes while matches are live:
 
     # Live — executes real SELL orders for real bets, simulates for paper
     venv311/bin/python scripts/inplay_cashout_scan.py
-
-    # Override threshold for all bets (ignores per-strategy setting)
-    venv311/bin/python scripts/inplay_cashout_scan.py --threshold 1.5
 
 Cron example (every 3 minutes during a match window):
     */3 * * * * cd /path/to/indias_dad && venv311/bin/python scripts/inplay_cashout_scan.py >> logs/cashout_scan.log 2>&1
@@ -50,13 +52,6 @@ def main() -> int:
         help="Simulate cashouts without placing real SELL orders",
     )
     parser.add_argument(
-        "--threshold", type=float, default=None,
-        help=(
-            "Override return-ratio threshold for ALL bets (e.g. 1.5). "
-            "If omitted, uses each strategy's cashout_return_threshold."
-        ),
-    )
-    parser.add_argument(
         "--verbose", action="store_true",
         help="Debug-level logging",
     )
@@ -77,7 +72,6 @@ def main() -> int:
         conn=conn,
         poly_client=poly_client,
         dry_run=args.dry_run,
-        default_threshold=args.threshold,
     )
 
     conn.close()

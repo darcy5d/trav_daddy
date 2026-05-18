@@ -95,6 +95,44 @@ too, especially when watching tonight's matches develop.
 - **Open Paper Bets** — bets still pending Polymarket settlement
 - **Recent Settled** — last 50 settled bets with realised P&L and outcome
 
+## In-game cashout (Wave 5.10)
+
+Paper bets participate in the same tiered cashout system as real bets. When
+the cron scanner fires, it checks all `status='filled'` rows (paper and real)
+and simulates a SELL for paper bets — no actual CLOB call is made, but the
+`bet_ledger` row is updated with:
+
+- `cashout_triggered_at` — timestamp the threshold was met
+- `cashout_price` — the CLOB midpoint at the time
+- `cashout_pnl_usdc` — realised P&L (net of 2% taker fee)
+- `cashout_threshold_used` — the ratio that fired (e.g. 1.25x)
+- `status = 'settled'` — marked immediately so reconciler skips it
+
+**Thresholds are tiered by entry price** (see README for full breakdown):
+
+| Entry bucket | Threshold |
+|---|---|
+| Heavy underdog 5–20¢ | 1.30x |
+| Underdog 20–35¢ | 1.20x |
+| Slight underdog 35–50¢ | 1.25x |
+| Coin flip + above 50¢ | hold |
+
+The threshold logic lives in `src/integrations/polymarket/cashout.py` →
+`tiered_cashout_threshold(fill_price)`. Strategy-level overrides
+(`PaperStrategy.cashout_return_threshold`) are supported but default to
+`None`, meaning all strategies use the tiered lookup.
+
+**Querying cashed-out paper bets:**
+
+```sql
+SELECT bet_id, side_label, fill_price, cashout_price,
+       cashout_threshold_used, cashout_pnl_usdc
+FROM bet_ledger
+WHERE bet_kind = 'paper'
+  AND cashout_triggered_at IS NOT NULL
+ORDER BY cashout_triggered_at DESC;
+```
+
 ## Schema
 
 Paper bets live in the existing `bet_ledger` table with:

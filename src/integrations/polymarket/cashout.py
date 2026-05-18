@@ -4,9 +4,17 @@ A "cashout" is triggered when the current Polymarket mid-price has risen
 enough relative to our fill price that locking in the profit is preferable
 to holding the position to binary settlement.
 
-Trigger rule (per the plan):
+Trigger rule:
     return_ratio = current_price / fill_price
-    cashout if: return_ratio >= strategy.cashout_return_threshold
+    cashout if: return_ratio >= threshold_for_fill_price(fill_price)
+
+Thresholds are tiered by entry price (optimised on 14-day backtest):
+    Heavy underdog  (5–20¢):  1.30x  — spikes are brief; snap at 1.3x
+    Underdog       (20–35¢):  1.20x  — peak PnL; falls off sharply above
+    Slight underdog(35–50¢):  1.25x  — sweet spot between capture and reversal
+    Coin flip      (50–65¢):  hold   — 0% ever reach 2x; cashout costs money
+    Slight favourite(65–80¢): hold   — rarely moves enough to benefit
+    Heavy favourite(80–95¢):  hold   — never moves; ceiling too close
 
 Once the threshold is met, a SELL limit order is placed at the current CLOB
 midpoint.  For paper bets the CLOB call is skipped and the result is
@@ -23,6 +31,7 @@ reconciler skips it.  It can be distinguished from a naturally-settled row by:
     WHERE cashout_triggered_at IS NOT NULL
 
 Public API:
+    tiered_cashout_threshold(fill_price) -> Optional[float]
     evaluate_cashout(bet_row, current_price, threshold) -> bool
     execute_cashout(bet_row, cashout_price, conn, poly_client, dry_run) -> dict
     scan_for_cashouts(conn, poly_client, dry_run) -> dict
@@ -43,6 +52,42 @@ logger = logging.getLogger(__name__)
 
 def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+# ---------------------------------------------------------------------------
+# Tiered threshold lookup  (optimised on 14-day, 388-bet backtest)
+# ---------------------------------------------------------------------------
+
+# Each entry: (upper_bound_exclusive, threshold_or_None)
+# Evaluated top-to-bottom; first matching bucket wins.
+# None means "hold to settlement — no cashout for this bucket".
+_TIERED_THRESHOLDS: list = [
+    (0.20, 1.30),   # Heavy underdog  5–20¢ : snap at 1.30x
+    (0.35, 1.20),   # Underdog       20–35¢ : peak PnL at 1.20x
+    (0.50, 1.25),   # Slight underdog35–50¢ : sweet spot 1.25x
+    (0.65, None),   # Coin flip      50–65¢ : hold — cashout costs money
+    (0.80, None),   # Slight fav     65–80¢ : hold — rarely moves enough
+    (0.95, None),   # Heavy fav      80–95¢ : hold — ceiling too close
+]
+
+
+def tiered_cashout_threshold(fill_price: float) -> Optional[float]:
+    """Return the cashout return-ratio threshold for a given entry price.
+
+    Returns None for buckets where holding is preferable to any cashout
+    (coin flips and favourites).
+
+    Examples:
+        tiered_cashout_threshold(0.15) -> 1.30   # heavy underdog
+        tiered_cashout_threshold(0.28) -> 1.20   # underdog
+        tiered_cashout_threshold(0.42) -> 1.25   # slight underdog
+        tiered_cashout_threshold(0.55) -> None   # coin flip — hold
+        tiered_cashout_threshold(0.70) -> None   # slight favourite — hold
+    """
+    for upper, threshold in _TIERED_THRESHOLDS:
+        if fill_price < upper:
+            return threshold
+    return None  # above 0.95 — hold
 
 
 # ---------------------------------------------------------------------------
@@ -218,28 +263,26 @@ def scan_for_cashouts(
     conn: Optional[sqlite3.Connection] = None,
     poly_client: Optional[PolymarketClient] = None,
     dry_run: bool = False,
-    default_threshold: Optional[float] = None,
 ) -> Dict[str, Any]:
     """Check all filled bets for cashout eligibility and execute if met.
 
     For each bet_ledger row with status='filled':
-      1. Determine the cashout threshold (from strategy config, else
-         default_threshold, else skip).
+      1. Determine the cashout threshold via tiered_cashout_threshold(fill_price).
+         Buckets where holding is optimal (coin flip / favourites) return None
+         and are skipped automatically.
       2. Fetch the current CLOB midpoint for the outcome token.
       3. If evaluate_cashout() is True: call execute_cashout().
 
     Args:
-        conn:              Open SQLite connection (created if None).
-        poly_client:       PolymarketClient (created if None).
-        dry_run:           If True, simulate cashouts without placing SELL orders.
-        default_threshold: Fallback threshold for bets without a strategy label
-                           (e.g. manual real bets).  None = skip those bets.
+        conn:        Open SQLite connection (created if None).
+        poly_client: PolymarketClient (created if None).
+        dry_run:     If True, simulate cashouts without placing SELL orders.
 
     Returns:
         {
             "n_checked":   int,
             "n_triggered": int,
-            "n_executed":  int,   # always == n_triggered (no partial failures yet)
+            "n_executed":  int,
             "cashouts":    [result_dict, ...],
             "errors":      [(bet_id, message), ...],
         }
@@ -252,12 +295,6 @@ def scan_for_cashouts(
 
     if poly_client is None:
         poly_client = PolymarketClient()
-
-    # Load strategy thresholds once
-    try:
-        from src.integrations.polymarket.paper_strategies import get_strategy
-    except ImportError:
-        get_strategy = lambda _: None  # noqa: E731
 
     cur = conn.cursor()
     cur.execute(
@@ -282,17 +319,12 @@ def scan_for_cashouts(
     for bet in rows:
         bet_id = bet["bet_id"]
         token_id = bet["polymarket_token_id"]
-        strategy_label = bet["strategy_label"] if "strategy_label" in bet.keys() else None
+        fill_price = float(bet["fill_price"])
 
-        # Determine threshold
-        threshold: Optional[float] = default_threshold
-        if strategy_label:
-            strat = get_strategy(strategy_label)
-            if strat is not None and strat.cashout_return_threshold is not None:
-                threshold = strat.cashout_return_threshold
-
+        # Tiered threshold — returns None for coin-flip / favourite buckets
+        threshold = tiered_cashout_threshold(fill_price)
         if threshold is None:
-            continue  # no threshold configured for this bet
+            continue
 
         # Fetch current price
         try:
