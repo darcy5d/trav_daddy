@@ -274,7 +274,7 @@ def _compute_pnl_for_settled_bet(
         return None
     shares = fill_size_usdc / fill_price
     gross_payout = shares * float(settle_outcome)
-    fee = fill_size_usdc * fee_pct
+    fee = gross_payout * fee_pct  # fee on proceeds, not on stake (no fee on a loss)
     return round(gross_payout - fill_size_usdc - fee, 4)
 
 
