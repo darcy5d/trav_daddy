@@ -8,11 +8,11 @@ Trigger rule:
     return_ratio = current_price / fill_price
     cashout if: return_ratio >= threshold_for_fill_price(fill_price)
 
-Thresholds are tiered by entry price (optimised on 14-day backtest):
+Thresholds are tiered by entry price (optimised on 14-day backtest + Wave 5.11 update):
     Heavy underdog  (5–20¢):  1.30x  — spikes are brief; snap at 1.3x
     Underdog       (20–35¢):  1.20x  — peak PnL; falls off sharply above
     Slight underdog(35–50¢):  1.25x  — sweet spot between capture and reversal
-    Coin flip      (50–65¢):  hold   — 0% ever reach 2x; cashout costs money
+    Coin flip      (50–65¢):  1.30x  — loose safety net; fires on genuine mid-match spikes
     Slight favourite(65–80¢): hold   — rarely moves enough to benefit
     Heavy favourite(80–95¢):  hold   — never moves; ceiling too close
 
@@ -65,7 +65,7 @@ _TIERED_THRESHOLDS: list = [
     (0.20, 1.30),   # Heavy underdog  5–20¢ : snap at 1.30x
     (0.35, 1.20),   # Underdog       20–35¢ : peak PnL at 1.20x
     (0.50, 1.25),   # Slight underdog35–50¢ : sweet spot 1.25x
-    (0.65, None),   # Coin flip      50–65¢ : hold — cashout costs money
+    (0.65, 1.30),   # Coin flip      50–65¢ : loose safety net; fires on genuine mid-match spike
     (0.80, None),   # Slight fav     65–80¢ : hold — rarely moves enough
     (0.95, None),   # Heavy fav      80–95¢ : hold — ceiling too close
 ]
@@ -81,7 +81,7 @@ def tiered_cashout_threshold(fill_price: float) -> Optional[float]:
         tiered_cashout_threshold(0.15) -> 1.30   # heavy underdog
         tiered_cashout_threshold(0.28) -> 1.20   # underdog
         tiered_cashout_threshold(0.42) -> 1.25   # slight underdog
-        tiered_cashout_threshold(0.55) -> None   # coin flip — hold
+        tiered_cashout_threshold(0.55) -> 1.30  # coin flip — loose safety net
         tiered_cashout_threshold(0.70) -> None   # slight favourite — hold
     """
     for upper, threshold in _TIERED_THRESHOLDS:

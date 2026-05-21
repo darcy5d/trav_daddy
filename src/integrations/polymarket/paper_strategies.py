@@ -141,7 +141,7 @@ STRATEGIES: List[PaperStrategy] = [
         lookback_hours_min=0.0,
         starting_bankroll_usdc=1000.0,
         kelly_mult=0.5,
-        min_model_prob=0.55,
+        min_model_prob=0.50,
         post_toss_eligible=True,
         max_model_minus_fill_pp=20.0,
     ),
@@ -160,7 +160,7 @@ STRATEGIES: List[PaperStrategy] = [
         lookback_hours_min=0.0,
         starting_bankroll_usdc=1000.0,
         kelly_mult=0.5,
-        min_model_prob=0.60,
+        min_model_prob=0.52,
         post_toss_eligible=False,
     ),
     # Diagnostic: low-edge wide-window quarter-Kelly to capture max data.
