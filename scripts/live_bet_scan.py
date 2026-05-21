@@ -48,6 +48,7 @@ from src.integrations.polymarket.upcoming import (
 )
 from src.integrations.polymarket.paper_inputs import (
     get_recent_xi,
+    get_cached_xi,
     get_default_venue_for_team,
 )
 from src.integrations.polymarket.paper_strategies import (
@@ -283,8 +284,21 @@ def _sim_team1_win_prob(simulator, fixture: Dict[str, Any], conn) -> Optional[fl
     t2 = fixture["team2_id"]
 
     if "t1" not in cache:
-        cache["t1"] = get_recent_xi(conn, t1, fmt, gender)
-        cache["t2"] = get_recent_xi(conn, t2, fmt, gender)
+        fkey = fixture.get("fixture_key", "")
+        crex_t1 = get_cached_xi(conn, fkey, t1)
+        crex_t2 = get_cached_xi(conn, fkey, t2)
+        if crex_t1 is not None:
+            cache["t1"] = crex_t1
+            logger.info(f"  [XI] team1 from crex_xi_cache ({fkey})")
+        else:
+            cache["t1"] = get_recent_xi(conn, t1, fmt, gender)
+            logger.info(f"  [XI] team1 from historical (crex cache miss/stale)")
+        if crex_t2 is not None:
+            cache["t2"] = crex_t2
+            logger.info(f"  [XI] team2 from crex_xi_cache ({fkey})")
+        else:
+            cache["t2"] = get_recent_xi(conn, t2, fmt, gender)
+            logger.info(f"  [XI] team2 from historical (crex cache miss/stale)")
         cache["venue"] = get_default_venue_for_team(conn, t1, fmt, gender)
     t1_bat, t1_bowl = cache["t1"]
     t2_bat, t2_bowl = cache["t2"]

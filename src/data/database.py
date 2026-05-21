@@ -564,6 +564,32 @@ def init_cashout_columns(db_path: Optional[Path] = None) -> bool:
         return False
 
 
+def init_crex_xi_cache(db_path: Optional[Path] = None) -> bool:
+    """Wave 5.11: create crex_xi_cache table + index.
+
+    Idempotent. Safe to call on every app startup.
+    """
+    if db_path is None:
+        db_path = DATABASE_PATH
+
+    schema_path = Path(__file__).parent / "schema_v9_crex_xi_cache.sql"
+    if not schema_path.exists():
+        logger.error(f"Schema file not found: {schema_path}")
+        return False
+
+    try:
+        schema_sql = schema_path.read_text()
+        with get_db_connection(db_path) as conn:
+            conn.executescript(schema_sql)
+            logger.info("CREX XI cache table (V9) initialized")
+        return True
+    except Exception as e:
+        logger.error(f"Failed to initialize CREX XI cache table: {e}")
+        import traceback
+        traceback.print_exc()
+        return False
+
+
 def init_twap_tables(db_path: Optional[Path] = None) -> bool:
     """Wave 5.9: TWAP order execution tables (order_plans + order_chunks).
 
