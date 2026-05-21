@@ -44,10 +44,10 @@ logger = logging.getLogger(__name__)
 # Both share the same team-team-date suffix shape; differentiate format/gender
 # downstream from the event title.
 SLUG_MONEYLINE_RE = re.compile(
-    r"^(?P<prefix>cr[a-z]{2,10})-(?P<t1>[a-z]{2,5})-(?P<t2>[a-z]{2,5})-(?P<date>\d{4}-\d{2}-\d{2})$"
+    r"^(?P<prefix>cr[a-z0-9]{2,14})-(?P<t1>[a-z]{2,5})-(?P<t2>[a-z]{2,5})-(?P<date>\d{4}-\d{2}-\d{2})$"
 )
 SLUG_SUBMARKET_RE = re.compile(
-    r"^(?P<prefix>cr[a-z]{2,10})-(?P<t1>[a-z]{2,5})-(?P<t2>[a-z]{2,5})-(?P<date>\d{4}-\d{2}-\d{2})-(?P<suffix>.+)$"
+    r"^(?P<prefix>cr[a-z0-9]{2,14})-(?P<t1>[a-z]{2,5})-(?P<t2>[a-z]{2,5})-(?P<date>\d{4}-\d{2}-\d{2})-(?P<suffix>.+)$"
 )
 
 # Static prefix -> (cricket_format, gender, human_name) for unambiguous prefixes.
@@ -65,8 +65,10 @@ TOURNAMENT_PREFIX_MAP = {
     "cricodi":   ("ODI", "male",   "ODI International"),
     "cricwt":    ("T20", "female", "Women's T20"),
     "cricwodi":  ("ODI", "female", "Women's ODI"),
-    "cricbifa":  ("T20", "female", "BIFA Women's"),
-    "cricwt20":  ("T20", "female", "Women's T20"),
+    "cricbifa":   ("T20", "female", "BIFA Women's"),
+    "cricwt20":   ("T20", "female", "Women's T20"),
+    "crict20blast":  ("T20", "male",   "Vitality T20 Blast"),
+    "crict20wblast": ("T20", "female", "Women's T20 Blast"),
 }
 
 
@@ -204,31 +206,35 @@ def find_upcoming_cricket_events(
     now = datetime.now(timezone.utc)
     horizon = now.timestamp() + hours_ahead * 3600
 
-    # Pull all open cricket events
+    # Pull all open cricket events.
+    # Polymarket uses two separate tags: "cricket" (international / IPL / PSL)
+    # and "t20-blast" (Vitality T20 Blast).  Query both so we don't miss any.
+    TAGS_TO_QUERY = ["cricket", "t20-blast"]
     raw_events: List[Dict[str, Any]] = []
     seen_event_ids: set = set()
-    for offset in range(0, max_offset, page_size):
-        try:
-            rows = client.get_events(
-                limit=page_size,
-                offset=offset,
-                tag_slug="cricket",
-                closed=False,
-                active=True,
-            )
-        except Exception as exc:
-            logger.warning(f"Polymarket Gamma /events open fetch failed: {exc}")
-            break
-        if not isinstance(rows, list) or not rows:
-            break
-        for ev in rows:
-            evid = str(ev.get("id") or ev.get("slug") or "")
-            if evid in seen_event_ids:
-                continue
-            seen_event_ids.add(evid)
-            raw_events.append(ev)
-        if len(rows) < page_size:
-            break
+    for tag_slug in TAGS_TO_QUERY:
+        for offset in range(0, max_offset, page_size):
+            try:
+                rows = client.get_events(
+                    limit=page_size,
+                    offset=offset,
+                    tag_slug=tag_slug,
+                    closed=False,
+                    active=True,
+                )
+            except Exception as exc:
+                logger.warning(f"Polymarket Gamma /events open fetch failed (tag={tag_slug}): {exc}")
+                break
+            if not isinstance(rows, list) or not rows:
+                break
+            for ev in rows:
+                evid = str(ev.get("id") or ev.get("slug") or "")
+                if evid in seen_event_ids:
+                    continue
+                seen_event_ids.add(evid)
+                raw_events.append(ev)
+            if len(rows) < page_size:
+                break
 
     # Group by fixture key derived from slug
     by_fixture: Dict[str, Dict[str, Any]] = {}
