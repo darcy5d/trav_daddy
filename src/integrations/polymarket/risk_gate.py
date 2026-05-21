@@ -225,12 +225,24 @@ def can_place_bet(
                     cap_remaining_deposit=0.0,
                 )
 
-        # 3. Per-bet cap
-        max_per_bet = float(BETTING_CONFIG.get("max_per_bet_usdc", 0))
+        # 3. Per-bet cap — floats with bankroll when BETTING_MAX_PER_BET_FRACTION is set.
+        # For strategy-tagged bets: cap = fraction × live_bankroll (grows/shrinks with PnL).
+        # For untagged manual bets: falls back to the hard BETTING_MAX_PER_BET dollar cap.
+        max_per_bet_fraction = float(BETTING_CONFIG.get("max_per_bet_fraction", 0))
+        if max_per_bet_fraction > 0 and strategy_label is not None:
+            live_bankroll = _live_bankroll_for_strategy(conn, strategy_label)
+            max_per_bet = max_per_bet_fraction * live_bankroll
+            cap_label = f"{max_per_bet_fraction*100:.1f}% of ${live_bankroll:.2f} live bankroll"
+        else:
+            max_per_bet = float(BETTING_CONFIG.get("max_per_bet_usdc", 0))
+            cap_label = f"hard cap"
         if proposed_size_usdc > max_per_bet:
             return RiskGateDecision(
                 allowed=False,
-                reason=f"Proposed ${proposed_size_usdc} exceeds per-bet cap ${max_per_bet}.",
+                reason=(
+                    f"Proposed ${proposed_size_usdc:.2f} exceeds per-bet cap "
+                    f"${max_per_bet:.2f} ({cap_label})."
+                ),
                 cap_remaining_today=0.0,
                 cap_remaining_deposit=0.0,
             )
@@ -361,6 +373,7 @@ def get_risk_status() -> Dict[str, Any]:
         "kill_switch": bool(BETTING_CONFIG.get("kill_switch", False)),
         "max_deposit_usdc": max_deposit,
         "max_per_bet_usdc": float(BETTING_CONFIG.get("max_per_bet_usdc", 0)),
+        "max_per_bet_fraction": float(BETTING_CONFIG.get("max_per_bet_fraction", 0)),
         "max_per_day_usdc": max_per_day,
         "max_loss_per_day_usdc": max_loss_per_day,
         "auto_min_edge_pp": float(BETTING_CONFIG.get("auto_min_edge_pp", 0)),
@@ -375,6 +388,32 @@ def get_risk_status() -> Dict[str, Any]:
         "settled_bets_total": settled_bets_total,
         "scale_up_eligible": _is_scale_up_eligible(settled_bets_total),
     }
+
+
+def _live_bankroll_for_strategy(conn: sqlite3.Connection, strategy_label: str) -> float:
+    """Compute live bankroll = starting deposit + sum(realised PnL on real settled bets).
+
+    Mirrors the logic in live_bet_scan._get_live_bankroll() so the risk gate
+    uses the exact same number the scanner used for Kelly sizing.
+    """
+    env_key = f"BETTING_MAX_DEPOSIT_{strategy_label.upper().replace('-', '_')}"
+    starting = float(
+        os.environ.get(env_key)
+        or os.environ.get("BETTING_MAX_DEPOSIT_PER_STRATEGY", "100")
+    )
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT COALESCE(SUM(pnl_realised_usdc), 0.0)
+        FROM bet_ledger
+        WHERE COALESCE(bet_kind, 'real') = 'real'
+          AND strategy_label = ?
+          AND status = 'settled'
+        """,
+        (strategy_label,),
+    )
+    pnl = float(cur.fetchone()[0] or 0.0)
+    return max(0.0, starting + pnl)
 
 
 def _is_scale_up_eligible(settled_count: int) -> bool:

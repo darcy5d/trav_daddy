@@ -68,6 +68,11 @@ BETTING_CONFIG = {
     "mode": os.getenv("BETTING_MODE", "OFF").upper(),  # OFF | MANUAL | AUTO
     "max_deposit_usdc": float(os.getenv("BETTING_MAX_DEPOSIT", "200")),
     "max_per_bet_usdc": float(os.getenv("BETTING_MAX_PER_BET", "25")),
+    # Floating per-bet cap as a fraction of the strategy's live bankroll.
+    # When > 0 and a strategy_label is provided, overrides max_per_bet_usdc.
+    # e.g. 0.225 = 22.5% of live bankroll. Grows/shrinks as bankroll moves.
+    # Falls back to max_per_bet_usdc for untagged manual bets.
+    "max_per_bet_fraction": float(os.getenv("BETTING_MAX_PER_BET_FRACTION", "0")),
     "max_per_day_usdc": float(os.getenv("BETTING_MAX_PER_DAY", "50")),
     "max_loss_per_day_usdc": float(os.getenv("BETTING_MAX_LOSS_PER_DAY", "30")),
     "auto_min_edge_pp": float(os.getenv("BETTING_AUTO_MIN_EDGE", "5.0")),
