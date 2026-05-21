@@ -271,12 +271,16 @@ def get_cached_xi(
     except (json.JSONDecodeError, TypeError):
         return None
 
-    if not player_ids:
+    # The sim hard-requires exactly 11 batters and 5 bowlers. If CREX only
+    # resolved < 11 players (partial XI), fall back to get_recent_xi() which
+    # always fills to 11 from historical matches.
+    if len(player_ids) < 11:
+        logger.debug(
+            f"crex_xi_cache has only {len(player_ids)} ids for {fixture_key} "
+            f"team {team_id} — falling back to historical"
+        )
         return None
 
     batters = player_ids[:11]
-    # Use all available as potential bowlers — the sim selects bowling ELOs
-    # from this list; first 5 with non-zero overs are preferred but we pass
-    # the full resolved list so the sim can pick.
     bowlers = player_ids[:5]
     return batters, bowlers
