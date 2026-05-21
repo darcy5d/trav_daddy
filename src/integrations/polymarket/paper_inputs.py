@@ -164,10 +164,15 @@ def resolve_xi_names_to_ids(
 
     Returns (player_ids, n_matched, n_input).
 
-    Candidate pool: players who've appeared for the team since 2023. This
-    keeps the pool small and team-scoped, improving match precision.
-    Uses the same `match_abbreviated_name` utility already used by the
-    post-toss daemon.
+    Two-pass matching:
+      Pass 1 — team-scoped: players who've ever appeared for this team in
+               this format (no date cap so rotation/loan players are included).
+      Pass 2 — global T20 fallback: any player in the full T20 pool. Used
+               for import/overseas players who haven't played for this
+               franchise yet but exist in the DB from other competitions.
+
+    The global pass uses a stricter threshold (0.65) to reduce false positives
+    when searching across thousands of players.
     """
     from src.utils.name_matcher import match_abbreviated_name
 
@@ -175,6 +180,8 @@ def resolve_xi_names_to_ids(
         return [], 0, 0
 
     cur = conn.cursor()
+
+    # Pass 1: team-scoped (all historical matches, no date cap)
     cur.execute(
         """
         SELECT DISTINCT pms.player_id, p.name
@@ -183,25 +190,59 @@ def resolve_xi_names_to_ids(
         JOIN matches m ON m.match_id = pms.match_id
         WHERE pms.team_id = ?
           AND m.match_type = ? AND m.gender = ?
-          AND m.date >= '2023-01-01'
         """,
         (team_id, fmt, gender),
     )
-    candidates: List[Tuple[int, str]] = [
+    team_candidates: List[Tuple[int, str]] = [
         (r["player_id"], r["name"]) for r in cur.fetchall()
     ]
-    if not candidates:
-        return [], 0, len(xi_names)
+
+    # Pass 2: global T20 pool (loaded lazily — only if needed)
+    _global_candidates: Optional[List[Tuple[int, str]]] = None
+
+    def _get_global() -> List[Tuple[int, str]]:
+        nonlocal _global_candidates
+        if _global_candidates is None:
+            cur.execute(
+                """
+                SELECT DISTINCT pms.player_id, p.name
+                FROM player_match_stats pms
+                JOIN players p ON p.player_id = pms.player_id
+                JOIN matches m ON m.match_id = pms.match_id
+                WHERE m.match_type = ? AND m.gender = ?
+                """,
+                (fmt, gender),
+            )
+            _global_candidates = [(r["player_id"], r["name"]) for r in cur.fetchall()]
+        return _global_candidates
 
     ids: List[int] = []
     matched = 0
+    matched_ids_set: set = set()
+
     for raw in xi_names:
         raw = (raw or "").strip()
         if not raw:
             continue
-        m = match_abbreviated_name(raw, candidates, threshold=threshold)
-        if m:
-            ids.append(m[0])
+
+        pid = None
+
+        # Pass 1: team-scoped
+        if team_candidates:
+            m = match_abbreviated_name(raw, team_candidates, threshold=threshold)
+            if m and m[0] not in matched_ids_set:
+                pid = m[0]
+
+        # Pass 2: global fallback (stricter threshold to avoid cross-team noise)
+        if pid is None:
+            m = match_abbreviated_name(raw, _get_global(), threshold=max(threshold, 0.65))
+            if m and m[0] not in matched_ids_set:
+                pid = m[0]
+                logger.debug(f"  resolve_xi: '{raw}' matched globally → {m[1]} (id={m[0]})")
+
+        if pid is not None:
+            ids.append(pid)
+            matched_ids_set.add(pid)
             matched += 1
 
     return ids, matched, len(xi_names)
