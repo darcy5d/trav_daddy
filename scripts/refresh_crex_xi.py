@@ -35,6 +35,7 @@ from typing import Any, Dict, List, Optional
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from src.data.database import get_connection, init_crex_xi_cache
+from src.integrations.polymarket import PolymarketClient
 from src.integrations.polymarket.upcoming import (
     find_upcoming_cricket_events,
     attach_db_team_ids,
@@ -173,7 +174,8 @@ def main() -> int:
         # Discover upcoming fixtures.
         logger.info(f"Discovering upcoming fixtures ({args.hours_ahead}h ahead)...")
         try:
-            events = find_upcoming_cricket_events(hours_ahead=args.hours_ahead)
+            pm_client = PolymarketClient()
+            events = find_upcoming_cricket_events(pm_client, hours_ahead=args.hours_ahead)
         except Exception as exc:
             logger.error(f"Failed to fetch upcoming events: {exc}")
             return 1
@@ -182,7 +184,7 @@ def main() -> int:
             logger.info("No upcoming fixtures found.")
             return 0
 
-        fixtures = attach_db_team_ids(events, conn)
+        fixtures = attach_db_team_ids(events)
         logger.info(f"Found {len(fixtures)} upcoming fixture(s)")
 
         # Filter to specific fixture if requested.
