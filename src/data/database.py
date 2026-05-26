@@ -538,6 +538,7 @@ def init_cashout_columns(db_path: Optional[Path] = None) -> bool:
         ("cashout_price",         "REAL"),
         ("cashout_pnl_usdc",      "REAL"),
         ("cashout_threshold_used","REAL"),
+        ("cashout_order_id",      "TEXT"),
     ]
 
     schema_path = Path(__file__).parent / "schema_v8_cashout.sql"
@@ -611,6 +612,46 @@ def init_twap_tables(db_path: Optional[Path] = None) -> bool:
         return True
     except Exception as e:
         logger.error(f"Failed to initialize TWAP tables: {e}")
+        import traceback
+        traceback.print_exc()
+        return False
+
+
+def init_order_history(db_path: Optional[Path] = None) -> bool:
+    """Wave 5.13: order_history audit table + bet_ledger reason/category cols.
+
+    Idempotent. Safe to call on every app startup. Adds:
+      - order_history table (every Polymarket order id we have ever posted)
+      - bet_ledger.cancel_reason / .error_category / .reconciled_at columns
+    """
+    if db_path is None:
+        db_path = DATABASE_PATH
+
+    schema_path = Path(__file__).parent / "schema_v10_order_history.sql"
+    if not schema_path.exists():
+        logger.error(f"Schema file not found: {schema_path}")
+        return False
+
+    audit_columns = [
+        ("cancel_reason",   "TEXT"),
+        ("error_category",  "TEXT"),
+        ("reconciled_at",   "TEXT"),
+    ]
+
+    try:
+        schema_sql = schema_path.read_text()
+        with get_db_connection(db_path) as conn:
+            conn.executescript(schema_sql)
+            for col_name, col_type in audit_columns:
+                if not _column_exists(conn, "bet_ledger", col_name):
+                    conn.execute(
+                        f"ALTER TABLE bet_ledger ADD COLUMN {col_name} {col_type}"
+                    )
+                    logger.info(f"Added bet_ledger.{col_name} column")
+            logger.info("Order history (V10) initialized")
+        return True
+    except Exception as e:
+        logger.error(f"Failed to initialize order_history schema: {e}")
         import traceback
         traceback.print_exc()
         return False

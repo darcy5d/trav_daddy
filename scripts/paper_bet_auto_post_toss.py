@@ -54,6 +54,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from src.data.database import get_connection
 from src.integrations.polymarket import PolymarketClient
+from src.integrations.polymarket.order_audit import (
+    record_order_cancelled,
+    record_order_filled,
+    record_order_placed,
+    record_order_replaced_by_reprice,
+)
 from src.integrations.polymarket.upcoming import (
     find_upcoming_cricket_events, attach_db_team_ids,
 )
@@ -562,7 +568,8 @@ def _process_twap_plans(dry_run: bool = False) -> Dict[str, Any]:
                 now_utc = datetime.now(timezone.utc)
                 minutes_to_kickoff = (kickoff_dt - now_utc).total_seconds() / 60.0
                 if minutes_to_kickoff <= 30:
-                    logger.info(f"TWAP plan #{plan_id}: {minutes_to_kickoff:.0f}min to kickoff — cancelling unfilled")
+                    logger.info(f"TWAP plan #{plan_id}: {minutes_to_kickoff:.0f}min to kickoff — syncing fills then cancelling unfilled")
+                    _sync_plan_fills_from_clob(conn, cur, pm_client, plan_id)
                     _cancel_plan_unfilled_chunks(conn, cur, pm_client, plan_id, dry_run)
                     _finalize_plan(conn, cur, plan_id)
                     twap_summary["plans_cancelled"] += 1
@@ -705,6 +712,21 @@ def _process_twap_plans(dry_run: bool = False) -> Dict[str, Any]:
             conn.commit()
             twap_summary["chunks_placed"] += 1
 
+            record_order_placed(
+                order_id,
+                bet_id=plan["bet_ledger_id"],
+                chunk_id=chunk_id,
+                plan_id=plan_id,
+                token_id=token_id,
+                side=plan["side"],
+                order_kind="twap_chunk",
+                limit_price=effective_price,
+                size_usdc=size_usdc,
+                size_shares=size_shares,
+                posted_at=placed_at,
+                conn=conn,
+            )
+
             logger.info(
                 f"TWAP plan #{plan_id} chunk #{next_chunk['chunk_index']}: "
                 f"placed limit {plan['side']} {size_shares:.2f} shares @ {effective_price:.4f} "
@@ -827,6 +849,9 @@ def _resize_plan_to_bankroll(
                 pm_client.cancel_order(oid)
             except Exception as exc:
                 logger.warning(f"  cancel chunk {chunk['chunk_id']} failed: {exc}")
+            # History: keep the old oid as 'cancelled' (resize) so reconcile can
+            # still attribute any late MAKER fill back to this chunk.
+            record_order_cancelled(oid, reason="resize", conn=conn)
         # Reset chunk to pending with new size (keeps the chunk record, just updates stake)
         new_shares = max(round(new_stake / chunk["limit_price"], 4), 5.0) if chunk["limit_price"] else 5.0
         cur.execute(
@@ -950,6 +975,28 @@ def _reprice_placed_chunks(
             n_repriced += 1
             logger.info(f"  Repriced -> new order_id={new_order_id}")
 
+            # History: mark the old order as reprice_replaced pointing at the
+            # new id, then insert the new id row. Reconcile follows this chain
+            # if a late MAKER fill lands on the old id.
+            if old_order_id:
+                record_order_replaced_by_reprice(
+                    old_order_id, new_order_id, reason="reprice", conn=conn,
+                )
+            if new_order_id:
+                record_order_placed(
+                    new_order_id,
+                    bet_id=plan["bet_ledger_id"],
+                    chunk_id=chunk["chunk_id"],
+                    plan_id=plan_id,
+                    token_id=token_id,
+                    side=plan["side"],
+                    order_kind="twap_chunk",
+                    limit_price=new_price,
+                    size_usdc=size_usdc,
+                    size_shares=size_shares,
+                    conn=conn,
+                )
+
             # Check immediate fill
             if isinstance(resp, dict) and resp.get("status") == "matched":
                 _mark_chunk_filled(conn, cur, chunk["chunk_id"], resp)
@@ -960,37 +1007,37 @@ def _reprice_placed_chunks(
     return n_repriced
 
 
-def _check_chunk_fills(conn, cur, pm_client: PolymarketClient, plan_id: int) -> None:
-    """Check fill status of all 'placed' chunks for a plan."""
-    cur.execute(
-        "SELECT * FROM order_chunks WHERE plan_id = ? AND status = 'placed'",
-        (plan_id,),
+def _sync_plan_fills_from_clob(
+    conn, cur, pm_client: PolymarketClient, plan_id: int,
+) -> int:
+    """Sync on-chain MAKER/TAKER fills for a plan's resting limit orders."""
+    from src.integrations.polymarket.clob_fills import (
+        fetch_all_clob_trades,
+        index_fills_by_order_id,
+        sync_placed_chunk_fills,
     )
-    placed_chunks = cur.fetchall()
-    if not placed_chunks:
-        return
-
     try:
-        open_orders = pm_client.get_open_orders()
+        trades = fetch_all_clob_trades(pm_client)
+        cur.execute(
+            "SELECT polymarket_order_id FROM order_chunks WHERE polymarket_order_id IS NOT NULL"
+        )
+        known_ids = {str(r[0]) for r in cur.fetchall()}
+        cur.execute(
+            "SELECT polymarket_order_id FROM bet_ledger WHERE polymarket_order_id IS NOT NULL"
+        )
+        known_ids.update(str(r[0]) for r in cur.fetchall())
+        fills = index_fills_by_order_id(trades, known_order_ids=known_ids)
+        return sync_placed_chunk_fills(conn, cur, fills, plan_id=plan_id)
     except Exception as exc:
-        logger.warning(f"TWAP plan #{plan_id}: get_open_orders failed: {exc}")
-        return
+        logger.warning(f"TWAP plan #{plan_id}: CLOB fill sync failed: {exc}")
+        return 0
 
-    open_order_ids = set()
-    if isinstance(open_orders, list):
-        for o in open_orders:
-            oid = o.get("id") or o.get("orderID") or o.get("orderId")
-            if oid:
-                open_order_ids.add(str(oid))
 
-    for chunk in placed_chunks:
-        order_id = chunk["polymarket_order_id"]
-        if not order_id:
-            continue
-        if str(order_id) not in open_order_ids:
-            # Order no longer open — assume filled (Polymarket removes filled
-            # orders from the open-orders list)
-            _mark_chunk_filled(conn, cur, chunk["chunk_id"], None)
+def _check_chunk_fills(conn, cur, pm_client: PolymarketClient, plan_id: int) -> None:
+    """Check fill status of all 'placed' chunks for a plan via CLOB trades."""
+    n = _sync_plan_fills_from_clob(conn, cur, pm_client, plan_id)
+    if n:
+        logger.info(f"TWAP plan #{plan_id}: synced {n} chunk fill(s) from CLOB")
 
 
 def _mark_chunk_filled(conn, cur, chunk_id: int, resp: Optional[Dict[str, Any]]) -> None:
@@ -1010,23 +1057,38 @@ def _mark_chunk_filled(conn, cur, chunk_id: int, resp: Optional[Dict[str, Any]])
             pass
 
     # If we don't have fill details from the response, use the planned values
-    cur.execute("SELECT limit_price, size_usdc FROM order_chunks WHERE chunk_id = ?", (chunk_id,))
+    cur.execute(
+        "SELECT limit_price, size_usdc, polymarket_order_id FROM order_chunks WHERE chunk_id = ?",
+        (chunk_id,),
+    )
     chunk_row = cur.fetchone()
+    order_id = None
     if chunk_row:
         if fill_price is None:
             fill_price = chunk_row["limit_price"]
         if fill_size is None:
             fill_size = chunk_row["size_usdc"]
+        order_id = chunk_row["polymarket_order_id"]
 
+    filled_at = _utc_now_iso()
     cur.execute(
         """
         UPDATE order_chunks
         SET status = 'filled', filled_at = ?, fill_price = ?, fill_size_usdc = ?
         WHERE chunk_id = ?
         """,
-        (_utc_now_iso(), fill_price, fill_size, chunk_id),
+        (filled_at, fill_price, fill_size, chunk_id),
     )
     conn.commit()
+
+    if order_id:
+        record_order_filled(
+            order_id,
+            fill_usdc=fill_size or 0.0,
+            fill_price=fill_price,
+            filled_at=filled_at,
+            conn=conn,
+        )
 
 
 def _sweep_orphan_chunks(
@@ -1087,6 +1149,8 @@ def _sweep_orphan_chunks(
                 "UPDATE order_chunks SET status = 'cancelled' WHERE chunk_id = ?",
                 (chunk["chunk_id"],),
             )
+            if order_id:
+                record_order_cancelled(order_id, reason="orphan_sweep", conn=conn)
             n_cancelled += 1
 
     if n_cancelled > 0:
@@ -1130,6 +1194,8 @@ def _cancel_plan_unfilled_chunks(conn, cur, pm_client: PolymarketClient, plan_id
             "UPDATE order_chunks SET status = 'cancelled' WHERE chunk_id = ?",
             (chunk["chunk_id"],),
         )
+        if order_id and not dry_run:
+            record_order_cancelled(order_id, reason="kickoff_cancel", conn=conn)
     # Also cancel any pending (not-yet-placed) chunks
     cur.execute(
         "UPDATE order_chunks SET status = 'cancelled' WHERE plan_id = ? AND status = 'pending'",
@@ -1171,14 +1237,27 @@ def _finalize_plan(conn, cur, plan_id: int) -> None:
     plan_row = cur.fetchone()
     if plan_row and plan_row["bet_ledger_id"]:
         bet_id = plan_row["bet_ledger_id"]
+        cur.execute(
+            "SELECT polymarket_order_id FROM order_chunks WHERE plan_id = ? AND polymarket_order_id IS NOT NULL LIMIT 1",
+            (plan_id,),
+        )
+        chunk_oid_row = cur.fetchone()
+        primary_oid = chunk_oid_row["polymarket_order_id"] if chunk_oid_row else None
+
         if total_filled_usdc > 0:
             cur.execute(
                 """
                 UPDATE bet_ledger
-                SET status = 'filled', filled_at = ?, fill_price = ?, fill_size_usdc = ?
+                SET status = 'filled',
+                    filled_at = COALESCE(filled_at, ?),
+                    fill_price = ?,
+                    fill_size_usdc = ?,
+                    placed_at = COALESCE(placed_at, ?),
+                    polymarket_order_id = COALESCE(polymarket_order_id, ?)
                 WHERE bet_id = ?
+                  AND status IN ('proposed', 'cancelled', 'placed')
                 """,
-                (_utc_now_iso(), avg_fill, total_filled_usdc, bet_id),
+                (_utc_now_iso(), avg_fill, total_filled_usdc, _utc_now_iso(), primary_oid, bet_id),
             )
         else:
             cur.execute(

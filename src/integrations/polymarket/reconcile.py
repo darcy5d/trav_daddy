@@ -278,6 +278,254 @@ def _compute_pnl_for_settled_bet(
     return round(gross_payout - fill_size_usdc - fee, 4)
 
 
+def _finalize_stale_proposed_bets(conn: sqlite3.Connection) -> int:
+    """Mark stale `proposed` bet_ledger rows as cancelled/errored.
+
+    Two failure modes accumulate forever otherwise:
+
+    1. **Never posted**: a real bet was inserted as 'proposed' but no FOK order
+       and no TWAP plan ever attached (DB write failed, daemon died, etc).
+       After kickoff (or 6h since proposal as a fallback) there is no way the
+       order will execute — mark errored with error_category='never_posted'.
+
+    2. **Plan finalised but bet not**: TWAP plan ended (cancelled/completed)
+       but the linked bet_ledger row is still 'proposed'. Call
+       finalize_plan_from_chunks to push the chunk-driven outcome onto the bet.
+
+    Returns count of bets touched.
+    """
+    cur = conn.cursor()
+    try:
+        cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='bet_ledger'")
+        if not cur.fetchone():
+            return 0
+    except Exception:
+        return 0
+
+    now = datetime.now(timezone.utc)
+    now_iso = now.isoformat()
+    cutoff_kickoff_iso = (now - timedelta(minutes=10)).isoformat()
+    cutoff_proposal_iso = (now - timedelta(hours=6)).isoformat()
+
+    n_touched = 0
+
+    # Path A: proposed bets that never produced any chunk and never got an
+    # order_id. The bet is dead; mark errored.
+    cur.execute(
+        """
+        SELECT bl.bet_id, bl.fixture_key, bl.kickoff_at, bl.proposed_at
+        FROM bet_ledger bl
+        LEFT JOIN order_plans op ON op.bet_ledger_id = bl.bet_id
+        WHERE bl.status = 'proposed'
+          AND COALESCE(bl.bet_kind, 'real') = 'real'
+          AND bl.polymarket_order_id IS NULL
+          AND op.plan_id IS NULL
+          AND (
+                (bl.kickoff_at IS NOT NULL AND bl.kickoff_at < ?)
+             OR (bl.kickoff_at IS NULL AND bl.proposed_at < ?)
+          )
+        """,
+        (cutoff_kickoff_iso, cutoff_proposal_iso),
+    )
+    orphan_rows = cur.fetchall()
+    for row in orphan_rows:
+        cur.execute(
+            """
+            UPDATE bet_ledger
+            SET status = 'errored',
+                error_category = COALESCE(error_category, 'never_posted'),
+                error_message = COALESCE(error_message, 'never_posted: no order_id and no order_plan'),
+                cancelled_at = COALESCE(cancelled_at, ?),
+                reconciled_at = ?
+            WHERE bet_id = ? AND status = 'proposed'
+            """,
+            (now_iso, now_iso, row["bet_id"]),
+        )
+        if cur.rowcount:
+            n_touched += 1
+            logger.info(
+                f"Stale proposed bet_id={row['bet_id']} fixture={row['fixture_key']} "
+                f"-> errored (never_posted)"
+            )
+
+    # Path B: proposed bets whose plan is already cancelled/completed —
+    # re-run finalize_plan_from_chunks to push the right state onto the bet.
+    try:
+        from src.integrations.polymarket.clob_fills import finalize_plan_from_chunks
+    except Exception as exc:
+        logger.warning(f"clob_fills import failed: {exc}")
+        finalize_plan_from_chunks = None  # type: ignore
+
+    if finalize_plan_from_chunks is not None:
+        cur.execute(
+            """
+            SELECT op.plan_id, bl.bet_id
+            FROM order_plans op
+            JOIN bet_ledger bl ON bl.bet_id = op.bet_ledger_id
+            WHERE bl.status = 'proposed'
+              AND op.status IN ('cancelled', 'completed')
+            """
+        )
+        for row in cur.fetchall():
+            try:
+                result = finalize_plan_from_chunks(conn, cur, row["plan_id"])
+                if result.get("bet_updated"):
+                    n_touched += 1
+                    # Tag cancel_reason on bets that ended up cancelled.
+                    cur.execute(
+                        """
+                        UPDATE bet_ledger
+                        SET cancel_reason = COALESCE(cancel_reason, 'twap_no_fill'),
+                            cancelled_at = COALESCE(cancelled_at, ?),
+                            reconciled_at = ?
+                        WHERE bet_id = ? AND status = 'cancelled'
+                        """,
+                        (now_iso, now_iso, row["bet_id"]),
+                    )
+            except Exception as exc:
+                logger.warning(f"finalize_plan_from_chunks(plan={row['plan_id']}) failed: {exc}")
+
+    if n_touched:
+        conn.commit()
+        logger.info(f"Finalised {n_touched} stale proposed bet(s)")
+    return n_touched
+
+
+def _resync_missed_maker_fills(conn: sqlite3.Connection) -> int:
+    """Promote cancelled bets whose TWAP chunks actually filled as MAKER on-chain.
+
+    Kickoff cancel / reprice can mark a plan cancelled (or overwrite the live
+    order_chunks.polymarket_order_id) before CLOB maker fills are indexed.
+
+    Strategy:
+      1. Fetch all CLOB trades and index fills using order_history as the
+         master "did we place this" set (so repriced ids that no longer live
+         on order_chunks are still recognised as ours).
+      2. Apply maker fills directly to order_chunks rows when their id still
+         matches (covers placed/cancelled/pending chunks).
+      3. For each *historical* order id that has an on-chain fill AND we have
+         a chunk_id in order_history (which survives reprice/resize), update
+         that chunk_id even though its live polymarket_order_id has moved on.
+      4. Re-finalise plans for bets stuck in cancelled/proposed/placed.
+
+    Returns count of bets promoted to filled.
+    """
+    cur = conn.cursor()
+    try:
+        cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='order_chunks'")
+        if not cur.fetchone():
+            return 0
+    except Exception:
+        return 0
+
+    try:
+        from src.integrations.polymarket.clob_fills import (
+            apply_fill_to_chunk,
+            fetch_all_clob_trades,
+            finalize_plan_from_chunks,
+            index_fills_by_order_id,
+            sync_placed_chunk_fills,
+        )
+        from src.integrations.polymarket.order_audit import (
+            all_known_order_ids,
+            record_order_filled,
+        )
+        pm = PolymarketClient()
+        trades = fetch_all_clob_trades(pm)
+        known_ids = all_known_order_ids(conn)
+        fills = index_fills_by_order_id(trades, known_order_ids=known_ids)
+        n_chunks = sync_placed_chunk_fills(conn, cur, fills)
+
+        # Follow the reprice chain: any historical order id that filled
+        # but whose live chunk has a different polymarket_order_id today.
+        n_chained = 0
+        try:
+            for oid, fill in fills.items():
+                if float(fill.get("fill_usdc") or 0) <= 0:
+                    continue
+                cur.execute(
+                    """
+                    SELECT chunk_id, final_status
+                    FROM order_history
+                    WHERE polymarket_order_id = ? AND chunk_id IS NOT NULL
+                    """,
+                    (oid,),
+                )
+                hrow = cur.fetchone()
+                if hrow is None:
+                    continue
+                chunk_id = hrow["chunk_id"]
+                cur.execute(
+                    "SELECT polymarket_order_id, status FROM order_chunks WHERE chunk_id = ?",
+                    (chunk_id,),
+                )
+                crow = cur.fetchone()
+                if crow is None:
+                    continue
+                # If the live chunk still points at this oid, sync_placed_chunk_fills
+                # already handled it. Only act when the chunk has moved on.
+                if str(crow["polymarket_order_id"] or "") == oid:
+                    continue
+                if (crow["status"] or "").lower() == "filled":
+                    continue
+                if apply_fill_to_chunk(conn, cur, chunk_id, fill):
+                    n_chained += 1
+                    record_order_filled(
+                        oid,
+                        fill_usdc=float(fill.get("fill_usdc") or 0),
+                        fill_price=fill.get("avg_fill_price"),
+                        conn=conn,
+                    )
+        except Exception as exc:
+            logger.warning(f"reprice-chain fill follow-through failed: {exc}")
+
+        if n_chained:
+            logger.info(f"Reprice-chain: applied {n_chained} historic fill(s) to live chunks")
+    except Exception as exc:
+        logger.warning(f"MAKER fill resync failed: {exc}")
+        return 0
+
+    # Plans needing finalize:
+    #   (a) any cancelled/proposed/placed bet whose chunks have any fill
+    #       (promote to filled)
+    #   (b) any filled bet whose chunks' total fill exceeds bet_ledger.fill_size_usdc
+    #       by more than the partial-fill noise threshold (top up the bet)
+    cur.execute(
+        """
+        SELECT DISTINCT op.plan_id
+        FROM order_plans op
+        JOIN bet_ledger bl ON bl.bet_id = op.bet_ledger_id
+        JOIN order_chunks oc ON oc.plan_id = op.plan_id
+        WHERE COALESCE(bl.bet_kind, 'real') = 'real'
+          AND oc.status = 'filled'
+          AND (
+                bl.status IN ('cancelled', 'proposed', 'placed')
+             OR (
+                bl.status = 'filled'
+                AND (
+                    SELECT COALESCE(SUM(oc2.fill_size_usdc), 0)
+                    FROM order_chunks oc2
+                    WHERE oc2.plan_id = op.plan_id AND oc2.status = 'filled'
+                ) - COALESCE(bl.fill_size_usdc, 0) > 0.02
+             )
+          )
+        """
+    )
+    n_promoted = 0
+    for row in cur.fetchall():
+        result = finalize_plan_from_chunks(conn, cur, row["plan_id"])
+        if result.get("bet_updated"):
+            n_promoted += 1
+
+    if n_chunks or n_promoted:
+        logger.info(
+            "Resynced %d MAKER chunk fill(s); promoted %d cancelled bet(s)",
+            n_chunks,
+            n_promoted,
+        )
+    return n_promoted
+
+
 def _reconcile_stale_twap_plans(conn: sqlite3.Connection) -> int:
     """Finalize orphaned TWAP plans whose kickoff has passed.
 
@@ -314,8 +562,26 @@ def _reconcile_stale_twap_plans(conn: sqlite3.Connection) -> int:
         plan_id = plan["plan_id"]
         bet_id = plan["bet_ledger_id"]
 
-        # Cancel any placed-but-unfilled chunks (don't bother with CLOB cancel
-        # since the market is likely resolved or close to it)
+        # Sync MAKER fills from CLOB before cancelling — TWAP limits fill as maker.
+        try:
+            from src.integrations.polymarket import PolymarketClient
+            from src.integrations.polymarket.clob_fills import (
+                fetch_all_clob_trades,
+                finalize_plan_from_chunks,
+                index_fills_by_order_id,
+                sync_placed_chunk_fills,
+            )
+            pm = PolymarketClient()
+            trades = fetch_all_clob_trades(pm)
+            fills = index_fills_by_order_id(trades)
+            sync_placed_chunk_fills(conn, cur, fills, plan_id=plan_id)
+            finalize_plan_from_chunks(conn, cur, plan_id)
+            n_finalized += 1
+            continue
+        except Exception as exc:
+            logger.warning(f"TWAP plan #{plan_id}: CLOB fill sync failed, falling back: {exc}")
+
+        # Fallback: cancel unfilled chunks without CLOB sync (legacy path)
         cur.execute(
             "UPDATE order_chunks SET status = 'cancelled' WHERE plan_id = ? AND status IN ('pending', 'placed')",
             (plan_id,),
@@ -356,7 +622,7 @@ def _reconcile_stale_twap_plans(conn: sqlite3.Connection) -> int:
                     """
                     UPDATE bet_ledger
                     SET status = 'filled', filled_at = ?, fill_price = ?, fill_size_usdc = ?
-                    WHERE bet_id = ? AND status = 'proposed'
+                    WHERE bet_id = ? AND status IN ('proposed', 'cancelled', 'placed')
                     """,
                     (now_iso, avg_fill, total_filled_usdc, bet_id),
                 )
@@ -399,9 +665,21 @@ def reconcile_pending_bets(
     if poly_client is None:
         poly_client = PolymarketClient()
 
-    # First pass: finalize any stale TWAP plans so their bet_ledger rows
-    # become 'filled' and eligible for settlement in the main pass below.
+    # Pre-pass: hygiene. Mark stale `proposed` rows that will never execute,
+    # and propagate plan outcomes to bets stuck in 'proposed'. Then recover
+    # missed MAKER fills, then finalise stale TWAP plans so bet_ledger rows
+    # become 'filled' and eligible for settlement below.
+    n_stale_proposed = 0
+    n_maker_resynced = 0
     n_twap_finalized = 0
+    try:
+        n_stale_proposed = _finalize_stale_proposed_bets(conn)
+    except Exception as exc:
+        logger.warning(f"Stale-proposed finalisation failed: {exc}")
+    try:
+        n_maker_resynced = _resync_missed_maker_fills(conn)
+    except Exception as exc:
+        logger.warning(f"MAKER fill resync failed: {exc}")
     try:
         n_twap_finalized = _reconcile_stale_twap_plans(conn)
     except Exception as exc:
@@ -535,6 +813,7 @@ def reconcile_pending_bets(
                     starting = strat.starting_bankroll_usdc if strat else 1000.0
                     bankroll_after = starting + prior_pnl + float(pnl)
 
+            now_iso = _utc_now_iso()
             conn.execute(
                 """
                 UPDATE bet_ledger
@@ -542,10 +821,11 @@ def reconcile_pending_bets(
                     settled_at = ?,
                     settle_outcome = ?,
                     pnl_realised_usdc = ?,
-                    bankroll_after_settle = COALESCE(?, bankroll_after_settle)
+                    bankroll_after_settle = COALESCE(?, bankroll_after_settle),
+                    reconciled_at = ?
                 WHERE bet_id = ?
                 """,
-                (_utc_now_iso(), int(settle_outcome), pnl, bankroll_after, bet["bet_id"]),
+                (now_iso, int(settle_outcome), pnl, bankroll_after, now_iso, bet["bet_id"]),
             )
             conn.commit()
             n_settled += 1
@@ -566,5 +846,7 @@ def reconcile_pending_bets(
         "n_settled": n_settled,
         "n_still_pending": n_checked - n_settled,
         "n_twap_finalized": n_twap_finalized,
+        "n_maker_resynced": n_maker_resynced,
+        "n_stale_proposed_finalized": n_stale_proposed,
         "errors": errors,
     }

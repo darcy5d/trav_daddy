@@ -27,6 +27,11 @@ from typing import Any, Dict, Optional
 
 from src.integrations.polymarket import PolymarketClient
 from src.integrations.polymarket.risk_gate import can_place_bet
+from src.integrations.polymarket.order_audit import (
+    record_order_error,
+    record_order_filled,
+    record_order_placed,
+)
 from src.integrations.odds.polymarket_compare import POLYMARKET_TAKER_FEE
 
 logger = logging.getLogger(__name__)
@@ -78,6 +83,8 @@ def place_bet(
     decision = can_place_bet(
         size_usdc, market_type, edge_pp, requested_mode,
         strategy_label=strategy_label,
+        kickoff_at=kickoff_at,
+        fixture_key=fixture_key,
     )
     if not decision.allowed:
         return {
@@ -148,15 +155,26 @@ def place_bet(
         )
     except Exception as exc:
         logger.error(f"CLOB order failed: {exc}")
+        error_category = _classify_order_error(exc)
         cur.execute(
             """
             UPDATE bet_ledger
-            SET status = 'errored', error_message = ?
+            SET status = 'errored', error_message = ?, error_category = ?
             WHERE bet_id = ?
             """,
-            (str(exc), bet_id),
+            (str(exc), error_category, bet_id),
         )
         conn.commit()
+        record_order_error(
+            None,
+            bet_id=bet_id,
+            token_id=polymarket_token_id,
+            side=side.upper(),
+            order_kind="fok",
+            error_category=error_category,
+            error_message=str(exc),
+            conn=conn,
+        )
         conn.close()
         return {
             "success": False,
@@ -225,6 +243,26 @@ def place_bet(
         ),
     )
     conn.commit()
+
+    if order_id:
+        record_order_placed(
+            order_id,
+            bet_id=bet_id,
+            token_id=polymarket_token_id,
+            side=side.upper(),
+            order_kind="fok",
+            size_usdc=size_usdc,
+            posted_at=placed_at,
+            conn=conn,
+        )
+        if new_status == "filled":
+            record_order_filled(
+                order_id,
+                fill_usdc=fill_size_usdc if fill_size_usdc is not None else size_usdc,
+                fill_price=fill_price,
+                filled_at=placed_at,
+                conn=conn,
+            )
     conn.close()
 
     return {
@@ -234,6 +272,26 @@ def place_bet(
         "reason": "placed" if new_status == "placed" else "filled",
         "placement_response": placement_response,
     }
+
+
+def _classify_order_error(exc: Exception) -> str:
+    """Map a CLOB exception to a coarse error_category tag used by reconcile.
+
+    Tags are stable so dashboards can group by them: order_version_mismatch,
+    unfillable, balance, signature, net, unknown.
+    """
+    msg = str(exc).lower()
+    if "order_version_mismatch" in msg or "version mismatch" in msg:
+        return "order_version_mismatch"
+    if "couldn't be fully" in msg or "not enough" in msg or "unfillable" in msg or "no match" in msg:
+        return "unfillable"
+    if "insufficient" in msg or "balance" in msg or "allowance" in msg:
+        return "balance"
+    if "signature" in msg or "signer" in msg or "auth" in msg:
+        return "signature"
+    if "timeout" in msg or "connect" in msg or "network" in msg or "503" in msg or "502" in msg:
+        return "net"
+    return "unknown"
 
 
 def place_bet_twap(
@@ -282,6 +340,8 @@ def place_bet_twap(
     decision = can_place_bet(
         size_usdc, market_type, edge_pp, requested_mode,
         strategy_label=strategy_label,
+        kickoff_at=kickoff_at,
+        fixture_key=fixture_key,
     )
     if not decision.allowed:
         return {

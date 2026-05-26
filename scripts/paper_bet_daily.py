@@ -177,6 +177,22 @@ def main() -> int:
         logger.info("Scan step skipped (--no-scan)")
 
     if not args.no_reconcile and not args.dry_run:
+        # Step A: backfill any TWAP maker fills whose chunks/bets are not yet
+        # reflected. Cheap (single CLOB paginated read) and closes the loop
+        # for fills that landed on repriced/cancelled order IDs.
+        try:
+            from scripts.backfill_twap_maker_fills import backfill as twap_backfill
+            twap_summary = twap_backfill(run_reconcile=False)
+            report["twap_backfill_summary"] = twap_summary
+            logger.info(
+                f"TWAP backfill: chunks_updated={twap_summary.get('chunks_updated')} "
+                f"plans_finalized={len(twap_summary.get('plans_finalized') or [])}"
+            )
+        except Exception as exc:
+            logger.warning(f"TWAP backfill step failed (non-fatal): {exc}")
+            report["errors"].append({"step": "twap_backfill", "error": str(exc), "trace": traceback.format_exc()})
+
+        # Step B: settlement + stale-proposed hygiene
         try:
             from src.integrations.polymarket.reconcile import reconcile_pending_bets
             reconcile_summary = reconcile_pending_bets()

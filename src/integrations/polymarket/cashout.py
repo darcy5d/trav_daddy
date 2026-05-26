@@ -221,6 +221,35 @@ def execute_cashout(
         except Exception as exc:
             logger.warning(f"Could not compute bankroll_after for cashout: {exc}")
 
+    cashout_oid = None
+    if order_response:
+        cashout_oid = order_response.get("orderID") or order_response.get("orderId")
+        if cashout_oid:
+            try:
+                from src.integrations.polymarket.order_audit import (
+                    record_order_filled, record_order_placed,
+                )
+                record_order_placed(
+                    cashout_oid,
+                    bet_id=bet_id,
+                    token_id=token_id,
+                    side="SELL",
+                    order_kind="cashout",
+                    limit_price=cashout_price,
+                    size_usdc=cashout_price * shares_to_sell,
+                    size_shares=shares_to_sell,
+                    conn=conn,
+                )
+                # SELL crossed the book — record as filled at the cashout price.
+                record_order_filled(
+                    cashout_oid,
+                    fill_usdc=cashout_price * shares_to_sell,
+                    fill_price=cashout_price,
+                    conn=conn,
+                )
+            except Exception as exc:
+                logger.warning(f"Audit record_order failed for cashout {cashout_oid}: {exc}")
+
     # --- Update bet_ledger ---
     conn.execute(
         """
@@ -233,12 +262,14 @@ def execute_cashout(
             cashout_triggered_at   = ?,
             cashout_price          = ?,
             cashout_pnl_usdc       = ?,
-            cashout_threshold_used = ?
+            cashout_threshold_used = ?,
+            cashout_order_id       = ?
         WHERE bet_id = ?
         """,
         (
             now, cashout_pnl, bankroll_after,
             now, cashout_price, cashout_pnl, return_ratio,
+            cashout_oid,
             bet_id,
         ),
     )
