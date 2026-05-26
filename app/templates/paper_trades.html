@@ -249,8 +249,10 @@
         font-size: 0.65rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.4px;
         border: 1px solid transparent;
     }
-    .pt-outcome-won  { background: rgba(16, 185, 129, 0.2); color: var(--accent-primary); border-color: rgba(16, 185, 129, 0.35); }
-    .pt-outcome-lost { background: rgba(239, 68, 68, 0.2);  color: #ef4444;               border-color: rgba(239, 68, 68, 0.35); }
+    .pt-outcome-won    { background: rgba(16, 185, 129, 0.2); color: var(--accent-primary); border-color: rgba(16, 185, 129, 0.35); }
+    .pt-outcome-lost   { background: rgba(239, 68, 68, 0.2);  color: #ef4444;               border-color: rgba(239, 68, 68, 0.35); }
+    .pt-outcome-cashed { background: rgba(6, 182, 212, 0.2);  color: #22d3ee;               border-color: rgba(6, 182, 212, 0.35); }
+    .pt-cashout-detail { font-size: 0.65rem; color: var(--text-muted); margin-top: 0.12rem; line-height: 1.2; }
     .pt-phase-badge {
         display: inline-block; margin-left: 0.35rem; padding: 0.05rem 0.42rem; border-radius: 999px;
         font-size: 0.6rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.3px;
@@ -649,21 +651,42 @@
     function makeBetRow(b) {
         const edgeCls = b.edge_pp >= 5 ? 'pt-edge-high' : b.edge_pp >= 2 ? 'pt-edge-medium' : 'pt-edge-low';
         const settled = b.status === 'settled';
+        const isCashout = !!b.cashout_triggered_at;
         const won = b.settle_outcome === 1;
         const pnl = b.pnl_realised_usdc;
+
         const pnlCol = settled
             ? `<span class="num ${pnl >= 0 ? 'pt-pl-positive' : 'pt-pl-negative'}">${fmtMoney(pnl)}</span>`
             : `<span class="num" style="color:var(--text-muted)">${fmtMoney(b.bankroll_at_proposal)}</span>`;
-        const outcome = settled
-            ? `<span class="pt-outcome-pill ${won ? 'pt-outcome-won' : 'pt-outcome-lost'}">${won ? 'WON' : 'LOST'}</span>`
-            : '';
+
+        let outcome = '';
+        if (settled) {
+            if (isCashout) {
+                const mult = (b.cashout_price && b.fill_price)
+                    ? (Number(b.cashout_price) / Number(b.fill_price)).toFixed(2) + '×'
+                    : '';
+                outcome = `<span class="pt-outcome-pill pt-outcome-cashed" title="Cashed out — entry ${(Number(b.fill_price)*100).toFixed(1)}¢ → exit ${(Number(b.cashout_price)*100).toFixed(1)}¢">CASHED ${mult}</span>`;
+            } else {
+                outcome = `<span class="pt-outcome-pill ${won ? 'pt-outcome-won' : 'pt-outcome-lost'}">${won ? 'WON' : 'LOST'}</span>`;
+            }
+        }
+
+        // For cashout bets, show entry→exit detail beneath the team name
+        let cashoutDetail = '';
+        if (isCashout && b.fill_price && b.cashout_price) {
+            const entryPct = (Number(b.fill_price) * 100).toFixed(1);
+            const exitPct  = (Number(b.cashout_price) * 100).toFixed(1);
+            const mult     = (Number(b.cashout_price) / Number(b.fill_price)).toFixed(2);
+            cashoutDetail = `<div class="pt-cashout-detail">${entryPct}¢ <span style="color:#22d3ee">→</span> ${exitPct}¢ · <strong style="color:#22d3ee">${mult}×</strong></div>`;
+        }
+
         const phaseBadge = b.phase === 'post_toss'
             ? '<span class="pt-phase-badge">post-toss</span>'
             : '';
         return `
             <div class="pt-bet-row">
                 <span class="strat-name">${b.strategy_label}${phaseBadge}</span>
-                <span class="side-label">${b.side_label || '--'}</span>
+                <span class="side-label">${b.side_label || '--'}${cashoutDetail}</span>
                 <span class="num"><span class="pt-edge-pill ${edgeCls}">+${Number(b.edge_pp).toFixed(1)}pp</span></span>
                 <span class="num">${(b.model_prob*100).toFixed(1)}%</span>
                 <span class="num">${(b.market_price_at_proposal*100).toFixed(1)}%</span>
@@ -805,8 +828,10 @@
             const fixtures = byDay[day];
             const allDayBets = Object.values(fixtures).flat();
             const dayPnl = allDayBets.reduce((a,b) => a + (b.pnl_realised_usdc||0), 0);
-            const wins = allDayBets.filter(b => b.settle_outcome === 1).length;
+            const wins   = allDayBets.filter(b => b.settle_outcome === 1 || (b.cashout_triggered_at && (b.cashout_pnl_usdc||0) > 0)).length;
+            const cashes = allDayBets.filter(b => b.cashout_triggered_at).length;
             const losses = allDayBets.length - wins;
+            const recordStr = cashes > 0 ? `${wins}W ${losses}L <span style="color:#22d3ee;font-size:0.75rem">${cashes}C</span>` : `${wins}W ${losses}L`;
             const dayDate = new Date(day + 'T00:00:00');
             const dayLabel = dayDate.toLocaleDateString(undefined, {weekday:'short', month:'short', day:'numeric'});
 
@@ -824,7 +849,7 @@
                     <div class="pt-card-meta">
                         <div class="pt-meta-cell">
                             <span class="pt-meta-label">record</span>
-                            <span class="pt-meta-value">${wins}W ${losses}L</span>
+                            <span class="pt-meta-value">${recordStr}</span>
                         </div>
                         <div class="pt-meta-cell">
                             <span class="pt-meta-label">bets</span>
@@ -846,8 +871,10 @@
             }).sort((a,b) => b.pnl - a.pnl);
 
             for (const fx of fxList) {
-                const wins = fx.bets.filter(b => b.settle_outcome === 1).length;
+                const wins   = fx.bets.filter(b => b.settle_outcome === 1 || (b.cashout_triggered_at && (b.cashout_pnl_usdc||0) > 0)).length;
+                const cashes = fx.bets.filter(b => b.cashout_triggered_at).length;
                 const losses = fx.bets.length - wins;
+                const fxRecord = cashes > 0 ? `${wins}W ${losses}L <span style="color:#22d3ee;font-size:0.72rem">${cashes}C</span>` : `${wins}W ${losses}L`;
                 const fxRow = document.createElement('div');
                 fxRow.className = 'pt-fixture-row';
                 fxRow.innerHTML = `
@@ -857,7 +884,7 @@
                         <span class="pt-fixture-tag">${tournamentPrefixLabel(fx.fk)}</span>
                     </div>
                     <div class="pt-fixture-meta">
-                        <span style="color:var(--text-muted)">${wins}W ${losses}L</span>
+                        <span style="color:var(--text-muted)">${fxRecord}</span>
                         <span class="${fx.pnl >= 0 ? 'pt-pl-positive' : 'pt-pl-negative'}" style="font-weight:600">${fmtMoney(fx.pnl)}</span>
                     </div>
                 `;

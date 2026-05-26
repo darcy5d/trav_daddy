@@ -73,6 +73,17 @@ BETTING_CONFIG = {
     # e.g. 0.225 = 22.5% of live bankroll. Grows/shrinks as bankroll moves.
     # Falls back to max_per_bet_usdc for untagged manual bets.
     "max_per_bet_fraction": float(os.getenv("BETTING_MAX_PER_BET_FRACTION", "0")),
+    # Wallet-proportional caps (preferred when > 0). Scale with portfolio value
+    # (USDC + open positions). Top-ups increase limits automatically.
+    "max_deploy_fraction": float(os.getenv("BETTING_MAX_DEPLOY_FRACTION", "0.95")),
+    "max_open_fraction_per_strategy": float(os.getenv("BETTING_MAX_OPEN_FRACTION", "0.85")),
+    # Per-strategy open cap per UTC kickoff date (strategy slice × fraction).
+    # When > 0, replaces flat max_open_fraction_per_strategy for step 6b.
+    "max_open_fraction_per_kickoff_day": float(
+        os.getenv("BETTING_MAX_OPEN_FRACTION_PER_KICKOFF_DAY", "0")
+    ),
+    "max_per_day_fraction": float(os.getenv("BETTING_MAX_PER_DAY_FRACTION", "0")),
+    "max_loss_per_day_fraction": float(os.getenv("BETTING_MAX_LOSS_PER_DAY_FRACTION", "0")),
     "max_per_day_usdc": float(os.getenv("BETTING_MAX_PER_DAY", "50")),
     "max_loss_per_day_usdc": float(os.getenv("BETTING_MAX_LOSS_PER_DAY", "30")),
     "auto_min_edge_pp": float(os.getenv("BETTING_AUTO_MIN_EDGE", "5.0")),

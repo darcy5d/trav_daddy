@@ -61,7 +61,8 @@ def in_memory_ledger() -> Generator[sqlite3.Connection, None, None]:
         "  phase TEXT,"
         "  xi_signature TEXT,"
         "  toss_winner_team_id INTEGER,"
-        "  toss_chose_to TEXT"
+        "  toss_chose_to TEXT,"
+        "  kickoff_at TEXT"
         ")"
     )
     conn.execute(schema_sql)
@@ -105,6 +106,13 @@ def _make_betting_config(**overrides):
         # bet with a strategy_label will be rejected — matches production default.
         "max_deposit_per_strategy_usdc": 100.0,
         "live_strategies": [],
+        # Tests use dollar caps; set fractions to 0 to disable wallet scaling.
+        "max_deploy_fraction": 0.0,
+        "max_open_fraction_per_strategy": 0.0,
+        "max_open_fraction_per_kickoff_day": 0.0,
+        "max_per_day_fraction": 0.0,
+        "max_loss_per_day_fraction": 0.0,
+        "max_per_bet_fraction": 0.0,
     }
     defaults.update(overrides)
     return defaults
@@ -264,6 +272,88 @@ def test_strategy_open_exposure_cap(in_memory_ledger):
         )
     assert decision.allowed is False
     assert "per-strategy cap" in decision.reason
+
+
+def _kickoff_day_config(**overrides):
+    """Config with kickoff-day open caps."""
+    base = {
+        "live_strategies": ["v2_odi_3pp"],
+        "max_deposit_usdc": 100.0,
+        "max_deposit_per_strategy_usdc": 100.0,
+        "max_per_bet_usdc": 100.0,
+        "max_per_day_usdc": 500.0,
+        "max_loss_per_day_usdc": 500.0,
+        "max_open_fraction_per_strategy": 0.0,
+        "max_open_fraction_per_kickoff_day": 0.45,
+    }
+    base.update(overrides)
+    return _make_betting_config(**base)
+
+
+def test_kickoff_day_cap_blocks_same_date(in_memory_ledger):
+    now = datetime.now(timezone.utc).isoformat()
+    _insert_bet(
+        in_memory_ledger, status="filled",
+        placed_at=now, filled_at=now,
+        fill_price=0.5, fill_size_usdc=45.0,
+        bet_kind="real", strategy_label="v2_odi_3pp",
+        kickoff_at="2026-05-24T14:00:00+00:00",
+        fixture_key="crict20blast-a-b-2026-05-24",
+    )
+    with patch("config.BETTING_CONFIG", _kickoff_day_config()):
+        decision = can_place_bet(
+            10.0, "moneyline", 5.0, "manual",
+            conn=in_memory_ledger, strategy_label="v2_odi_3pp",
+            kickoff_at="2026-05-24T18:00:00+00:00",
+            fixture_key="crict20blast-c-d-2026-05-24",
+        )
+    assert decision.allowed is False
+    assert "kickoff-day cap" in decision.reason
+    assert "2026-05-24" in decision.reason
+
+
+def test_kickoff_day_cap_allows_different_date(in_memory_ledger):
+    now = datetime.now(timezone.utc).isoformat()
+    _insert_bet(
+        in_memory_ledger, status="filled",
+        placed_at=now, filled_at=now,
+        fill_price=0.5, fill_size_usdc=45.0,
+        bet_kind="real", strategy_label="v2_odi_3pp",
+        kickoff_at="2026-05-24T14:00:00+00:00",
+        fixture_key="crict20blast-a-b-2026-05-24",
+    )
+    with patch("config.BETTING_CONFIG", _kickoff_day_config()):
+        decision = can_place_bet(
+            10.0, "moneyline", 5.0, "manual",
+            conn=in_memory_ledger, strategy_label="v2_odi_3pp",
+            kickoff_at="2026-05-26T14:00:00+00:00",
+            fixture_key="crict20blast-e-f-2026-05-26",
+        )
+    assert decision.allowed is True
+
+
+def test_kickoff_day_cap_strategy_isolation(in_memory_ledger):
+    """Strategy A full on a date must not block strategy B on the same date."""
+    now = datetime.now(timezone.utc).isoformat()
+    _insert_bet(
+        in_memory_ledger, status="filled",
+        placed_at=now, filled_at=now,
+        fill_price=0.5, fill_size_usdc=45.0,
+        bet_kind="real", strategy_label="v2_odi_3pp",
+        kickoff_at="2026-05-24T14:00:00+00:00",
+        fixture_key="crict20blast-a-b-2026-05-24",
+    )
+    with patch(
+        "config.BETTING_CONFIG",
+        _kickoff_day_config(live_strategies=["v2_odi_3pp", "v3_marg_3pp"]),
+    ):
+        decision = can_place_bet(
+            10.0, "moneyline", 5.0, "manual",
+            conn=in_memory_ledger, strategy_label="v3_marg_3pp",
+            kickoff_at="2026-05-24T14:00:00+00:00",
+            fixture_key="crict20blast-g-h-2026-05-24",
+        )
+    assert decision.allowed is True
 
 
 def test_paper_bets_excluded_from_live_caps(in_memory_ledger):

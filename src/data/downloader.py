@@ -5,7 +5,10 @@ Downloads T20 and ODI match data from Cricsheet.org in JSON format.
 """
 
 import os
+import shutil
 import sys
+import tempfile
+import time as _time_mod
 import zipfile
 import logging
 from pathlib import Path
@@ -70,38 +73,61 @@ def download_file(url: str, destination: Path, chunk_size: int = 8192) -> bool:
         return False
 
 
-def extract_zip(zip_path: Path, extract_to: Path) -> bool:
+def extract_zip(zip_path: Path, extract_to: Path, max_retries: int = 3) -> bool:
     """
     Extract a ZIP file to the specified directory.
-    
+
+    Uses a temp directory outside iCloud/Desktop scope for extraction then
+    moves the result into place.  This avoids [Errno 11] Resource deadlock
+    errors that macOS raises when iCloud Drive monitors files being written
+    under ~/Desktop while zipfile.extract() streams them.
+
     Args:
         zip_path: Path to the ZIP file
-        extract_to: Directory to extract to
-        
+        extract_to: Directory to extract to (final destination)
+        max_retries: Number of attempts before giving up (default 3)
+
     Returns:
         True if extraction successful, False otherwise
     """
-    try:
-        logger.info(f"Extracting {zip_path.name}")
-        
-        extract_to.mkdir(parents=True, exist_ok=True)
-        
-        with zipfile.ZipFile(zip_path, "r") as zip_ref:
-            # Get list of files for progress bar
-            file_list = zip_ref.namelist()
-            
-            for file in tqdm(file_list, desc="Extracting"):
-                zip_ref.extract(file, extract_to)
-        
-        logger.info(f"Extracted to {extract_to}")
-        return True
-        
-    except zipfile.BadZipFile as e:
-        logger.error(f"Invalid ZIP file: {e}")
-        return False
-    except Exception as e:
-        logger.error(f"Extraction failed: {e}")
-        return False
+    for attempt in range(1, max_retries + 1):
+        tmp_dir = None
+        try:
+            logger.info(
+                f"Extracting {zip_path.name} via temp dir (iCloud-safe)"
+                + (f" [attempt {attempt}/{max_retries}]" if attempt > 1 else "")
+            )
+
+            # Extract to /private/var/folders/… (outside iCloud scope)
+            tmp_dir = Path(tempfile.mkdtemp(prefix="cricsheet_"))
+
+            with zipfile.ZipFile(zip_path, "r") as zip_ref:
+                file_list = zip_ref.namelist()
+                for file in tqdm(file_list, desc="Extracting", leave=False):
+                    zip_ref.extract(file, tmp_dir)
+
+            # Atomically move into place: remove old dir first
+            if extract_to.exists():
+                shutil.rmtree(extract_to)
+            shutil.move(str(tmp_dir), str(extract_to))
+            tmp_dir = None  # ownership transferred
+
+            logger.info(f"Extracted {len(file_list)} files to {extract_to}")
+            return True
+
+        except zipfile.BadZipFile as e:
+            logger.error(f"Invalid ZIP file: {e}")
+            return False
+        except Exception as e:
+            logger.error(f"Extraction failed (attempt {attempt}/{max_retries}): {e}")
+            if attempt < max_retries:
+                logger.info(f"Retrying in 5s…")
+                _time_mod.sleep(5)
+        finally:
+            if tmp_dir is not None and tmp_dir.exists():
+                shutil.rmtree(tmp_dir, ignore_errors=True)
+
+    return False
 
 
 def download_cricsheet_data(
@@ -130,8 +156,6 @@ def download_cricsheet_data(
     # Ensure raw data directory exists
     RAW_DATA_DIR.mkdir(parents=True, exist_ok=True)
 
-    import time as _time
-
     results = {}
 
     for format_name in formats:
@@ -151,7 +175,7 @@ def download_cricsheet_data(
         #   else                             -> download
         zip_is_stale = False
         if age_threshold_hours is not None and zip_path.exists():
-            zip_age_h = (_time.time() - zip_path.stat().st_mtime) / 3600.0
+            zip_age_h = (_time_mod.time() - zip_path.stat().st_mtime) / 3600.0
             if zip_age_h > age_threshold_hours:
                 zip_is_stale = True
                 logger.info(

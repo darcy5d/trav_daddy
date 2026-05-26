@@ -120,7 +120,7 @@
         font-size: 0.65rem; color: var(--text-muted);
         transition: transform 0.15s ease; flex-shrink: 0; width: 10px;
     }
-    .lb-card.open .lb-card-chevron { transform: rotate(90deg); }
+    .lb-card.open > .lb-card-summary > .lb-card-chevron { transform: rotate(90deg); }
     .lb-card-title { flex: 1; min-width: 0; }
     .lb-card-title-main {
         font-weight: 600; font-size: 0.92rem; color: var(--text-primary);
@@ -155,14 +155,16 @@
     .lb-card-body {
         display: none; border-top: 1px solid var(--border-color);
         padding: 0.4rem 0.85rem 0.6rem; background: var(--bg-tertiary);
+        overflow-x: auto;
     }
     .lb-card.open .lb-card-body { display: block; }
     .lb-bet-row {
         display: grid;
-        grid-template-columns: 100px 1fr 80px 55px 55px 88px 55px 58px 72px;
-        gap: 0.5rem; align-items: center;
+        grid-template-columns: 92px minmax(110px, 1fr) 76px 50px 50px 80px 68px 60px 74px;
+        gap: 0.5rem; align-items: start;
         padding: 0.45rem 0; font-size: 0.78rem;
         border-bottom: 1px solid var(--border-color);
+        min-width: 820px;
     }
     .lb-bet-row:last-child { border-bottom: none; }
     .lb-bet-row .strat-name { font-weight: 600; }
@@ -192,8 +194,29 @@
         font-size: 0.65rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.4px;
         border: 1px solid transparent;
     }
-    .lb-outcome-won  { background: rgba(16, 185, 129, 0.2); color: var(--accent-primary); border-color: rgba(16, 185, 129, 0.35); }
-    .lb-outcome-lost { background: rgba(239, 68, 68, 0.2);  color: #ef4444;               border-color: rgba(239, 68, 68, 0.35); }
+    .lb-outcome-won    { background: rgba(16, 185, 129, 0.2); color: var(--accent-primary); border-color: rgba(16, 185, 129, 0.35); }
+    .lb-outcome-lost   { background: rgba(239, 68, 68, 0.2);  color: #ef4444;               border-color: rgba(239, 68, 68, 0.35); }
+    .lb-outcome-cashed { background: rgba(6, 182, 212, 0.2);  color: #22d3ee;               border-color: rgba(6, 182, 212, 0.35); }
+    .lb-cashout-detail { font-size: 0.65rem; color: var(--text-muted); margin-top: 0.12rem; line-height: 1.2; }
+    .lb-bet-meta {
+        padding: 0 0 0.4rem 0; margin-top: -0.15rem;
+        font-size: 0.65rem; color: var(--text-muted); line-height: 1.45;
+    }
+    .lb-bet-meta .lb-sizing-line { display: block; }
+    .lb-bet-meta .lb-outcome-line {
+        display: block;
+        margin-top: 0.15rem;
+        padding-top: 0.12rem;
+        border-top: 1px dashed rgba(148, 163, 184, 0.25);
+    }
+    .lb-bet-subfills .lb-outcome-detail {
+        padding: 0.25rem 0 0.1rem 0.75rem; margin-top: 0;
+    }
+    .lb-bet-meta .saved { color: var(--accent-primary); font-weight: 500; }
+    .lb-bet-meta .left { color: #f59e0b; font-weight: 500; }
+    .lb-bet-meta .loss { color: #f87171; font-weight: 500; }
+    .lb-outcome-detail { font-size: 0.65rem; color: var(--text-muted); margin-top: 0.2rem; line-height: 1.35; padding-left: 0; }
+    .lb-fixture-winner { color: var(--text-muted); font-size: 0.68rem; font-weight: 400; margin-left: 0.35rem; }
     .lb-phase-badge {
         display: inline-block; margin-left: 0.35rem; padding: 0.05rem 0.42rem; border-radius: 999px;
         font-size: 0.6rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.3px;
@@ -219,12 +242,54 @@
     }
     .lb-fixture-row:hover { background: rgba(16, 185, 129, 0.08); border-color: rgba(16, 185, 129, 0.35); }
     .lb-fixture-row.open { background: rgba(16, 185, 129, 0.06); border-color: rgba(16, 185, 129, 0.25); }
+    .lb-fixture-chevron {
+        font-size: 0.65rem; color: var(--text-muted);
+        transition: transform 0.15s ease; flex-shrink: 0; width: 10px;
+    }
+    .lb-fixture-row.open > .lb-fixture-chevron { transform: rotate(90deg); }
     .lb-fixture-row-head { flex: 1; display: flex; align-items: center; gap: 0.5rem; min-width: 0; }
-    .lb-fixture-name { font-weight: 600; font-size: 0.82rem; }
+    .lb-fixture-name { font-weight: 600; font-size: 0.82rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
     .lb-fixture-tag  { color: var(--text-muted); font-size: 0.7rem; }
     .lb-fixture-meta { display: flex; gap: 0.8rem; font-size: 0.75rem; font-variant-numeric: tabular-nums; flex-shrink: 0; }
-    .lb-fixture-bets { display: none; padding: 0.2rem 0.6rem 0.5rem 1.4rem; }
+    .lb-fixture-bets { display: none; padding: 0.2rem 0.6rem 0.5rem 1.4rem; overflow-x: auto; }
     .lb-fixture-row.open + .lb-fixture-bets { display: block; }
+
+    /* TWAP sub-fill + cashout detail nested under a bet row */
+    .lb-bet-block { border-bottom: 1px solid var(--border-color); }
+    .lb-bet-block:last-child { border-bottom: none; }
+    .lb-bet-block > .lb-bet-row { border-bottom: none; }
+    .lb-bet-subfills {
+        padding: 0.15rem 0 0.4rem 0.75rem;
+        margin: 0 0 0.35rem 0.85rem;
+        border-left: 2px solid rgba(16, 185, 129, 0.3);
+    }
+    .lb-subfill-row {
+        display: grid;
+        grid-template-columns: 72px 1fr 58px 62px 72px 58px;
+        gap: 0.45rem; align-items: center;
+        padding: 0.18rem 0; font-size: 0.68rem;
+        color: var(--text-muted);
+    }
+    .lb-subfill-row .num { text-align: right; font-variant-numeric: tabular-nums; }
+    .lb-subfill-tag {
+        display: inline-block; padding: 0.04rem 0.38rem; border-radius: 4px;
+        font-size: 0.58rem; font-weight: 700; letter-spacing: 0.3px;
+        background: rgba(16, 185, 129, 0.12); color: var(--accent-primary);
+    }
+    .lb-subfill-tag.cashout {
+        background: rgba(6, 182, 212, 0.15); color: #22d3ee;
+    }
+    .lb-subfill-cashout {
+        border-top: 1px dashed rgba(6, 182, 212, 0.25);
+        margin-top: 0.2rem; padding-top: 0.28rem;
+        color: #67e8f9;
+    }
+    .lb-fill-count {
+        display: inline-block; margin-left: 0.35rem; padding: 0.02rem 0.35rem;
+        border-radius: 4px; font-size: 0.58rem; font-weight: 600;
+        background: rgba(107, 114, 128, 0.2); color: var(--text-muted);
+        vertical-align: middle;
+    }
 
     /* Bankroll chart styling */
     .lb-chart-card {
@@ -339,13 +404,13 @@
         <div class="lb-value" id="wallet-balance">--</div>
         <div class="lb-sub" id="wallet-balance-sub">USDC on Polygon</div>
     </div>
-    <div class="lb-wallet-cell">
-        <div class="lb-label">Envelope</div>
+    <div class="lb-wallet-cell" title="Max total open exposure (portfolio × deploy fraction). Scales when you top up.">
+        <div class="lb-label">Deploy cap</div>
         <div class="lb-value" id="wallet-envelope">--</div>
-        <div class="lb-sub" id="wallet-envelope-sub">BETTING_MAX_DEPOSIT</div>
+        <div class="lb-sub" id="wallet-envelope-sub">95% of portfolio</div>
     </div>
-    <div class="lb-wallet-cell">
-        <div class="lb-label">Funded vs envelope</div>
+    <div class="lb-wallet-cell" title="Free USDC cash as a share of total portfolio (cash + open positions)">
+        <div class="lb-label">Cash share</div>
         <div class="lb-value" id="wallet-funded-pct">--</div>
         <div class="lb-sub" id="wallet-funded-sub">&nbsp;</div>
     </div>
@@ -356,7 +421,7 @@
     </div>
 </div>
 
-<div class="lb-totals" id="lb-totals" title="Live (real-money) bankroll roll-ups across all enabled strategies">
+<div class="lb-totals" id="lb-totals" title="Wallet-driven: sum of each live strategy's share of portfolio value (cash + open positions). Tops up automatically when you fund Polymarket.">
     <div class="lb-total-cell">
         <div class="lb-total-label">Total Bankroll</div>
         <div class="lb-total-value" id="lb-total-bankroll">--</div>
@@ -397,16 +462,16 @@
 <div class="lb-section">
     <h2>Strategies <small style="font-weight: 400; color: var(--text-muted); font-size: 0.7rem;">— per-strategy bankroll + open exposure</small></h2>
     <p style="color: var(--text-muted); font-size: 0.75rem; margin: 0.2rem 0 0.5rem 0;">
-        Each strategy runs independently with its own <code>BETTING_MAX_DEPOSIT_PER_STRATEGY</code> cap.
-        Disable a strategy by removing its label from <code>BETTING_LIVE_STRATEGIES</code> in <code>.env</code> and restarting.
+        Live strategies share the wallet by allocation weight; retired rows keep historical P&amp;L only ($0 bankroll).
+        Remove a strategy from <code>BETTING_LIVE_STRATEGIES</code> in <code>.env</code> to retire it.
     </p>
     <table class="lb-table" id="strategies-table">
         <thead><tr>
             <th>Strategy</th>
-            <th>Start</th>
-            <th>Current</th>
+            <th title="Wallet slice before settled trading P&amp;L">Basis</th>
+            <th title="Current wallet slice (portfolio × weight)">Bankroll</th>
             <th>Open</th>
-            <th>Cap left</th>
+            <th title="Per UTC kickoff date when kickoff-day cap mode is on">Cap left</th>
             <th>Realised P&L</th>
             <th>ROI</th>
             <th>Bets</th>
@@ -725,13 +790,17 @@
         }
         document.getElementById('wallet-balance').textContent = fmtUsd(data.balance_usdc);
         document.getElementById('wallet-balance-sub').textContent = 'USDC (polygon, sig_type=' + data.signature_type + ')';
-        document.getElementById('wallet-envelope').textContent = fmtUsd(data.max_deposit_usdc);
-        const pct = data.funded_vs_envelope_pct;
-        document.getElementById('wallet-funded-pct').textContent = pct !== null ? pct.toFixed(0) + '%' : '--';
-        const diff = data.balance_usdc - data.max_deposit_usdc;
+        document.getElementById('wallet-envelope').textContent = fmtUsd(data.max_deploy_usdc ?? data.max_deposit_usdc);
+        const pct = data.cash_pct_of_portfolio ?? data.funded_vs_envelope_pct;
+        document.getElementById('wallet-funded-pct').textContent = pct !== null && pct !== undefined ? pct.toFixed(0) + '%' : '--';
+        const portfolio = data.portfolio_value_usdc;
         const diffSub = document.getElementById('wallet-funded-sub');
-        diffSub.textContent = (diff >= 0 ? '+' : '') + fmtUsd(diff) + ' vs envelope';
-        diffSub.className = 'lb-sub ' + (diff < 0 ? 'lb-pl-negative' : '');
+        if (portfolio != null) {
+            diffSub.textContent = fmtUsd(data.balance_usdc) + ' of ' + fmtUsd(portfolio);
+        } else {
+            diffSub.textContent = 'cash / portfolio';
+        }
+        diffSub.className = 'lb-sub';
         const approvalsEl = document.getElementById('wallet-approvals');
         if (data.allowances_ok) {
             approvalsEl.textContent = 'OK';
@@ -768,20 +837,39 @@
         body.innerHTML = rows.map(r => {
             const badge = r.enabled
                 ? '<span class="lb-strategy-badge on">LIVE</span>'
-                : '<span class="lb-strategy-badge off">disabled</span>';
+                : '<span class="lb-strategy-badge off">retired</span>';
             const rowCls = r.enabled ? 'lb-strategy-row' : 'lb-strategy-row disabled';
             const winRate = r.win_rate !== null && r.win_rate !== undefined
                 ? (r.win_rate * 100).toFixed(1) + '%'
                 : '--';
+            const bankrollCell = r.enabled
+                ? `<td class="${plClass(r.current_bankroll_usdc - r.starting_bankroll_usdc)}">${fmtUsd(r.current_bankroll_usdc)}</td>`
+                : `<td style="color:var(--text-muted)">${fmtUsd(0)}</td>`;
+            const basisCell = r.enabled
+                ? fmtUsd(r.starting_bankroll_usdc)
+                : `<span style="color:var(--text-muted)">${fmtUsd(0)}</span>`;
+            const roiCell = (r.roi_pct !== null && r.roi_pct !== undefined)
+                ? `<td class="${plClass(r.roi_pct)}">${r.roi_pct.toFixed(2)}%</td>`
+                : '<td style="color:var(--text-muted)">—</td>';
+            const capDayLines = (r.open_by_kickoff_day_utc && Object.keys(r.open_by_kickoff_day_utc).length)
+                ? Object.entries(r.open_by_kickoff_day_utc).map(
+                    ([d, v]) => `${d}: ${fmtUsd(v)} open`
+                  ).join('\n')
+                : '';
+            const capTitle = r.kickoff_day_cap_usdc != null
+                ? `Per UTC kickoff date cap: ${fmtUsd(r.kickoff_day_cap_usdc)}`
+                  + (capDayLines ? `\n${capDayLines}` : '')
+                : 'Remaining flat open cap headroom';
+            const capCell = `<td title="${capTitle.replace(/"/g, '&quot;')}">${fmtUsd(r.cap_remaining_usdc)}</td>`;
             return `
                 <tr class="${rowCls}">
                     <td><span class="lb-strategy-name">${r.strategy_label}</span>${badge}</td>
-                    <td>${fmtUsd(r.starting_bankroll_usdc)}</td>
-                    <td class="${plClass(r.current_bankroll_usdc - r.starting_bankroll_usdc)}">${fmtUsd(r.current_bankroll_usdc)}</td>
+                    <td>${basisCell}</td>
+                    ${bankrollCell}
                     <td>${fmtUsd(r.open_exposure_usdc)}</td>
-                    <td>${fmtUsd(r.cap_remaining_usdc)}</td>
+                    ${capCell}
                     <td class="${plClass(r.realised_pnl_usdc)}">${fmtUsd(r.realised_pnl_usdc)}</td>
-                    <td class="${plClass(r.roi_pct)}">${r.roi_pct.toFixed(2)}%</td>
+                    ${roiCell}
                     <td>${r.n_settled}/${r.n_total}${r.n_errored ? ' <span style="color:#ef4444; font-size:0.7rem;">err:' + r.n_errored + '</span>' : ''}</td>
                     <td>${winRate}</td>
                 </tr>
@@ -824,6 +912,19 @@
 
     let openFilterStrategy = 'ALL';
     let settledFilterStrategy = 'ALL';
+
+    // Persist expand/collapse across polling refreshes
+    const lbExpandState = {
+        openDays: new Set(),
+        openFixtures: new Set(),   // keys: "day:fixture_key"
+        openOpenBetCards: new Set(),
+        seeded: false,
+    };
+
+    function fixtureDisplayName(betsOrBet, fixtureKey) {
+        const sample = Array.isArray(betsOrBet) ? (betsOrBet[0] || {}) : (betsOrBet || {});
+        return sample.fixture_display || fixturePrettyName(fixtureKey || sample.fixture_key);
+    }
 
     function fixturePrettyName(fixture_key) {
         const parts = (fixture_key || '').split('-');
@@ -905,34 +1006,199 @@
         </div>`;
     }
 
-    function makeBetRow(b) {
+    function makeSubFillsHtml(b) {
+        const parts = [];
+        const fills = b.sub_fills || [];
+        for (const f of fills) {
+            const ts = (f.filled_at || f.placed_at || '').slice(11, 19);
+            const price = f.fill_price != null
+                ? (Number(f.fill_price) * 100).toFixed(1) + '¢'
+                : (f.limit_price != null ? (Number(f.limit_price) * 100).toFixed(1) + '¢ lim' : '--');
+            const stake = fmtUsd(f.fill_size_usdc || f.size_usdc || 0);
+            const idx = (f.chunk_index != null ? f.chunk_index : 0) + 1;
+            parts.push(`
+                <div class="lb-subfill-row">
+                    <span><span class="lb-subfill-tag">TWAP</span> #${idx}</span>
+                    <span>BUY fill</span>
+                    <span class="num">${price}</span>
+                    <span class="num">${stake}</span>
+                    <span class="num" style="font-size:0.62rem">${ts || '--'}</span>
+                    <span></span>
+                </div>
+            `);
+        }
+        if (b.cashout_sub) {
+            const c = b.cashout_sub;
+            const ts = (c.filled_at || '').slice(11, 19);
+            const exitPct = c.fill_price != null ? (Number(c.fill_price) * 100).toFixed(1) + '¢' : '--';
+            const proceeds = c.fill_size_usdc != null ? fmtUsd(c.fill_size_usdc) : '--';
+            const pnl = c.pnl_usdc != null ? fmtUsd(c.pnl_usdc) : '--';
+            const pnlCls = (c.pnl_usdc || 0) >= 0 ? 'lb-pl-positive' : 'lb-pl-negative';
+            parts.push(`
+                <div class="lb-subfill-row lb-subfill-cashout">
+                    <span><span class="lb-subfill-tag cashout">SELL</span></span>
+                    <span>Cashout exit</span>
+                    <span class="num">${exitPct}</span>
+                    <span class="num">${proceeds}</span>
+                    <span class="num" style="font-size:0.62rem">${ts || '--'}</span>
+                    <span class="num ${pnlCls}">${pnl}</span>
+                </div>
+            `);
+        }
+        if (!parts.length) return '';
+        return `<div class="lb-bet-subfills">${parts.join('')}</div>`;
+    }
+
+    /** Settlement narrative: cashout counterfactual, full win/loss, match winner. */
+    function makeOutcomeSummaryHtml(b) {
+        if (b.status !== 'settled') return '';
+        if (b.outcome_summary) {
+            return formatOutcomeSummaryHtml(b.outcome_summary);
+        }
+        const winner = b.match_winner;
+        const winnerStr = winner ? `Winner: ${winner}` : 'Winner: pending resolution';
+        const isCashout = !!b.cashout_triggered_at;
+        const delta = b.counterfactual_delta;
+        const pnl = b.pnl_realised_usdc;
+
+        if (isCashout) {
+            if (delta != null && !Number.isNaN(Number(delta))) {
+                const absDelta = Math.abs(Number(delta));
+                if (delta > 0.01) {
+                    return `<span class="left">Left ${fmtUsd(absDelta)} on table vs holding to win</span> · ${winnerStr}`;
+                }
+                if (delta < -0.01) {
+                    return `<span class="saved">Saved ${fmtUsd(absDelta)} vs full loss</span> · ${winnerStr}`;
+                }
+                return `Cashout matched settlement · ${winnerStr}`;
+            }
+            return winner ? winnerStr : '';
+        }
+
+        const outcome = b.settle_outcome != null ? Number(b.settle_outcome) : null;
+        if (outcome === 1) {
+            const pnlBit = pnl != null && pnl > 0 ? ` (+${fmtUsd(pnl)})` : '';
+            return `Full win${pnlBit} · ${winnerStr}`;
+        }
+        if (outcome === 0) {
+            const ate = pnl != null && pnl < 0 ? ` — ate ${fmtUsd(Math.abs(pnl))}` : '';
+            return `<span class="loss">Full loss${ate}</span> · ${winnerStr}`;
+        }
+        return winner ? winnerStr : '';
+    }
+
+    function formatOutcomeSummaryHtml(text) {
+        if (!text) return '';
+        return text
+            .replace(/Left \$([\d.]+) on table vs holding to win/,
+                '<span class="left">Left $1 on table vs holding to win</span>')
+            .replace(/Saved \$([\d.]+) vs full loss/,
+                '<span class="saved">Saved $1 vs full loss</span>')
+            .replace(/Full loss( — ate \$[\d.]+)?/,
+                (m) => `<span class="loss">${m[0]}</span>`);
+    }
+
+    function makeBetMetaHtml(b) {
+        const settled = b.status === 'settled';
+        let sizingLine = '';
+
+        // Sizing: Kelly → proposed → filled + cap/TWAP notes
+        if (b.kelly_raw_stake != null || b.sizing_notes?.length) {
+            const parts = [];
+            if (b.kelly_raw_stake != null) parts.push(`Kelly ${fmtUsd(b.kelly_raw_stake)}`);
+            if (b.size_usdc != null) parts.push(`proposed ${fmtUsd(b.size_usdc)}`);
+            const filled = b.fill_size_usdc;
+            if (filled != null && b.size_usdc && Math.abs(filled - b.size_usdc) > 0.05) {
+                parts.push(`filled ${fmtUsd(filled)}`);
+            }
+            sizingLine = parts.join(' → ');
+            if (b.sizing_notes?.length) {
+                sizingLine += (sizingLine ? ' · ' : '') + b.sizing_notes.join(' · ');
+            }
+        } else if (settled && b.fill_size_usdc && b.size_usdc
+            && Math.abs(b.fill_size_usdc - b.size_usdc) / Math.max(b.size_usdc, 0.01) > 0.05) {
+            sizingLine = `proposed ${fmtUsd(b.size_usdc)} → filled ${fmtUsd(b.fill_size_usdc)}`;
+        }
+
+        const outcomeLine = settled ? makeOutcomeSummaryHtml(b) : '';
+        if (!sizingLine && !outcomeLine) return '';
+
+        let html = '<div class="lb-bet-meta">';
+        if (sizingLine) {
+            html += `<span class="lb-sizing-line">${sizingLine}</span>`;
+        }
+        if (outcomeLine) {
+            html += `<span class="lb-outcome-line">${outcomeLine}</span>`;
+        }
+        html += '</div>';
+        return html;
+    }
+
+    function makeBetBlock(b) {
         const edgeCls = b.edge_pp >= 5 ? 'lb-edge-high' : b.edge_pp >= 2 ? 'lb-edge-medium' : 'lb-edge-low';
         const settled = b.status === 'settled';
+        const isCashout = !!b.cashout_triggered_at;
         const won = b.settle_outcome === 1;
         const pnl = b.pnl_realised_usdc;
+        const nFills = (b.sub_fills || []).length;
+        const fillBadge = nFills > 1
+            ? `<span class="lb-fill-count" title="${nFills} TWAP sub-fills">${nFills} fills</span>`
+            : '';
+
+        const stakeUsdc = (b.fill_size_usdc != null && b.fill_size_usdc > 0)
+            ? b.fill_size_usdc
+            : b.size_usdc;
+        const betMeta = makeBetMetaHtml(b);
+
         const pnlCol = settled
             ? `<span class="num ${pnl >= 0 ? 'lb-pl-positive' : 'lb-pl-negative'}">${fmtUsd(pnl)}</span>`
             : (b.fill_price ? `<span class="num" style="color:var(--text-muted)">${Number(b.fill_price).toFixed(3)}</span>` : `<span class="num" style="color:var(--text-muted)">--</span>`);
-        const outcome = settled
-            ? `<span class="lb-outcome-pill ${won ? 'lb-outcome-won' : 'lb-outcome-lost'}">${won ? 'WON' : 'LOST'}</span>`
-            : '';
+
+        let outcome = '';
+        if (settled) {
+            if (isCashout) {
+                const mult = (b.cashout_price && b.fill_price)
+                    ? (Number(b.cashout_price) / Number(b.fill_price)).toFixed(2) + '×'
+                    : '';
+                outcome = `<span class="lb-outcome-pill lb-outcome-cashed" title="Cashed out — entry ${(Number(b.fill_price)*100).toFixed(1)}¢ → exit ${(Number(b.cashout_price)*100).toFixed(1)}¢">CASHED ${mult}</span>`;
+            } else {
+                outcome = `<span class="lb-outcome-pill ${won ? 'lb-outcome-won' : 'lb-outcome-lost'}">${won ? 'WON' : 'LOST'}</span>`;
+            }
+        }
+
+        let cashoutDetail = '';
+        if (isCashout && b.fill_price && b.cashout_price) {
+            const entryPct = (Number(b.fill_price) * 100).toFixed(1);
+            const exitPct  = (Number(b.cashout_price) * 100).toFixed(1);
+            const mult     = (Number(b.cashout_price) / Number(b.fill_price)).toFixed(2);
+            cashoutDetail = `<div class="lb-cashout-detail">${entryPct}¢ <span style="color:#22d3ee">→</span> ${exitPct}¢ · <strong style="color:#22d3ee">${mult}×</strong></div>`;
+        }
+
         const timestamp = (settled ? b.settled_at : b.proposed_at || '').slice(5, 16).replace('T', ' ');
         const phaseBadge = b.phase === 'post_toss'
             ? '<span class="lb-phase-badge">post-toss</span>'
             : '';
         return `
-            <div class="lb-bet-row">
-                <span class="strat-name">${b.strategy_label || '--'}${phaseBadge}</span>
-                <span class="side-label">${b.side_label || '--'}</span>
-                <span class="num"><span class="lb-edge-pill ${edgeCls}">+${Number(b.edge_pp).toFixed(1)}pp</span></span>
-                <span class="num">${b.model_prob !== null ? (b.model_prob*100).toFixed(1)+'%' : '--'}</span>
-                <span class="num">${b.market_price_at_proposal !== null ? (b.market_price_at_proposal*100).toFixed(1)+'%' : '--'}</span>
-                <span class="num" style="color:var(--text-muted);font-size:0.72rem">${timestamp}</span>
-                <span class="num">${fmtUsd(b.size_usdc)}</span>
-                ${pnlCol}
-                ${outcome}
+            <div class="lb-bet-block">
+                <div class="lb-bet-row">
+                    <span class="strat-name">${b.strategy_label || '--'}${phaseBadge}${fillBadge}</span>
+                    <span class="side-label">${b.side_label || '--'}${cashoutDetail}</span>
+                    <span class="num"><span class="lb-edge-pill ${edgeCls}">+${Number(b.edge_pp).toFixed(1)}pp</span></span>
+                    <span class="num">${b.model_prob !== null ? (b.model_prob*100).toFixed(1)+'%' : '--'}</span>
+                    <span class="num">${b.market_price_at_proposal !== null ? (b.market_price_at_proposal*100).toFixed(1)+'%' : '--'}</span>
+                    <span class="num" style="color:var(--text-muted);font-size:0.72rem">${timestamp}</span>
+                    <span class="num">${fmtUsd(stakeUsdc)}</span>
+                    ${pnlCol}
+                    ${outcome}
+                </div>
+                ${betMeta}
+                ${makeSubFillsHtml(b)}
             </div>
         `;
+    }
+
+    function makeBetRow(b) {
+        return makeBetBlock(b);
     }
 
     // ---- Open Live Bets (grouped by fixture, sorted by kickoff ASC) ----
@@ -987,15 +1253,16 @@
             const avgEdge = fx.bets.reduce((a, b) => a + (b.edge_pp || 0), 0) / fx.bets.length;
             const sides = [...new Set(fx.bets.map(b => b.side_label))];
             const sideLabel = sides.length === 1 ? sides[0] : `${sides.length} sides`;
+            const isOpen = lbExpandState.openOpenBetCards.has(fx.key);
 
             const card = document.createElement('div');
-            card.className = 'lb-card';
+            card.className = 'lb-card' + (isOpen ? ' open' : '');
             card.innerHTML = `
                 <div class="lb-card-summary">
                     <span class="lb-card-chevron">\u25B6</span>
                     <div class="lb-card-title">
                         <div class="lb-card-title-main">
-                            ${fixturePrettyName(fx.key)}
+                            ${fixtureDisplayName(fx.bets, fx.key)}
                             <span class="lb-ko-badge ${ko.cls}">${ko.label}</span>
                             <span style="color:var(--text-muted);font-size:0.7rem;font-weight:400">${tournamentPrefixLabel(fx.key)}</span>
                         </div>
@@ -1012,7 +1279,11 @@
                     ${fx.bets.map(makeBetRow).join('')}
                 </div>
             `;
-            card.querySelector('.lb-card-summary').addEventListener('click', () => card.classList.toggle('open'));
+            card.querySelector('.lb-card-summary').addEventListener('click', () => {
+                card.classList.toggle('open');
+                if (card.classList.contains('open')) lbExpandState.openOpenBetCards.add(fx.key);
+                else lbExpandState.openOpenBetCards.delete(fx.key);
+            });
             container.appendChild(card);
         }
     }
@@ -1021,7 +1292,7 @@
     async function fetchSettledBets() {
         let data;
         try {
-            const r = await fetch('/api/betting/bets?status=settled&limit=200');
+            const r = await fetch('/api/betting/bets?status=settled&limit=50');
             data = await r.json();
         } catch (err) {
             document.getElementById('lb-settled-body').innerHTML = '<div class="lb-empty">Error loading settled bets</div>';
@@ -1065,13 +1336,21 @@
             const fixtures = byDay[day];
             const allDayBets = Object.values(fixtures).flat();
             const dayPnl = allDayBets.reduce((a, b) => a + (b.pnl_realised_usdc || 0), 0);
-            const wins = allDayBets.filter(b => b.settle_outcome === 1).length;
+            const wins   = allDayBets.filter(b => b.settle_outcome === 1 || (b.cashout_triggered_at && (b.cashout_pnl_usdc||0) > 0)).length;
+            const cashes = allDayBets.filter(b => b.cashout_triggered_at).length;
             const losses = allDayBets.length - wins;
+            const recordStr = cashes > 0 ? `${wins}W ${losses}L <span style="color:#22d3ee;font-size:0.75rem">${cashes}C</span>` : `${wins}W ${losses}L`;
             const dayDate = new Date(day + 'T00:00:00');
             const dayLabel = dayDate.toLocaleDateString(undefined, {weekday:'short', month:'short', day:'numeric'});
 
+            if (!lbExpandState.seeded && dayIdx === 0) {
+                lbExpandState.openDays.add(day);
+                lbExpandState.seeded = true;
+            }
+            const dayIsOpen = lbExpandState.openDays.has(day);
+
             const card = document.createElement('div');
-            card.className = 'lb-card lb-day-card' + (dayIdx === 0 ? ' open' : '');
+            card.className = 'lb-card lb-day-card' + (dayIsOpen ? ' open' : '');
             card.innerHTML = `
                 <div class="lb-card-summary">
                     <span class="lb-card-chevron">\u25B6</span>
@@ -1082,7 +1361,7 @@
                         </div>
                     </div>
                     <div class="lb-card-meta">
-                        <div class="lb-meta-cell"><span class="lb-meta-label">record</span><span class="lb-meta-value">${wins}W ${losses}L</span></div>
+                        <div class="lb-meta-cell"><span class="lb-meta-label">record</span><span class="lb-meta-value">${recordStr}</span></div>
                         <div class="lb-meta-cell"><span class="lb-meta-label">bets</span><span class="lb-meta-value">${allDayBets.length}</span></div>
                         <div class="lb-meta-cell"><span class="lb-meta-label">P&amp;L</span><span class="lb-meta-value ${dayPnl >= 0 ? 'positive' : 'negative'}">${fmtUsd(dayPnl)}</span></div>
                     </div>
@@ -1096,30 +1375,46 @@
             }).sort((a, b) => b.pnl - a.pnl);
 
             for (const fx of fxList) {
-                const fxWins = fx.bets.filter(b => b.settle_outcome === 1).length;
+                const fxWins   = fx.bets.filter(b => b.settle_outcome === 1 || (b.cashout_triggered_at && (b.cashout_pnl_usdc||0) > 0)).length;
+                const fxCashes = fx.bets.filter(b => b.cashout_triggered_at).length;
                 const fxLosses = fx.bets.length - fxWins;
+                const fxRecord = fxCashes > 0 ? `${fxWins}W ${fxLosses}L <span style="color:#22d3ee;font-size:0.72rem">${fxCashes}C</span>` : `${fxWins}W ${fxLosses}L`;
+                const fxKey = `${day}:${fx.fk}`;
+                const fxIsOpen = lbExpandState.openFixtures.has(fxKey);
+                const matchWinner = fx.bets.find(b => b.match_winner)?.match_winner;
+                const winnerHtml = matchWinner
+                    ? `<span class="lb-fixture-winner">· Won: ${matchWinner}</span>`
+                    : '';
                 const fxRow = document.createElement('div');
-                fxRow.className = 'lb-fixture-row';
+                fxRow.className = 'lb-fixture-row' + (fxIsOpen ? ' open' : '');
                 fxRow.innerHTML = `
-                    <span class="lb-card-chevron">\u25B6</span>
+                    <span class="lb-fixture-chevron">\u25B6</span>
                     <div class="lb-fixture-row-head">
-                        <span class="lb-fixture-name">${fixturePrettyName(fx.fk)}</span>
+                        <span class="lb-fixture-name">${fixtureDisplayName(fx.bets, fx.fk)}${winnerHtml}</span>
                         <span class="lb-fixture-tag">${tournamentPrefixLabel(fx.fk)}</span>
                     </div>
                     <div class="lb-fixture-meta">
-                        <span style="color:var(--text-muted)">${fxWins}W ${fxLosses}L</span>
+                        <span style="color:var(--text-muted)">${fxRecord}</span>
                         <span class="${fx.pnl >= 0 ? 'lb-pl-positive' : 'lb-pl-negative'}" style="font-weight:600">${fmtUsd(fx.pnl)}</span>
                     </div>
                 `;
                 const betList = document.createElement('div');
                 betList.className = 'lb-fixture-bets';
                 betList.innerHTML = betRowHeader(true) + fx.bets.map(makeBetRow).join('');
-                fxRow.addEventListener('click', () => fxRow.classList.toggle('open'));
+                fxRow.addEventListener('click', () => {
+                    fxRow.classList.toggle('open');
+                    if (fxRow.classList.contains('open')) lbExpandState.openFixtures.add(fxKey);
+                    else lbExpandState.openFixtures.delete(fxKey);
+                });
                 body.appendChild(fxRow);
                 body.appendChild(betList);
             }
 
-            card.querySelector('.lb-card-summary').addEventListener('click', () => card.classList.toggle('open'));
+            card.querySelector('.lb-card-summary').addEventListener('click', () => {
+                card.classList.toggle('open');
+                if (card.classList.contains('open')) lbExpandState.openDays.add(day);
+                else lbExpandState.openDays.delete(day);
+            });
             container.appendChild(card);
         });
     }

@@ -34,3 +34,9 @@
 CREATE INDEX IF NOT EXISTS idx_bet_ledger_cashout
     ON bet_ledger(cashout_triggered_at)
     WHERE cashout_triggered_at IS NOT NULL;
+
+-- Wave 5.12: direct link from bet_ledger row to the CLOB SELL order placed
+-- during in-game cashout. Enables exact SELL attribution in reconcile.
+CREATE INDEX IF NOT EXISTS idx_bet_ledger_cashout_order
+    ON bet_ledger(cashout_order_id)
+    WHERE cashout_order_id IS NOT NULL;

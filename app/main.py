@@ -24,7 +24,7 @@ import subprocess
 import sys
 from pathlib import Path
 from datetime import datetime, timedelta, timezone
-from typing import Optional, Dict, List, Any
+from typing import Optional, Dict, List, Any, Tuple
 
 # Configure TensorFlow early (before any imports that might use it)
 import tensorflow as tf
@@ -84,6 +84,14 @@ try:
     _init_betting_tables()
 except Exception as _exc:  # pragma: no cover - logged but non-fatal at import time
     logger.warning(f"Betting schema init failed at startup: {_exc}")
+
+# Wave 5.13: order_history audit table + bet_ledger reason/category columns.
+try:
+    from src.data.database import init_order_history as _init_order_history
+
+    _init_order_history()
+except Exception as _exc:  # pragma: no cover - logged but non-fatal at import time
+    logger.warning(f"Order history schema init failed at startup: {_exc}")
 
 # Lazy load simulators (they take time to initialize)
 # Cache per gender to avoid re-initializing
@@ -4839,13 +4847,17 @@ def betting_strategies():
 def betting_wallet():
     """Wave 5.8: live on-chain USDC balance + approval status for the bot wallet.
 
-    Reads the Polymarket CLOB `get_balance_allowance` endpoint using the L2
-    credentials in .env. Compared against BETTING_MAX_DEPOSIT so the UI can
-    flag under-funded wallets without guessing.
+    Includes wallet-driven deploy cap (portfolio × fraction) so the UI reflects
+    top-ups automatically.
     """
     try:
         from src.integrations.polymarket import PolymarketClient
-        from config import BETTING_CONFIG, POLYMARKET_CONFIG
+        from src.data.database import get_connection
+        from config import POLYMARKET_CONFIG
+        from src.integrations.polymarket.live_bankroll import (
+            get_max_deploy_usdc,
+            get_portfolio_value,
+        )
         pm = PolymarketClient()
         if not POLYMARKET_CONFIG.get('private_key'):
             return jsonify({
@@ -4854,15 +4866,18 @@ def betting_wallet():
                 'configured': False,
             })
         info = pm.get_usdc_balance()
-        max_deposit = float(BETTING_CONFIG.get('max_deposit_usdc', 0))
-        info['max_deposit_usdc'] = max_deposit
-        info['funded_vs_envelope_pct'] = (
-            round(info['balance_usdc'] / max_deposit * 100, 1) if max_deposit > 0 else None
+        with get_connection() as conn:
+            portfolio = get_portfolio_value(conn, pm=pm)
+            max_deploy = get_max_deploy_usdc(conn, pm=pm)
+        info['portfolio_value_usdc'] = round(portfolio, 2)
+        info['max_deploy_usdc'] = round(max_deploy, 2)
+        info['max_deposit_usdc'] = round(max_deploy, 2)  # legacy key for UI
+        cash = float(info.get('balance_usdc') or 0.0)
+        info['cash_pct_of_portfolio'] = (
+            round(cash / portfolio * 100, 1) if portfolio > 0 else None
         )
-        # under-funded if live balance < 80% of envelope
-        info['underfunded'] = (
-            max_deposit > 0 and info['balance_usdc'] < 0.8 * max_deposit
-        )
+        info['funded_vs_envelope_pct'] = info['cash_pct_of_portfolio']
+        info['underfunded'] = portfolio > 0 and cash < 0.15 * portfolio
         info['success'] = True
         info['configured'] = True
         return jsonify(info)
@@ -4882,13 +4897,28 @@ def betting_bankroll_history():
     try:
         from src.data.database import get_connection
         from config import BETTING_CONFIG
-        
-        import os
-        # Get live strategies from config
+        from src.integrations.polymarket.live_bankroll import get_strategy_bankroll
+
         live_strategies = BETTING_CONFIG.get('live_strategies', []) or []
         default_starting = float(BETTING_CONFIG.get('max_deposit_per_strategy_usdc', 100))
 
-        def _strat_starting(name: str) -> float:
+        def _strat_starting(name: str, conn) -> float:
+            if name in live_strategies:
+                bankroll = get_strategy_bankroll(name, conn)
+                cur = conn.cursor()
+                cur.execute(
+                    """
+                    SELECT COALESCE(SUM(pnl_realised_usdc), 0.0) AS realised
+                    FROM bet_ledger
+                    WHERE COALESCE(bet_kind, 'real') = 'real'
+                      AND status = 'settled'
+                      AND strategy_label = ?
+                    """,
+                    (name,),
+                )
+                realised = float(cur.fetchone()["realised"] or 0.0)
+                return max(0.0, bankroll - realised)
+            import os
             key = f"BETTING_MAX_DEPOSIT_{name.upper().replace('-', '_')}"
             v = os.getenv(key)
             return float(v) if v is not None else default_starting
@@ -4909,9 +4939,11 @@ def betting_bankroll_history():
         
         # Initialize all live-enabled strategies with starting point
         for strat_name in live_strategies:
+            with get_connection() as conn:
+                base = _strat_starting(strat_name, conn)
             by_strategy[strat_name] = [{
                 "timestamp": None,
-                "bankroll": _strat_starting(strat_name),
+                "bankroll": round(base, 2),
                 "side_label": "starting",
                 "fixture_key": "",
                 "pnl": 0.0,
@@ -4925,12 +4957,13 @@ def betting_bankroll_history():
         
         # Build cumulative bankroll timeline
         for name, lst in grouped.items():
-            base = _strat_starting(name)
+            with get_connection() as conn:
+                base = _strat_starting(name, conn)
             running = base
             if name not in by_strategy:
                 by_strategy[name] = [{
                     "timestamp": None,
-                    "bankroll": base,
+                    "bankroll": round(base, 2),
                     "side_label": "starting",
                     "fixture_key": "",
                     "pnl": 0.0,
@@ -4946,12 +4979,16 @@ def betting_bankroll_history():
                     "pnl": round(pnl, 2),
                 })
         
-        starting_map = {name: _strat_starting(name) for name in list(set(live_strategies) | set(by_strategy.keys()))}
+        starting_map = {}
+        with get_connection() as conn:
+            for name in list(set(live_strategies) | set(by_strategy.keys())):
+                starting_map[name] = round(_strat_starting(name, conn), 2)
         return jsonify({
             "success": True,
             "history": by_strategy,
             "live_strategies": list(live_strategies),
             "starting_by_strategy": starting_map,
+            "wallet_driven": True,
         })
     except Exception as e:
         logger.error(f"Error in /api/betting/bankroll-history: {e}")
@@ -5093,6 +5130,381 @@ def betting_today():
         return jsonify({'success': False, 'error': str(e)}), 500
 
 
+def _enrich_bets_with_sub_fills(conn, bets: List[Dict[str, Any]]) -> None:
+    """Attach TWAP chunk sub-fills and cashout SELL detail to bet dicts in-place."""
+    if not bets:
+        return
+    bet_ids = [b["bet_id"] for b in bets if b.get("bet_id") is not None]
+    if not bet_ids:
+        return
+
+    chunks_by_bet: Dict[int, List[Dict[str, Any]]] = {bid: [] for bid in bet_ids}
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='order_chunks'"
+        )
+        if cur.fetchone():
+            placeholders = ",".join("?" * len(bet_ids))
+            cur.execute(
+                f"""
+                SELECT op.bet_ledger_id,
+                       oc.chunk_index,
+                       oc.limit_price,
+                       oc.size_usdc,
+                       oc.fill_price,
+                       oc.fill_size_usdc,
+                       oc.polymarket_order_id,
+                       oc.status,
+                       oc.placed_at,
+                       oc.filled_at
+                FROM order_plans op
+                JOIN order_chunks oc ON oc.plan_id = op.plan_id
+                WHERE op.bet_ledger_id IN ({placeholders})
+                  AND oc.status IN ('filled', 'partially_filled', 'placed')
+                ORDER BY op.bet_ledger_id, oc.chunk_index ASC
+                """,
+                bet_ids,
+            )
+            for row in cur.fetchall():
+                r = dict(row)
+                bid = r.pop("bet_ledger_id")
+                r["kind"] = "TWAP"
+                chunks_by_bet.setdefault(bid, []).append(r)
+    except Exception:
+        pass
+
+    for bet in bets:
+        bid = bet.get("bet_id")
+        sub_fills = chunks_by_bet.get(bid, [])
+        # Only expose multi-chunk TWAP detail (or any filled chunk with data)
+        filled = [
+            c for c in sub_fills
+            if c.get("status") in ("filled", "partially_filled")
+            and (c.get("fill_size_usdc") or c.get("fill_price"))
+        ]
+        # Always show TWAP entry fills when present — including single-chunk
+        # plans (common for v3_marg) so cashout SELL rows aren't orphaned.
+        bet["sub_fills"] = filled
+
+        # Fallback: non-TWAP bets with a cashout but no chunk rows — synthesise
+        # the entry fill from bet_ledger so BUY + SELL appear as a pair.
+        if not bet["sub_fills"] and bet.get("cashout_triggered_at") and bet.get("fill_price"):
+            bet["sub_fills"] = [{
+                "kind": "BUY",
+                "chunk_index": 0,
+                "fill_price": bet["fill_price"],
+                "fill_size_usdc": bet.get("fill_size_usdc") or bet.get("size_usdc"),
+                "filled_at": bet.get("filled_at") or bet.get("placed_at"),
+                "polymarket_order_id": bet.get("polymarket_order_id"),
+            }]
+
+        if bet.get("cashout_triggered_at") and bet.get("cashout_price"):
+            fill_p = float(bet.get("fill_price") or 0)
+            fill_sz = float(bet.get("fill_size_usdc") or bet.get("size_usdc") or 0)
+            exit_p = float(bet["cashout_price"])
+            proceeds = (fill_sz / fill_p * exit_p) if fill_p > 0 else None
+            bet["cashout_sub"] = {
+                "kind": "CASHOUT",
+                "fill_price": exit_p,
+                "fill_size_usdc": round(proceeds, 4) if proceeds is not None else None,
+                "pnl_usdc": bet.get("cashout_pnl_usdc") or bet.get("pnl_realised_usdc"),
+                "filled_at": bet.get("cashout_triggered_at"),
+                "order_id": bet.get("cashout_order_id"),
+            }
+
+
+def _fixture_abbr_fallback(fixture_key: Optional[str]) -> tuple:
+    """Last-resort team labels from slug tokens."""
+    parts = (fixture_key or "").split("-")
+    if len(parts) >= 6 and len(parts[-3]) == 4 and parts[-3].isdigit():
+        return (parts[-5].upper(), parts[-4].upper())
+    if len(parts) >= 4:
+        return (parts[1].upper(), parts[2].upper())
+    return ("?", "?")
+
+
+def _teams_from_side_labels(side_labels: List[str]) -> Tuple[Optional[str], Optional[str]]:
+    """If bets exist on both sides, we already know both team names."""
+    uniq = [s for s in dict.fromkeys(side_labels) if s]
+    if len(uniq) >= 2:
+        return uniq[0], uniq[1]
+    if len(uniq) == 1:
+        return uniq[0], None
+    return None, None
+
+
+def _resolve_fixture_meta(
+    fixture_key: str,
+    fixture_bets: List[Dict[str, Any]],
+    gamma_by_market: Dict[str, Any],
+) -> Dict[str, str]:
+    """Resolve display names without extra HTTP — uses prefetched Gamma + side_labels."""
+    from src.integrations.polymarket.bet_display_enrichment import (
+        fixture_meta_cache_get,
+        fixture_meta_cache_set,
+        teams_from_gamma_market,
+    )
+    from src.integrations.odds.polymarket_compare import PolymarketComparisonService
+
+    cached = fixture_meta_cache_get(fixture_key)
+    if cached:
+        return cached
+
+    market_id = next(
+        (b.get("polymarket_market_id") for b in fixture_bets if b.get("polymarket_market_id")),
+        None,
+    )
+    side_labels = [b.get("side_label") for b in fixture_bets if b.get("side_label")]
+
+    t1, t2 = None, None
+    if market_id:
+        t1, t2 = teams_from_gamma_market(gamma_by_market.get(str(market_id)))
+
+    sl1, sl2 = _teams_from_side_labels(side_labels)
+    if t1 is None and sl1:
+        t1 = sl1
+    if t2 is None and sl2:
+        t2 = sl2
+    elif t2 is None and sl1 and t1 and sl1 != t1:
+        t2 = sl1
+
+    if not t1 or not t2:
+        fb1, fb2 = _fixture_abbr_fallback(fixture_key)
+        t1 = t1 or fb1
+        t2 = t2 or fb2
+
+    svc = PolymarketComparisonService()
+    for sl in side_labels:
+        if svc.label_matches_team(t2, sl) and not svc.label_matches_team(t1, sl):
+            t1, t2 = t2, t1
+            break
+
+    display = f"{t1} v {t2}" if t1 and t2 else fixture_key
+    meta = {"fixture_team1": t1, "fixture_team2": t2, "fixture_display": display}
+    fixture_meta_cache_set(fixture_key, meta)
+    return meta
+
+
+def _enrich_bets_with_fixture_meta(
+    bets: List[Dict[str, Any]],
+    gamma_by_market: Dict[str, Any],
+) -> None:
+    """Attach human-readable fixture team names to bet dicts in-place."""
+    if not bets:
+        return
+
+    by_fixture: Dict[str, List[Dict[str, Any]]] = {}
+    for bet in bets:
+        fk = bet.get("fixture_key") or "?"
+        by_fixture.setdefault(fk, []).append(bet)
+
+    meta_cache: Dict[str, Dict[str, str]] = {}
+    for fk, fixture_bets in by_fixture.items():
+        if fk not in meta_cache:
+            meta_cache[fk] = _resolve_fixture_meta(fk, fixture_bets, gamma_by_market)
+        for bet in fixture_bets:
+            bet.update(meta_cache[fk])
+
+
+def _match_winner_from_outcome(
+    side_label: str,
+    our_outcome: int,
+    team1: str,
+    team2: str,
+) -> Optional[str]:
+    """Return winning team name given our side's settle outcome."""
+    from src.integrations.odds.polymarket_compare import PolymarketComparisonService
+    svc = PolymarketComparisonService()
+    our_is_t1 = svc.label_matches_team(team1, side_label)
+    our_is_t2 = svc.label_matches_team(team2, side_label)
+    if our_outcome == 1:
+        return side_label
+    if our_is_t1:
+        return team2
+    if our_is_t2:
+        return team1
+    return team2 if our_outcome == 0 else side_label
+
+
+def _format_outcome_summary(bet: Dict[str, Any]) -> str:
+    """Human-readable settlement narrative for live-betting meta row."""
+    winner = bet.get("match_winner")
+    winner_str = f"Winner: {winner}" if winner else "Winner: pending resolution"
+    is_cashout = bool(bet.get("cashout_triggered_at"))
+    delta = bet.get("counterfactual_delta")
+    pnl = bet.get("pnl_realised_usdc")
+
+    if is_cashout:
+        if delta is not None:
+            d = float(delta)
+            if d > 0.01:
+                return f"Left ${abs(d):.2f} on table vs holding to win · {winner_str}"
+            if d < -0.01:
+                return f"Saved ${abs(d):.2f} vs full loss · {winner_str}"
+            return f"Cashout matched settlement · {winner_str}"
+        return winner_str if winner else ""
+
+    outcome = bet.get("settle_outcome")
+    if outcome is not None:
+        outcome = int(outcome)
+    if outcome == 1:
+        pnl_bit = f" (+${float(pnl):.2f})" if pnl is not None and float(pnl) > 0 else ""
+        return f"Full win{pnl_bit} · {winner_str}"
+    if outcome == 0:
+        ate = f" — ate ${abs(float(pnl)):.2f}" if pnl is not None and float(pnl) < 0 else ""
+        return f"Full loss{ate} · {winner_str}"
+    return winner_str if winner else ""
+
+
+def _enrich_bets_with_settlement_context(
+    bets: List[Dict[str, Any]],
+    gamma_by_market: Dict[str, Any],
+) -> None:
+    """Attach match winner and counterfactual hold-to-settlement PnL."""
+    if not bets:
+        return
+
+    from src.integrations.polymarket.bet_display_enrichment import get_gamma_market_cached
+    from src.integrations.polymarket.reconcile import (
+        _compute_pnl_for_settled_bet,
+        _resolve_via_gamma,
+    )
+
+    outcome_cache: Dict[str, Optional[int]] = {}
+
+    def _gamma_market_for(mid: str) -> Optional[Dict[str, Any]]:
+        if not mid:
+            return None
+        market = gamma_by_market.get(mid)
+        if market is not None:
+            return market
+        return get_gamma_market_cached(mid)
+
+    def _outcome_for_bet(bet: Dict[str, Any]) -> Optional[int]:
+        if bet.get("cashout_triggered_at"):
+            mid = str(bet.get("polymarket_market_id") or "")
+            side = bet.get("side_label") or ""
+            cache_key = f"{mid}:{side}"
+            if cache_key not in outcome_cache:
+                market = _gamma_market_for(mid)
+                resolved = _resolve_via_gamma(market, side) if market else None
+                outcome_cache[cache_key] = resolved[0] if resolved else None
+            return outcome_cache[cache_key]
+        so = bet.get("settle_outcome")
+        if so is None:
+            return None
+        return int(so)
+
+    for bet in bets:
+        if bet.get("status") != "settled":
+            continue
+
+        match_outcome = _outcome_for_bet(bet)
+        bet["match_settle_outcome"] = match_outcome
+
+        team1 = bet.get("fixture_team1") or "?"
+        team2 = bet.get("fixture_team2") or "?"
+        side = bet.get("side_label") or ""
+
+        if match_outcome is not None and side:
+            bet["match_winner"] = _match_winner_from_outcome(
+                side, match_outcome, team1, team2,
+            )
+        else:
+            bet["match_winner"] = None
+
+        fill_p = bet.get("fill_price")
+        fill_sz = bet.get("fill_size_usdc") or bet.get("size_usdc")
+        if match_outcome is not None and fill_p and fill_sz:
+            hold_pnl = _compute_pnl_for_settled_bet(
+                float(fill_p), float(fill_sz), float(match_outcome),
+            )
+            bet["hold_to_settlement_pnl"] = hold_pnl
+            actual = bet.get("pnl_realised_usdc")
+            if bet.get("cashout_triggered_at") and hold_pnl is not None and actual is not None:
+                bet["counterfactual_delta"] = round(float(hold_pnl) - float(actual), 4)
+
+        bet["outcome_summary"] = _format_outcome_summary(bet)
+
+
+def _enrich_bets_with_sizing_context(bets: List[Dict[str, Any]]) -> None:
+    """Attach Kelly / cap sizing notes for display."""
+    if not bets:
+        return
+
+    from config import BETTING_CONFIG
+    from src.integrations.polymarket.sizing import compute_sizing_context
+
+    # Live wallet read once per strategy per request — not once per bet row.
+    cap_by_strategy: Dict[str, Optional[float]] = {}
+    static_cap = float(BETTING_CONFIG.get("max_per_bet_usdc") or 0) or None
+
+    def _risk_cap(strategy_label: Optional[str], settled: bool) -> Optional[float]:
+        if settled:
+            # Historical rows use bankroll_at_proposal; skip live wallet for display notes.
+            return None
+        if not strategy_label:
+            return static_cap
+        if strategy_label not in cap_by_strategy:
+            from src.data.database import get_connection
+            from src.integrations.polymarket.live_bankroll import get_max_per_bet_usdc
+            with get_connection() as conn:
+                cap_by_strategy[strategy_label] = get_max_per_bet_usdc(strategy_label, conn)
+        return cap_by_strategy[strategy_label]
+
+    for bet in bets:
+        strategy_label = bet.get("strategy_label")
+        settled = bet.get("status") == "settled"
+        risk_cap = _risk_cap(strategy_label, settled)
+        ctx = compute_sizing_context(bet, risk_gate_max_per_bet=risk_cap)
+        if ctx:
+            bet.update(ctx)
+
+
+def _gamma_market_ids_for_enrichment(bets: List[Dict[str, Any]]) -> List[str]:
+    """Market IDs that need Gamma prefetch — skip when DB already has outcome."""
+    ids: List[str] = []
+    seen = set()
+    for bet in bets:
+        mid = str(bet.get("polymarket_market_id") or "").strip()
+        if not mid or mid in seen:
+            continue
+        # Fixture names: side_label pair often enough; still try Gamma when missing teams.
+        needs_gamma = True
+        if bet.get("status") == "settled":
+            if bet.get("cashout_triggered_at"):
+                # Cashout counterfactual needs Gamma only if outcome not stored.
+                needs_gamma = bet.get("settle_outcome") is None
+            else:
+                needs_gamma = False
+        if needs_gamma:
+            seen.add(mid)
+            ids.append(mid)
+    return ids
+
+
+def _enrich_betting_bets(conn, bets: List[Dict[str, Any]]) -> None:
+    """Run all bet enrichments for /api/betting/bets."""
+    from src.integrations.polymarket.bet_display_enrichment import (
+        get_gamma_market_cached,
+        prefetch_gamma_markets,
+    )
+
+    _enrich_bets_with_sub_fills(conn, bets)
+
+    market_ids = _gamma_market_ids_for_enrichment(bets)
+    prefetch_gamma_markets(market_ids)
+
+    gamma_by_market: Dict[str, Any] = {}
+    for mid in market_ids:
+        gamma_by_market[mid] = get_gamma_market_cached(mid)
+
+    _enrich_bets_with_fixture_meta(bets, gamma_by_market)
+    _enrich_bets_with_settlement_context(bets, gamma_by_market)
+    _enrich_bets_with_sizing_context(bets)
+
+
 @app.route('/api/betting/bets', methods=['GET'])
 def betting_bets():
     """Wave 5.8.3: Live bets (card UI) — mirrors /api/paper/bets for real bets.
@@ -5115,8 +5527,12 @@ def betting_bets():
         params: list = []
         if status == 'open':
             where.append("status NOT IN ('settled', 'cancelled', 'errored')")
+            order_by = "proposed_at DESC"
         elif status == 'settled':
             where.append("status = 'settled'")
+            order_by = "settled_at DESC"
+        else:
+            order_by = "proposed_at DESC"
         if strategy:
             where.append("strategy_label = ?")
             params.append(strategy)
@@ -5125,7 +5541,7 @@ def betting_bets():
             SELECT *
             FROM bet_ledger
             WHERE {' AND '.join(where)}
-            ORDER BY proposed_at DESC
+            ORDER BY {order_by}
             LIMIT ?
         """
         params.append(limit)
@@ -5134,6 +5550,7 @@ def betting_bets():
             cur = conn.cursor()
             cur.execute(sql, params)
             bets = [dict(r) for r in cur.fetchall()]
+            _enrich_betting_bets(conn, bets)
         return jsonify({'success': True, 'bets': bets, 'n': len(bets)})
     except Exception as e:
         logger.error(f"Error in /api/betting/bets: {e}")
@@ -5160,6 +5577,7 @@ def betting_recent_settled():
                 """
             )
             bets = [dict(r) for r in cur.fetchall()]
+            _enrich_betting_bets(conn, bets)
         return jsonify({'success': True, 'bets': bets})
     except Exception as e:
         logger.error(f"Error fetching recent settled bets: {e}")

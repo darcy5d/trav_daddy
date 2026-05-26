@@ -157,6 +157,8 @@ def can_place_bet(
     requested_mode: str = "manual",
     conn: Optional[sqlite3.Connection] = None,
     strategy_label: Optional[str] = None,
+    kickoff_at: Optional[str] = None,
+    fixture_key: Optional[str] = None,
 ) -> RiskGateDecision:
     """Return RiskGateDecision indicating whether the bet may proceed.
 
@@ -167,8 +169,9 @@ def can_place_bet(
         requested_mode: "manual" or "auto" (matches the bet's `mode` column).
         conn: Optional sqlite connection; opens its own if None.
         strategy_label: Optional strategy name; when provided the per-strategy
-            cap (BETTING_MAX_DEPOSIT_PER_STRATEGY) and live_strategies whitelist
-            (BETTING_LIVE_STRATEGIES) are enforced in addition to the global caps.
+            cap and live_strategies whitelist are enforced in addition to global caps.
+        kickoff_at: Match kickoff ISO (for per-kickoff-day open cap).
+        fixture_key: Fixture slug fallback when kickoff_at is missing.
 
     All caps come from BETTING_CONFIG which is env-driven (BETTING_*).
     """
@@ -225,18 +228,18 @@ def can_place_bet(
                     cap_remaining_deposit=0.0,
                 )
 
-        # 3. Per-bet cap — floats with bankroll when BETTING_MAX_PER_BET_FRACTION is set.
-        # For strategy-tagged bets: cap = fraction × live_bankroll (grows/shrinks with PnL).
-        # For untagged manual bets: falls back to the hard BETTING_MAX_PER_BET dollar cap.
+        # 3. Per-bet cap — fraction × strategy bankroll (wallet-driven).
+        from src.integrations.polymarket.live_bankroll import get_max_per_bet_usdc
         max_per_bet_fraction = float(BETTING_CONFIG.get("max_per_bet_fraction", 0))
+        max_per_bet = get_max_per_bet_usdc(strategy_label, conn)
         if max_per_bet_fraction > 0 and strategy_label is not None:
             live_bankroll = _live_bankroll_for_strategy(conn, strategy_label)
-            max_per_bet = max_per_bet_fraction * live_bankroll
-            cap_label = f"{max_per_bet_fraction*100:.1f}% of ${live_bankroll:.2f} live bankroll"
+            cap_label = f"{max_per_bet_fraction*100:.1f}% of ${live_bankroll:.2f} strategy bankroll"
+        elif max_per_bet > 0:
+            cap_label = "per-bet cap"
         else:
-            max_per_bet = float(BETTING_CONFIG.get("max_per_bet_usdc", 0))
-            cap_label = f"hard cap"
-        if proposed_size_usdc > max_per_bet:
+            cap_label = "hard cap"
+        if max_per_bet > 0 and proposed_size_usdc > max_per_bet:
             return RiskGateDecision(
                 allowed=False,
                 reason=(
@@ -247,11 +250,21 @@ def can_place_bet(
                 cap_remaining_deposit=0.0,
             )
 
-        # 4. Daily stake cap
-        max_per_day = float(BETTING_CONFIG.get("max_per_day_usdc", 0))
+        # 4. Daily stake cap (portfolio-proportional when fraction configured)
+        from src.integrations.polymarket.live_bankroll import (
+            get_max_deploy_usdc,
+            get_max_loss_per_day_usdc,
+            get_max_per_day_usdc,
+            get_strategy_flat_open_cap_usdc,
+            get_strategy_open_cap_per_kickoff_day_usdc,
+            get_strategy_open_exposure_on_kickoff_day,
+            kickoff_utc_date,
+            uses_kickoff_day_open_cap,
+        )
+        max_per_day = get_max_per_day_usdc(conn)
         todays_stakes = _todays_filled_stakes(conn)
         cap_remaining_today = max(0.0, max_per_day - todays_stakes)
-        if proposed_size_usdc > cap_remaining_today:
+        if max_per_day > 0 and proposed_size_usdc > cap_remaining_today:
             return RiskGateDecision(
                 allowed=False,
                 reason=(
@@ -263,11 +276,11 @@ def can_place_bet(
             )
 
         # 5. Daily loss cap
-        max_loss_per_day = float(BETTING_CONFIG.get("max_loss_per_day_usdc", 0))
+        max_loss_per_day = get_max_loss_per_day_usdc(conn)
         todays_loss = _todays_realised_loss(conn)
         # Worst case for THIS bet: lose the entire stake (price~1, settle=0)
         worst_case_loss = proposed_size_usdc
-        if todays_loss + worst_case_loss > max_loss_per_day:
+        if max_loss_per_day > 0 and todays_loss + worst_case_loss > max_loss_per_day:
             return RiskGateDecision(
                 allowed=False,
                 reason=(
@@ -279,11 +292,11 @@ def can_place_bet(
                 cap_remaining_deposit=0.0,
             )
 
-        # 6. Total open exposure
-        max_deposit = float(BETTING_CONFIG.get("max_deposit_usdc", 0))
+        # 6. Total open exposure (portfolio-proportional)
+        max_deposit = get_max_deploy_usdc(conn)
         open_exposure = _open_exposure_usdc(conn)
         cap_remaining_deposit = max(0.0, max_deposit - open_exposure)
-        if proposed_size_usdc > cap_remaining_deposit:
+        if max_deposit > 0 and proposed_size_usdc > cap_remaining_deposit:
             return RiskGateDecision(
                 allowed=False,
                 reason=(
@@ -294,25 +307,67 @@ def can_place_bet(
                 cap_remaining_deposit=cap_remaining_deposit,
             )
 
-        # 6b. Per-strategy open exposure (Wave 5.8).
-        # Enforce BETTING_MAX_DEPOSIT_PER_STRATEGY so one strategy cannot
-        # consume the full shared bankroll envelope.
+        # 6b. Per-strategy open exposure — kickoff-day or flat cap.
         if strategy_label is not None:
-            strategy_cap = float(BETTING_CONFIG.get("max_deposit_per_strategy_usdc", 0))
-            if strategy_cap > 0:
-                strategy_open = _strategy_open_exposure_usdc(conn, strategy_label)
-                cap_remaining_strategy = max(0.0, strategy_cap - strategy_open)
-                if proposed_size_usdc > cap_remaining_strategy:
-                    return RiskGateDecision(
-                        allowed=False,
-                        reason=(
-                            f"Strategy '{strategy_label}' open ${strategy_open:.2f} + "
-                            f"${proposed_size_usdc} would exceed per-strategy cap "
-                            f"${strategy_cap} (remaining ${cap_remaining_strategy:.2f})."
-                        ),
-                        cap_remaining_today=cap_remaining_today,
-                        cap_remaining_deposit=cap_remaining_deposit,
+            kickoff_day_frac = float(
+                BETTING_CONFIG.get("max_open_fraction_per_kickoff_day") or 0.0
+            )
+            if kickoff_day_frac > 0 and uses_kickoff_day_open_cap():
+                utc_date = kickoff_utc_date(kickoff_at, fixture_key)
+                if utc_date is None:
+                    strategy_cap = get_strategy_flat_open_cap_usdc(strategy_label, conn)
+                    if strategy_cap > 0:
+                        strategy_open = _strategy_open_exposure_usdc(conn, strategy_label)
+                        cap_remaining_strategy = max(0.0, strategy_cap - strategy_open)
+                        if proposed_size_usdc > cap_remaining_strategy:
+                            return RiskGateDecision(
+                                allowed=False,
+                                reason=(
+                                    f"Strategy '{strategy_label}' open ${strategy_open:.2f} + "
+                                    f"${proposed_size_usdc} would exceed per-strategy cap "
+                                    f"${strategy_cap:.2f} (remaining ${cap_remaining_strategy:.2f}). "
+                                    f"(No kickoff date for kickoff-day cap; flat cap fallback.)"
+                                ),
+                                cap_remaining_today=cap_remaining_today,
+                                cap_remaining_deposit=cap_remaining_deposit,
+                            )
+                else:
+                    day_cap = get_strategy_open_cap_per_kickoff_day_usdc(
+                        strategy_label, conn
                     )
+                    if day_cap > 0:
+                        day_open = get_strategy_open_exposure_on_kickoff_day(
+                            strategy_label, conn, utc_date
+                        )
+                        cap_remaining_day = max(0.0, day_cap - day_open)
+                        if proposed_size_usdc > cap_remaining_day:
+                            return RiskGateDecision(
+                                allowed=False,
+                                reason=(
+                                    f"Strategy '{strategy_label}' open ${day_open:.2f} on "
+                                    f"{utc_date.isoformat()} UTC + ${proposed_size_usdc} would "
+                                    f"exceed kickoff-day cap ${day_cap:.2f} "
+                                    f"(remaining ${cap_remaining_day:.2f})."
+                                ),
+                                cap_remaining_today=cap_remaining_today,
+                                cap_remaining_deposit=cap_remaining_deposit,
+                            )
+            else:
+                strategy_cap = get_strategy_flat_open_cap_usdc(strategy_label, conn)
+                if strategy_cap > 0:
+                    strategy_open = _strategy_open_exposure_usdc(conn, strategy_label)
+                    cap_remaining_strategy = max(0.0, strategy_cap - strategy_open)
+                    if proposed_size_usdc > cap_remaining_strategy:
+                        return RiskGateDecision(
+                            allowed=False,
+                            reason=(
+                                f"Strategy '{strategy_label}' open ${strategy_open:.2f} + "
+                                f"${proposed_size_usdc} would exceed per-strategy cap "
+                                f"${strategy_cap:.2f} (remaining ${cap_remaining_strategy:.2f})."
+                            ),
+                            cap_remaining_today=cap_remaining_today,
+                            cap_remaining_deposit=cap_remaining_deposit,
+                        )
 
         # 7. AUTO-mode market gate
         if requested_mode == "auto":
@@ -353,6 +408,13 @@ def get_risk_status() -> Dict[str, Any]:
     """Return a snapshot of current risk-gate state for the UI."""
     from config import BETTING_CONFIG
     from src.data.database import get_connection
+    from src.integrations.polymarket.live_bankroll import (
+        bankroll_snapshot,
+        get_max_deploy_usdc,
+        get_max_loss_per_day_usdc,
+        get_max_per_day_usdc,
+        get_portfolio_value,
+    )
 
     conn = get_connection()
     try:
@@ -361,19 +423,24 @@ def get_risk_status() -> Dict[str, Any]:
         open_exposure = _open_exposure_usdc(conn)
         todays_bets = _todays_bet_count(conn)
         settled_bets_total = _settled_bet_count(conn)
+        portfolio = get_portfolio_value(conn)
+        max_deposit = get_max_deploy_usdc(conn)
+        max_per_day = get_max_per_day_usdc(conn)
+        max_loss_per_day = get_max_loss_per_day_usdc(conn)
+        snap = bankroll_snapshot(conn)
     finally:
         conn.close()
-
-    max_deposit = float(BETTING_CONFIG.get("max_deposit_usdc", 0))
-    max_per_day = float(BETTING_CONFIG.get("max_per_day_usdc", 0))
-    max_loss_per_day = float(BETTING_CONFIG.get("max_loss_per_day_usdc", 0))
 
     return {
         "mode": BETTING_CONFIG.get("mode", "OFF").upper(),
         "kill_switch": bool(BETTING_CONFIG.get("kill_switch", False)),
+        "portfolio_value_usdc": round(portfolio, 2),
+        "bankroll_snapshot": snap,
         "max_deposit_usdc": max_deposit,
         "max_per_bet_usdc": float(BETTING_CONFIG.get("max_per_bet_usdc", 0)),
         "max_per_bet_fraction": float(BETTING_CONFIG.get("max_per_bet_fraction", 0)),
+        "max_deploy_fraction": float(BETTING_CONFIG.get("max_deploy_fraction", 0)),
+        "max_open_fraction_per_strategy": float(BETTING_CONFIG.get("max_open_fraction_per_strategy", 0)),
         "max_per_day_usdc": max_per_day,
         "max_loss_per_day_usdc": max_loss_per_day,
         "auto_min_edge_pp": float(BETTING_CONFIG.get("auto_min_edge_pp", 0)),
@@ -382,38 +449,18 @@ def get_risk_status() -> Dict[str, Any]:
         "today_filled_stakes_usdc": round(todays_stakes, 2),
         "today_realised_loss_usdc": round(todays_loss, 2),
         "today_bet_count": todays_bets,
-        "today_remaining_cap_usdc": max(0.0, max_per_day - todays_stakes),
+        "today_remaining_cap_usdc": max(0.0, max_per_day - todays_stakes) if max_per_day > 0 else None,
         "open_exposure_usdc": round(open_exposure, 2),
-        "deposit_remaining_cap_usdc": max(0.0, max_deposit - open_exposure),
+        "deposit_remaining_cap_usdc": max(0.0, max_deposit - open_exposure) if max_deposit > 0 else None,
         "settled_bets_total": settled_bets_total,
         "scale_up_eligible": _is_scale_up_eligible(settled_bets_total),
     }
 
 
 def _live_bankroll_for_strategy(conn: sqlite3.Connection, strategy_label: str) -> float:
-    """Compute live bankroll = starting deposit + sum(realised PnL on real settled bets).
-
-    Mirrors the logic in live_bet_scan._get_live_bankroll() so the risk gate
-    uses the exact same number the scanner used for Kelly sizing.
-    """
-    env_key = f"BETTING_MAX_DEPOSIT_{strategy_label.upper().replace('-', '_')}"
-    starting = float(
-        os.environ.get(env_key)
-        or os.environ.get("BETTING_MAX_DEPOSIT_PER_STRATEGY", "100")
-    )
-    cur = conn.cursor()
-    cur.execute(
-        """
-        SELECT COALESCE(SUM(pnl_realised_usdc), 0.0)
-        FROM bet_ledger
-        WHERE COALESCE(bet_kind, 'real') = 'real'
-          AND strategy_label = ?
-          AND status = 'settled'
-        """,
-        (strategy_label,),
-    )
-    pnl = float(cur.fetchone()[0] or 0.0)
-    return max(0.0, starting + pnl)
+    """Strategy bankroll for Kelly sizing and per-bet caps (wallet-driven)."""
+    from src.integrations.polymarket.live_bankroll import get_strategy_bankroll
+    return get_strategy_bankroll(strategy_label, conn)
 
 
 def _is_scale_up_eligible(settled_count: int) -> bool:
@@ -426,25 +473,27 @@ def _is_scale_up_eligible(settled_count: int) -> bool:
 def get_strategy_breakdown() -> Dict[str, Any]:
     """Wave 5.8: per-strategy roll-up for /live-betting UI.
 
-    For each strategy in BETTING_LIVE_STRATEGIES (plus any strategy that has
-    ever placed a real bet, so retired strategies still show their history),
-    returns: bankroll start, open exposure, realised P&L, bet counts by status.
+    Bankroll is wallet-driven: portfolio_value × allocation_weight per strategy.
     """
     from config import BETTING_CONFIG
     from src.data.database import get_connection
+    from src.integrations.polymarket.live_bankroll import (
+        get_portfolio_value,
+        get_strategy_bankroll,
+        get_strategy_open_by_kickoff_day_utc,
+        get_strategy_open_cap_per_kickoff_day_usdc,
+        get_strategy_open_cap_usdc,
+        strategy_allocation_weight,
+        uses_kickoff_day_open_cap,
+    )
 
-    import os
     live_strategies = list(BETTING_CONFIG.get("live_strategies", []) or [])
     default_cap = float(BETTING_CONFIG.get("max_deposit_per_strategy_usdc", 0))
-
-    def _strategy_starting(label: str) -> float:
-        """Per-strategy starting bankroll: env override takes priority over global default."""
-        env_key = f"BETTING_MAX_DEPOSIT_{label.upper().replace('-', '_')}"
-        override = os.getenv(env_key)
-        return float(override) if override is not None else default_cap
+    kickoff_day_mode = uses_kickoff_day_open_cap()
 
     conn = get_connection()
     try:
+        portfolio = get_portfolio_value(conn)
         cur = conn.cursor()
         cur.execute(
             """
@@ -455,12 +504,20 @@ def get_strategy_breakdown() -> Dict[str, Any]:
             """
         )
         historical = [r["strategy_label"] for r in cur.fetchall()]
-
         all_labels = sorted(set(live_strategies) | set(historical))
 
         rows = []
         for label in all_labels:
-            strategy_cap = _strategy_starting(label)
+            enabled = label in live_strategies
+            weight = strategy_allocation_weight(label) if enabled else 0.0
+            if enabled:
+                current_bankroll = get_strategy_bankroll(label, conn)
+                open_cap = get_strategy_open_cap_usdc(label, conn)
+            else:
+                # Retired strategies hold no wallet slice; keep historical P&L only.
+                current_bankroll = 0.0
+                open_cap = 0.0
+
             cur.execute(
                 """
                 SELECT
@@ -482,15 +539,38 @@ def get_strategy_breakdown() -> Dict[str, Any]:
             n_wins = int(row["n_wins"] or 0)
             open_exposure = float(row["open_exposure"] or 0.0)
             realised_pnl = float(row["realised_pnl"] or 0.0)
+            open_by_kickoff_day: Dict[str, float] = {}
+            kickoff_day_cap = 0.0
+            if enabled and kickoff_day_mode:
+                open_by_kickoff_day = get_strategy_open_by_kickoff_day_utc(label, conn)
+                kickoff_day_cap = get_strategy_open_cap_per_kickoff_day_usdc(label, conn)
+                open_cap = kickoff_day_cap
+                if open_by_kickoff_day:
+                    cap_remaining = min(
+                        max(0.0, kickoff_day_cap - day_open)
+                        for day_open in open_by_kickoff_day.values()
+                    )
+                else:
+                    cap_remaining = kickoff_day_cap
+            else:
+                cap_remaining = max(0.0, open_cap - open_exposure) if open_cap > 0 else 0.0
+            basis = max(0.0, current_bankroll - realised_pnl) if enabled else 0.0
+            roi_pct = round(100.0 * realised_pnl / basis, 2) if enabled and basis > 0 else None
             rows.append({
                 "strategy_label": label,
-                "enabled": label in live_strategies,
-                "starting_bankroll_usdc": strategy_cap,
-                "current_bankroll_usdc": round(strategy_cap + realised_pnl, 2),
+                "enabled": enabled,
+                "retired": not enabled,
+                "allocation_weight": round(weight, 4) if enabled else None,
+                "portfolio_value_usdc": round(portfolio, 2),
+                "starting_bankroll_usdc": round(basis, 2),
+                "current_bankroll_usdc": round(current_bankroll, 2),
                 "open_exposure_usdc": round(open_exposure, 2),
-                "cap_remaining_usdc": round(max(0.0, strategy_cap - open_exposure), 2),
+                "open_cap_usdc": round(open_cap, 2),
+                "kickoff_day_cap_usdc": round(kickoff_day_cap, 2) if kickoff_day_mode and enabled else None,
+                "open_by_kickoff_day_utc": open_by_kickoff_day if kickoff_day_mode and enabled else {},
+                "cap_remaining_usdc": round(cap_remaining, 2),
                 "realised_pnl_usdc": round(realised_pnl, 2),
-                "roi_pct": round(100.0 * realised_pnl / strategy_cap, 2) if strategy_cap > 0 else 0.0,
+                "roi_pct": roi_pct,
                 "n_total": int(row["n_total"] or 0),
                 "n_settled": n_settled,
                 "n_open": int(row["n_open"] or 0),
@@ -502,8 +582,10 @@ def get_strategy_breakdown() -> Dict[str, Any]:
 
     return {
         "strategies": rows,
-        "max_deposit_per_strategy_usdc": strategy_cap,
+        "portfolio_value_usdc": round(portfolio, 2),
+        "max_deposit_per_strategy_usdc": default_cap,
         "live_strategies": live_strategies,
+        "kickoff_day_open_cap_mode": kickoff_day_mode,
     }
 
 

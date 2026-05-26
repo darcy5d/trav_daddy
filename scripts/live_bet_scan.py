@@ -56,55 +56,7 @@ from src.integrations.polymarket.paper_strategies import (
     get_enabled_strategies,
 )
 
-# Polymarket CLOB minimum order is $1 USDC; orders below this get rejected.
-POLYMARKET_MIN_ORDER_USDC = 1.0
-
-# Sizing fractions applied to the live bankroll.
-# Min: 0.5% — below this Kelly is too thin to bother placing.
-# Max: 25% — matches the kelly_fraction_cap in PaperStrategy so high-edge bets
-#   get proportionally larger stakes rather than all hitting a flat 10% cap.
-#   (Previously 10%, which made every bet with >10pp edge identical in size.)
-LIVE_MIN_STAKE_FRACTION = 0.005
-LIVE_MAX_STAKE_FRACTION = 0.25
-
-
-def live_scaled_kelly_stake(
-    model_prob: float,
-    market_price: float,
-    live_bankroll_usdc: float,
-    strategy: PaperStrategy,
-) -> float:
-    """Half-Kelly stake sized RELATIVE to the live bankroll.
-
-    Paper's `kelly_stake_usdc` uses ABSOLUTE dollar min/max ($5 / $100)
-    tuned for the $1000 paper bankroll. When live runs at a $100 bankroll
-    those translate to 5% / 25% of bankroll (via bankroll * 0.25), which
-    distorts the skip pattern: any bet paper sizes under $50 falls below
-    live's $5 min and gets silently dropped. That makes paper-vs-live
-    non-comparable.
-
-    This variant keeps kelly_mult and kelly_fraction_cap identical to
-    paper but replaces absolute min/max with bankroll-relative 0.5% / 10%,
-    producing exactly 1/10 the paper stake for the same model/market inputs
-    at the same relative bankroll. Every skip paper makes, live makes too.
-    Polymarket's $1 minimum order size is enforced as a floor on top.
-    """
-    if market_price <= 0 or market_price >= 1:
-        return 0.0
-    if model_prob <= 0 or model_prob >= 1:
-        return 0.0
-    f_star = (model_prob - market_price) / (1.0 - market_price)
-    f_star = max(0.0, min(f_star, 1.0))
-    f_capped = min(f_star * strategy.kelly_mult, strategy.kelly_fraction_cap)
-    raw_stake = f_capped * live_bankroll_usdc
-    scaled_min = max(
-        LIVE_MIN_STAKE_FRACTION * live_bankroll_usdc,
-        POLYMARKET_MIN_ORDER_USDC,
-    )
-    scaled_max = LIVE_MAX_STAKE_FRACTION * live_bankroll_usdc
-    if raw_stake < scaled_min:
-        return 0.0
-    return min(raw_stake, scaled_max)
+from src.integrations.polymarket.sizing import live_scaled_kelly_stake
 
 logging.basicConfig(
     level=logging.INFO,
@@ -239,38 +191,9 @@ def _strategy_has_any_live_bet_on_fixture(conn, strategy_label: str,
 # ---------- Live-bankroll helper ----------
 
 def get_live_strategy_bankroll(strategy_name: str, conn) -> float:
-    """Compute the current live bankroll for a strategy.
-
-    Starting bankroll: checks BETTING_MAX_DEPOSIT_<STRATEGY_NAME_UPPER> first
-    (per-strategy override), then falls back to BETTING_MAX_DEPOSIT_PER_STRATEGY.
-    Realised P&L on live (bet_kind='real') settled bets compounds on top.
-    Open positions are NOT subtracted (they don't reduce the Kelly basis;
-    the risk gate's per-strategy open-exposure cap enforces concentration).
-    """
-    import os
-    from config import BETTING_CONFIG
-
-    # Per-strategy override: e.g. BETTING_MAX_DEPOSIT_V3_MARG_3PP=146
-    env_key = f"BETTING_MAX_DEPOSIT_{strategy_name.upper().replace('-', '_')}"
-    override = os.getenv(env_key)
-    if override is not None:
-        starting = float(override)
-    else:
-        starting = float(BETTING_CONFIG.get("max_deposit_per_strategy_usdc", 100))
-    cur = conn.cursor()
-    cur.execute(
-        """
-        SELECT COALESCE(SUM(pnl_realised_usdc), 0.0) AS realised
-        FROM bet_ledger
-        WHERE bet_kind = 'real'
-          AND strategy_label = ?
-          AND status = 'settled'
-        """,
-        (strategy_name,),
-    )
-    row = cur.fetchone()
-    realised = float(row[0] if not isinstance(row, dict) else row.get("realised") or 0.0) if row else 0.0
-    return starting + realised
+    """Current live bankroll for Kelly sizing (wallet × strategy weight)."""
+    from src.integrations.polymarket.live_bankroll import get_strategy_bankroll
+    return get_strategy_bankroll(strategy_name, conn)
 
 
 def _sim_team1_win_prob(simulator, fixture: Dict[str, Any], conn) -> Optional[float]:
