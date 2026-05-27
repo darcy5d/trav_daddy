@@ -846,7 +846,7 @@ T5: Avg 1255 (59 teams)
 For full historical recalculation (2019-2025):
 
 ```bash
-cd /Users/darcy5d/Desktop/DD_AI_models/indias_dad
+cd "$(git rev-parse --show-toplevel)"
 python scripts/recalculate_tiered_elo.py
 ```
 

@@ -134,7 +134,7 @@ venv311/bin/python scripts/analyze_paper_vs_live.py
 
 **Start Flask App:**
 ```bash
-cd /Users/darcy5d/Desktop/DD_AI_models/indias_dad
+cd "$(git rev-parse --show-toplevel)"
 venv311/bin/python app/main.py
 ```
 
@@ -151,6 +151,6 @@ pkill -f "venv311/bin/python app/main.py"
 
 ### Environment
 - Python: 3.11 (via venv311)
-- Database: `/Users/darcy5d/Desktop/DD_AI_models/indias_dad/cricket.db`
+- Database: `<REPO_ROOT>/cricket.db` (override via `DATABASE_PATH` env var)
 - Config: `.env` file in project root
 - Mode: BETTING_MODE=AUTO (in .env)

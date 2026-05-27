@@ -2,7 +2,7 @@
 
 Generated: 2025-12-18 17:31:07
 
-Database: /Users/darcy5d/Desktop/DD_AI_models/indias_dad/cricket.db
+Database: `<REPO_ROOT>/cricket.db`
 
 ## Statistics
 - Team ELO updates: 22,618

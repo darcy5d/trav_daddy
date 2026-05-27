@@ -204,10 +204,14 @@ python scripts/bootstrap_polymarket_wallet.py --approve
 
 ## Daily startup (after reboot / Cursor restart)
 
-Three processes need to be running for live trading to operate:
+Three processes need to be running for live trading to operate. All commands
+below assume your shell is already in the repo root — either `cd` there once
+or set `REPO_ROOT` to the absolute path of your clone.
 
 ```bash
-cd /Users/darcy5d/Desktop/DD_AI_models/indias_dad
+# Anchor on the repo (works from anywhere)
+REPO_ROOT="$(git rev-parse --show-toplevel)"
+cd "$REPO_ROOT"
 
 # 1. Flask web app (port 5001) — dashboard + API
 FLASK_PORT=5001 venv311/bin/python -m flask --app app.main run --port 5001 --host 127.0.0.1
@@ -227,7 +231,8 @@ venv311/bin/python scripts/paper_bet_auto_post_toss.py \
 Run Flask and the daemon as background processes:
 
 ```bash
-cd /Users/darcy5d/Desktop/DD_AI_models/indias_dad
+REPO_ROOT="$(git rev-parse --show-toplevel)"
+cd "$REPO_ROOT"
 
 # Start daemon (backgrounded, logs to logs/paper_auto_post_toss.log)
 nohup venv311/bin/python scripts/paper_bet_auto_post_toss.py \
@@ -317,8 +322,11 @@ venv311/bin/python scripts/inplay_cashout_scan.py
 
 **Cron entry (every 3 minutes):**
 
+Cron does not expand `$REPO_ROOT`; substitute the absolute path of your repo
+clone for `<REPO_ROOT>` below before installing (`crontab -e`).
+
 ```cron
-*/3 * * * * cd /Users/darcy5d/Desktop/DD_AI_models/indias_dad && \
+*/3 * * * * cd <REPO_ROOT> && \
     venv311/bin/python scripts/inplay_cashout_scan.py >> logs/cashout_scan.log 2>&1
 ```
 

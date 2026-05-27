@@ -63,11 +63,13 @@ Daily reports persist to `data/paper_trading/daily_reports/*.json`.
 
 ### Automatic (cron)
 
-Recommended hourly cron entry (`crontab -e`):
+Recommended hourly cron entry (`crontab -e`). Cron does not expand shell
+variables — replace `<REPO_ROOT>` with the absolute path of your repo clone
+before installing.
 
 ```cron
 # Paper trading: scan + reconcile every hour
-0 * * * * cd /Users/darcy5d/Desktop/DD_AI_models/indias_dad && \
+0 * * * * cd <REPO_ROOT> && \
     venv311/bin/python scripts/paper_bet_daily.py --hours-ahead 96 \
     >> logs/paper_daily.log 2>&1
 ```
