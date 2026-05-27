@@ -1095,7 +1095,7 @@
             .replace(/Saved \$([\d.]+) vs full loss/,
                 '<span class="saved">Saved $1 vs full loss</span>')
             .replace(/Full loss( — ate \$[\d.]+)?/,
-                (m) => `<span class="loss">${m[0]}</span>`);
+                (m) => `<span class="loss">${m}</span>`);
     }
 
     function makeBetMetaHtml(b) {

@@ -17,7 +17,7 @@ from typing import Any, Dict, List, Optional, Tuple
 logger = logging.getLogger(__name__)
 
 GAMMA_MARKETS_BASE = "https://gamma-api.polymarket.com/markets"
-_GAMMA_FETCH_TIMEOUT_SEC = 4.0
+_GAMMA_FETCH_TIMEOUT_SEC = 10.0
 
 _GAMMA_CACHE: Dict[str, Tuple[float, Optional[Dict[str, Any]]]] = {}
 _FIXTURE_META_CACHE: Dict[str, Tuple[float, Dict[str, str]]] = {}
@@ -149,3 +149,11 @@ def fixture_meta_cache_get(fixture_key: str) -> Optional[Dict[str, str]]:
 def fixture_meta_cache_set(fixture_key: str, meta: Dict[str, str]) -> None:
     with _lock:
         _FIXTURE_META_CACHE[fixture_key] = (time.time(), meta)
+
+
+def fixture_meta_cache_clear() -> int:
+    """Clear all cached fixture meta entries. Returns number of entries cleared."""
+    with _lock:
+        n = len(_FIXTURE_META_CACHE)
+        _FIXTURE_META_CACHE.clear()
+        return n

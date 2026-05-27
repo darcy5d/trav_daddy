@@ -5259,7 +5259,15 @@ def _resolve_fixture_meta(
 
     t1, t2 = None, None
     if market_id:
-        t1, t2 = teams_from_gamma_market(gamma_by_market.get(str(market_id)))
+        market = gamma_by_market.get(str(market_id))
+        if market is None:
+            # Prefetch missed this fixture — fall back to single Gamma fetch.
+            # Cached by bet_display_enrichment so a second call costs nothing.
+            from src.integrations.polymarket.bet_display_enrichment import (
+                get_gamma_market_cached,
+            )
+            market = get_gamma_market_cached(str(market_id))
+        t1, t2 = teams_from_gamma_market(market)
 
     sl1, sl2 = _teams_from_side_labels(side_labels)
     if t1 is None and sl1:
@@ -5269,12 +5277,67 @@ def _resolve_fixture_meta(
     elif t2 is None and sl1 and t1 and sl1 != t1:
         t2 = sl1
 
+    svc = PolymarketComparisonService()
+
+    # Fallback to fixture-key abbreviations. Important: when one slot is
+    # already filled with a real team name, the fallback for the OTHER slot
+    # must be the abbreviation that does NOT match the filled slot —
+    # otherwise we end up with t1='Ivory Coast' and t2='IVO' (both the same
+    # team) and the actual opponent is lost.
     if not t1 or not t2:
         fb1, fb2 = _fixture_abbr_fallback(fixture_key)
-        t1 = t1 or fb1
-        t2 = t2 or fb2
 
-    svc = PolymarketComparisonService()
+        def _abbr_matches(abbr: str, full: str) -> bool:
+            """Match a 3-letter slug abbrev to a full team name.
+
+            label_matches_team requires real token overlap (>= 4 chars) so
+            it returns False for 3-letter slug abbrevs like 'ess' vs 'Essex'
+            or 'cmr' vs 'Cameroon'. We need a cheap heuristic that catches
+            those: case-insensitive prefix match on the normalised name,
+            then fall back to substring containment.
+            """
+            if not abbr or not full:
+                return False
+            a = abbr.lower().strip()
+            f = full.lower().strip()
+            if not a or not f:
+                return False
+            # Strip non-alphanumeric from both
+            import re
+            a_clean = re.sub(r"[^a-z0-9]", "", a)
+            f_clean = re.sub(r"[^a-z0-9]", "", f)
+            if not a_clean or not f_clean:
+                return False
+            if f_clean.startswith(a_clean):
+                return True
+            # Token-prefix match: any whitespace-split token in `full` starts with `abbr`?
+            for token in re.split(r"\s+", f):
+                tok_clean = re.sub(r"[^a-z0-9]", "", token)
+                if tok_clean and tok_clean.startswith(a_clean):
+                    return True
+            return False
+
+        def _pick_other(filled: str, a: str, b: str) -> str:
+            """Return whichever of (a, b) does NOT represent the already-filled team."""
+            a_match = (svc.label_matches_team(a, filled) if a else False) or _abbr_matches(a, filled)
+            b_match = (svc.label_matches_team(b, filled) if b else False) or _abbr_matches(b, filled)
+            if a_match and not b_match:
+                return b
+            if b_match and not a_match:
+                return a
+            # Genuinely ambiguous: prefer the one that isn't a literal equal.
+            if a and a != filled:
+                return a
+            return b
+
+        if t1 and not t2:
+            t2 = _pick_other(t1, fb1, fb2)
+        elif t2 and not t1:
+            t1 = _pick_other(t2, fb1, fb2)
+        else:
+            t1 = t1 or fb1
+            t2 = t2 or fb2
+
     for sl in side_labels:
         if svc.label_matches_team(t2, sl) and not svc.label_matches_team(t1, sl):
             t1, t2 = t2, t1
@@ -5282,7 +5345,14 @@ def _resolve_fixture_meta(
 
     display = f"{t1} v {t2}" if t1 and t2 else fixture_key
     meta = {"fixture_team1": t1, "fixture_team2": t2, "fixture_display": display}
-    fixture_meta_cache_set(fixture_key, meta)
+
+    # Don't cache results where either team is still a slug abbreviation —
+    # next request can retry Gamma and get the real names. Otherwise a single
+    # transient Gamma timeout poisons the cache for the next 6 hours.
+    import re
+    looks_like_slug = lambda x: bool(x) and bool(re.fullmatch(r"[A-Z]{2,4}", str(x)))
+    if not looks_like_slug(t1) and not looks_like_slug(t2):
+        fixture_meta_cache_set(fixture_key, meta)
     return meta
 
 
@@ -5463,21 +5533,38 @@ def _enrich_bets_with_sizing_context(bets: List[Dict[str, Any]]) -> None:
 
 
 def _gamma_market_ids_for_enrichment(bets: List[Dict[str, Any]]) -> List[str]:
-    """Market IDs that need Gamma prefetch — skip when DB already has outcome."""
+    """Market IDs that need Gamma prefetch.
+
+    Three things need Gamma data:
+      1. Cashout counterfactual P&L (needs settle_outcome) — covered when
+         settle_outcome is missing.
+      2. Open/proposed bet display — covered (no settle_outcome yet).
+      3. Settled-bet display fixture_team1/team2 names — covered when the
+         fixture_meta cache doesn't already have an entry. Otherwise the
+         slug-abbreviation fallback ("NPL", "SVN", "GBR") leaks into the UI
+         because the per-request get_gamma_market_cached fallback can race
+         against the 4s timeout under load.
+    """
+    from src.integrations.polymarket.bet_display_enrichment import (
+        fixture_meta_cache_get,
+    )
     ids: List[str] = []
     seen = set()
     for bet in bets:
         mid = str(bet.get("polymarket_market_id") or "").strip()
         if not mid or mid in seen:
             continue
-        # Fixture names: side_label pair often enough; still try Gamma when missing teams.
+        fixture_key = bet.get("fixture_key") or ""
+        has_cached_meta = fixture_meta_cache_get(fixture_key) is not None
+
         needs_gamma = True
         if bet.get("status") == "settled":
             if bet.get("cashout_triggered_at"):
-                # Cashout counterfactual needs Gamma only if outcome not stored.
-                needs_gamma = bet.get("settle_outcome") is None
+                needs_gamma = bet.get("settle_outcome") is None or not has_cached_meta
             else:
-                needs_gamma = False
+                # Naturally-settled bets still need Gamma for fixture team names
+                # when the meta cache hasn't been populated yet.
+                needs_gamma = not has_cached_meta
         if needs_gamma:
             seen.add(mid)
             ids.append(mid)
