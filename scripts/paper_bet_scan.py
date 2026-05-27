@@ -33,7 +33,7 @@ from typing import Any, Dict, List, Optional
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from src.data.database import get_connection, get_active_model_snapshot
+from src.data.database import get_connection, get_db_connection, get_active_model_snapshot
 from src.integrations.polymarket import PolymarketClient
 from src.integrations.polymarket.upcoming import (
     find_upcoming_cricket_events,
@@ -353,7 +353,7 @@ def scan_and_place_paper_bets(
         # Trade-off: we miss the rare case where a strategy that previously
         # had edge < threshold now has edge >= threshold due to market price
         # drift. That's a small price for a 5x-10x speedup on re-scans.
-        with get_connection() as conn:
+        with get_db_connection() as conn:
             all_eligible_have_bets = all(
                 _strategy_has_any_bet_on_fixture(conn, s.name, fix["fixture_key"])
                 for s in eligible
@@ -371,7 +371,7 @@ def scan_and_place_paper_bets(
 
         # Run sims - regardless of dry-run, we want to log what the model said.
         # Only the DB-write at the end is gated by dry_run.
-        with get_connection() as conn:
+        with get_db_connection() as conn:
             need_v2_now = needs_v2 or any(s.model_version == "consensus" for s in eligible)
             need_v3_now = needs_v3 or any(s.model_version == "consensus" for s in eligible)
             if need_v2_now:
@@ -505,7 +505,7 @@ def scan_and_place_paper_bets(
                 continue
 
             # Idempotent dedup
-            with get_connection() as conn:
+            with get_db_connection() as conn:
                 if _already_bet(conn, strat.name, fix["fixture_key"],
                                 ml.get("market_id") or "", side_label or ""):
                     summary["bets_skipped"].append({

@@ -38,7 +38,7 @@ def _utc_now_iso() -> str:
 
 
 def cancel_orphans(dry_run: bool = False) -> Dict[str, Any]:
-    from src.data.database import get_connection
+    from src.data.database import get_connection, get_db_connection
     from src.integrations.polymarket import PolymarketClient
     from src.integrations.polymarket.order_audit import record_order_cancelled
 
@@ -63,7 +63,7 @@ def cancel_orphans(dry_run: bool = False) -> Dict[str, Any]:
         "errors": [],
     }
 
-    with get_connection() as conn:
+    with get_db_connection() as conn:
         cur = conn.cursor()
         cur.execute(
             """

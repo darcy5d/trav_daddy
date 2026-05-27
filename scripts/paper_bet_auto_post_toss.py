@@ -52,7 +52,7 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from src.data.database import get_connection
+from src.data.database import get_connection, get_db_connection
 from src.integrations.polymarket import PolymarketClient
 from src.integrations.polymarket.order_audit import (
     record_order_cancelled,
@@ -116,7 +116,7 @@ def _write_status(state: Dict[str, Any]) -> None:
 
 def _has_post_toss_bet_for_fixture(fixture_key: str) -> bool:
     """Has ANY strategy already placed a post_toss bet for this fixture?"""
-    with get_connection() as conn:
+    with get_db_connection() as conn:
         cur = conn.cursor()
         cur.execute(
             """
@@ -134,7 +134,7 @@ def _has_post_toss_bet_for_fixture(fixture_key: str) -> bool:
 def _get_team_candidates(team_id: int, fmt: str, gender: str) -> List[Tuple[int, str]]:
     """DB players who've appeared for this team since 2023 - candidate pool
     for fuzzy-matching CREX names to player_ids."""
-    with get_connection() as conn:
+    with get_db_connection() as conn:
         cur = conn.cursor()
         cur.execute(
             """

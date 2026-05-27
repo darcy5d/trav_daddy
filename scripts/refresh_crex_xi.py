@@ -34,7 +34,7 @@ from typing import Any, Dict, List, Optional, Set
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from src.data.database import get_connection, init_crex_xi_cache
+from src.data.database import get_connection, get_db_connection, init_crex_xi_cache
 from src.integrations.polymarket import PolymarketClient
 from src.integrations.polymarket.upcoming import (
     find_upcoming_cricket_events,
@@ -262,7 +262,7 @@ def main() -> int:
     # Ensure table exists.
     init_crex_xi_cache()
 
-    with get_connection() as conn:
+    with get_db_connection() as conn:
         # Discover upcoming fixtures.
         logger.info(f"Discovering upcoming fixtures ({args.hours_ahead}h ahead)...")
         try:

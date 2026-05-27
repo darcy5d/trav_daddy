@@ -50,7 +50,7 @@ from typing import Any, Dict, List, Optional
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from src.data.database import get_connection, get_active_model_snapshot
+from src.data.database import get_connection, get_db_connection, get_active_model_snapshot
 from src.integrations.polymarket import PolymarketClient
 from src.integrations.polymarket.bet_placement import place_bet
 from src.integrations.polymarket.paper_inputs import (
@@ -245,7 +245,7 @@ def post_toss_live_scan(
             return xi[-5:]
         return []
 
-    with get_connection() as conn:
+    with get_db_connection() as conn:
         recent_t1_bat, recent_t1_bowl = get_recent_xi(conn, t1, fmt, gender)
         recent_t2_bat, recent_t2_bowl = get_recent_xi(conn, t2, fmt, gender)
         venue_id = get_default_venue_for_team(conn, t1, fmt, gender)
@@ -484,7 +484,7 @@ def post_toss_live_scan(
                 })
                 continue
 
-        with get_connection() as conn:
+        with get_db_connection() as conn:
             if _already_live_bet_for_phase(
                 conn, strat.name, fixture_key, ml.get("market_id") or "",
                 side_label or "", phase="post_toss",

@@ -35,7 +35,7 @@ from typing import Any, Dict
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from src.data.database import get_connection
+from src.data.database import get_connection, get_db_connection
 from src.integrations.polymarket.paper_strategies import (
     STRATEGIES,
     get_strategy_bankroll,
@@ -208,7 +208,7 @@ def main() -> int:
         logger.info("Reconcile step skipped")
 
     # Strategy summary table
-    with get_connection() as conn:
+    with get_db_connection() as conn:
         by_strat = _strategy_summary(conn)
     report["strategies"] = by_strat
     _print_summary_table(by_strat)

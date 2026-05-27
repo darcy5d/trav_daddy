@@ -25,7 +25,7 @@ from typing import Any, Dict, List
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from src.data.database import get_connection  # noqa: E402
+from src.data.database import get_connection, get_db_connection  # noqa: E402
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 logger = logging.getLogger(__name__)
@@ -43,7 +43,7 @@ def _safe_log(p: float, eps: float = 1e-6) -> float:
 
 def compute_rollup(target_date_iso: str) -> Dict[str, Any]:
     start, end = _day_window_iso(target_date_iso)
-    with get_connection() as conn:
+    with get_db_connection() as conn:
         cur = conn.cursor()
         cur.execute(
             """

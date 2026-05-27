@@ -39,7 +39,7 @@ from typing import Any, Dict, List, Optional
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from src.data.database import get_connection, get_active_model_snapshot
+from src.data.database import get_connection, get_db_connection, get_active_model_snapshot
 from src.integrations.polymarket import PolymarketClient
 from src.integrations.polymarket.bet_placement import place_bet, place_bet_twap
 from src.integrations.polymarket.upcoming import (
@@ -339,7 +339,7 @@ def scan_and_place_live_bets(
         summary["fixtures_in_window"] += 1
 
         # Same re-sim skip optimisation as paper scanner
-        with get_connection() as conn:
+        with get_db_connection() as conn:
             all_eligible_have_bets = all(
                 _strategy_has_any_live_bet_on_fixture(conn, s.name, fix["fixture_key"])
                 for s in eligible
@@ -355,7 +355,7 @@ def scan_and_place_live_bets(
             summary["fixtures_skipped_resim"] += 1
             continue
 
-        with get_connection() as conn:
+        with get_db_connection() as conn:
             need_v2_now = needs_v2 or any(s.model_version == "consensus" for s in eligible)
             need_v3_now = needs_v3 or any(s.model_version == "consensus" for s in eligible)
             if need_v2_now:
@@ -481,7 +481,7 @@ def scan_and_place_live_bets(
                 })
                 continue
 
-            with get_connection() as conn:
+            with get_db_connection() as conn:
                 if _already_bet_live(conn, strat.name, fix["fixture_key"],
                                      ml.get("market_id") or "", side_label or ""):
                     summary["bets_skipped"].append({

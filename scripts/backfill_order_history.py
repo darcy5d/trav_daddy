@@ -33,12 +33,12 @@ def _utc_now_iso() -> str:
 
 
 def backfill(dry_run: bool = False) -> dict:
-    from src.data.database import get_connection, init_order_history
+    from src.data.database import get_connection, get_db_connection, init_order_history
 
     init_order_history()
     summary = {"fok_rows": 0, "chunk_rows": 0, "cashout_rows": 0, "ghost_rows": 0}
 
-    with get_connection() as conn:
+    with get_db_connection() as conn:
         cur = conn.cursor()
 
         existing = {

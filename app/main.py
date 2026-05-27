@@ -46,7 +46,7 @@ from flask_cors import CORS
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from config import DATABASE_PATH, CRICSHEET_MATCHES_URL, FlaskConfig
-from src.data.database import get_connection
+from src.data.database import get_connection, get_db_connection
 from src.features.toss_stats import TossSimulator
 from src.api.crex_scraper import format_type_to_model_format
 from src.integrations.credentials import get_market_credentials_status
@@ -856,90 +856,87 @@ def team_explorer_apply_proposals():
     try:
         import shutil
 
-        conn = get_connection()
-        cur = conn.cursor()
-        cur.execute(
-            """
-            SELECT proposal_id, source_team_id, target_group_id, target_canonical_team_id
-            FROM team_merge_proposals
-            WHERE status = 'approved'
-            ORDER BY created_at
-            """
-        )
-        approved = [dict(r) for r in cur.fetchall()]
-        if not approved:
-            conn.close()
-            return jsonify({"success": True, "applied": 0, "message": "No approved proposals to apply"})
+        with get_db_connection() as conn:
+            cur = conn.cursor()
+            cur.execute(
+                """
+                SELECT proposal_id, source_team_id, target_group_id, target_canonical_team_id
+                FROM team_merge_proposals
+                WHERE status = 'approved'
+                ORDER BY created_at
+                """
+            )
+            approved = [dict(r) for r in cur.fetchall()]
+            if not approved:
+                return jsonify({"success": True, "applied": 0, "message": "No approved proposals to apply"})
 
-        # Backup before writes. The DB is large; the copy can take a minute.
-        ts = datetime.now().strftime('%Y%m%d_%H%M%S')
-        backup_path = Path(str(DATABASE_PATH)).with_suffix(f'.db.bak.{ts}')
-        logger.info(f"Backing up DB to {backup_path} before applying merges")
-        shutil.copy2(str(DATABASE_PATH), str(backup_path))
-        for suffix in ('-wal', '-shm'):
-            sidecar = Path(str(DATABASE_PATH) + suffix)
-            if sidecar.exists():
-                shutil.copy2(str(sidecar), str(backup_path) + suffix)
+            # Backup before writes. The DB is large; the copy can take a minute.
+            ts = datetime.now().strftime('%Y%m%d_%H%M%S')
+            backup_path = Path(str(DATABASE_PATH)).with_suffix(f'.db.bak.{ts}')
+            logger.info(f"Backing up DB to {backup_path} before applying merges")
+            shutil.copy2(str(DATABASE_PATH), str(backup_path))
+            for suffix in ('-wal', '-shm'):
+                sidecar = Path(str(DATABASE_PATH) + suffix)
+                if sidecar.exists():
+                    shutil.copy2(str(sidecar), str(backup_path) + suffix)
 
-        try:
-            cur.execute("BEGIN")
-            applied_ids = []
-            for p in approved:
-                source = p['source_team_id']
-                group = p['target_group_id']
-                canonical = p['target_canonical_team_id']
+            try:
+                cur.execute("BEGIN")
+                applied_ids = []
+                for p in approved:
+                    source = p['source_team_id']
+                    group = p['target_group_id']
+                    canonical = p['target_canonical_team_id']
 
-                # Re-point the source team into the target group.
-                cur.execute(
-                    """
-                    UPDATE teams
-                    SET franchise_id = ?, canonical_team_id = ?
-                    WHERE team_id = ?
-                    """,
-                    (group, canonical or source, source),
-                )
-                # If a canonical was specified, force every member of the group
-                # to point at it (handles the case where the group previously
-                # had a different canonical owner).
-                if canonical:
+                    # Re-point the source team into the target group.
                     cur.execute(
                         """
                         UPDATE teams
-                        SET canonical_team_id = ?
-                        WHERE franchise_id = ?
+                        SET franchise_id = ?, canonical_team_id = ?
+                        WHERE team_id = ?
                         """,
-                        (canonical, group),
+                        (group, canonical or source, source),
                     )
+                    # If a canonical was specified, force every member of the group
+                    # to point at it (handles the case where the group previously
+                    # had a different canonical owner).
+                    if canonical:
+                        cur.execute(
+                            """
+                            UPDATE teams
+                            SET canonical_team_id = ?
+                            WHERE franchise_id = ?
+                            """,
+                            (canonical, group),
+                        )
 
+                    cur.execute(
+                        """
+                        UPDATE team_merge_proposals
+                        SET status = 'applied', applied_at = CURRENT_TIMESTAMP
+                        WHERE proposal_id = ?
+                        """,
+                        (p['proposal_id'],),
+                    )
+                    applied_ids.append(p['proposal_id'])
+
+                # Clean up orphan team_groups rows (the auto-created self-group
+                # that the moved team used to belong to is now empty).
                 cur.execute(
                     """
-                    UPDATE team_merge_proposals
-                    SET status = 'applied', applied_at = CURRENT_TIMESTAMP
-                    WHERE proposal_id = ?
-                    """,
-                    (p['proposal_id'],),
+                    DELETE FROM team_groups
+                    WHERE group_id NOT IN (SELECT franchise_id FROM teams WHERE franchise_id IS NOT NULL)
+                      AND group_id NOT IN (SELECT group_id FROM team_external_ids WHERE group_id IS NOT NULL)
+                      AND group_id NOT IN (SELECT target_group_id FROM team_merge_proposals)
+                    """
                 )
-                applied_ids.append(p['proposal_id'])
+                orphans_removed = cur.rowcount
 
-            # Clean up orphan team_groups rows (the auto-created self-group
-            # that the moved team used to belong to is now empty).
-            cur.execute(
-                """
-                DELETE FROM team_groups
-                WHERE group_id NOT IN (SELECT franchise_id FROM teams WHERE franchise_id IS NOT NULL)
-                  AND group_id NOT IN (SELECT group_id FROM team_external_ids WHERE group_id IS NOT NULL)
-                  AND group_id NOT IN (SELECT target_group_id FROM team_merge_proposals)
-                """
-            )
-            orphans_removed = cur.rowcount
-
-            cur.execute("COMMIT")
-        except Exception as inner:
-            cur.execute("ROLLBACK")
-            conn.close()
-            logger.error(f"Apply rolled back: {inner}")
-            return jsonify({"success": False, "error": f"Apply rolled back: {inner}"}), 500
-        conn.close()
+                cur.execute("COMMIT")
+            except Exception as inner:
+                cur.execute("ROLLBACK")
+                logger.error(f"Apply rolled back: {inner}")
+                return jsonify({"success": False, "error": f"Apply rolled back: {inner}"}), 500
 
         # Invalidate runtime caches so the next predict request sees the new
         # mapping. ELO recalc is intentionally manual (multi-minute job).
@@ -4852,7 +4849,6 @@ def betting_wallet():
     """
     try:
         from src.integrations.polymarket import PolymarketClient
-        from src.data.database import get_connection
         from config import POLYMARKET_CONFIG
         from src.integrations.polymarket.live_bankroll import (
             get_max_deploy_usdc,
@@ -4866,7 +4862,7 @@ def betting_wallet():
                 'configured': False,
             })
         info = pm.get_usdc_balance()
-        with get_connection() as conn:
+        with get_db_connection() as conn:
             portfolio = get_portfolio_value(conn, pm=pm)
             max_deploy = get_max_deploy_usdc(conn, pm=pm)
         info['portfolio_value_usdc'] = round(portfolio, 2)
@@ -4895,7 +4891,6 @@ def betting_bankroll_history():
     ordered by settled_at.
     """
     try:
-        from src.data.database import get_connection
         from config import BETTING_CONFIG
         from src.integrations.polymarket.live_bankroll import get_strategy_bankroll
 
@@ -4923,7 +4918,9 @@ def betting_bankroll_history():
             v = os.getenv(key)
             return float(v) if v is not None else default_starting
 
-        with get_connection() as conn:
+        from collections import defaultdict
+
+        with get_db_connection() as conn:
             cur = conn.cursor()
             cur.execute(
                 """
@@ -4934,55 +4931,48 @@ def betting_bankroll_history():
                 """
             )
             rows = [dict(r) for r in cur.fetchall()]
-        
-        by_strategy = {}
-        
-        # Initialize all live-enabled strategies with starting point
-        for strat_name in live_strategies:
-            with get_connection() as conn:
+
+            by_strategy = {}
+            for strat_name in live_strategies:
                 base = _strat_starting(strat_name, conn)
-            by_strategy[strat_name] = [{
-                "timestamp": None,
-                "bankroll": round(base, 2),
-                "side_label": "starting",
-                "fixture_key": "",
-                "pnl": 0.0,
-            }]
-        
-        # Group rows by strategy
-        from collections import defaultdict
-        grouped = defaultdict(list)
-        for r in rows:
-            grouped[r["strategy_label"] or "(none)"].append(r)
-        
-        # Build cumulative bankroll timeline
-        for name, lst in grouped.items():
-            with get_connection() as conn:
-                base = _strat_starting(name, conn)
-            running = base
-            if name not in by_strategy:
-                by_strategy[name] = [{
+                by_strategy[strat_name] = [{
                     "timestamp": None,
                     "bankroll": round(base, 2),
                     "side_label": "starting",
                     "fixture_key": "",
                     "pnl": 0.0,
                 }]
-            for r in lst:
-                pnl = float(r.get("pnl_realised_usdc") or 0.0)
-                running += pnl
-                by_strategy[name].append({
-                    "timestamp": r["settled_at"],
-                    "bankroll": round(running, 2),
-                    "side_label": r.get("side_label"),
-                    "fixture_key": r.get("fixture_key"),
-                    "pnl": round(pnl, 2),
-                })
-        
-        starting_map = {}
-        with get_connection() as conn:
-            for name in list(set(live_strategies) | set(by_strategy.keys())):
-                starting_map[name] = round(_strat_starting(name, conn), 2)
+
+            grouped = defaultdict(list)
+            for r in rows:
+                grouped[r["strategy_label"] or "(none)"].append(r)
+
+            for name, lst in grouped.items():
+                base = _strat_starting(name, conn)
+                running = base
+                if name not in by_strategy:
+                    by_strategy[name] = [{
+                        "timestamp": None,
+                        "bankroll": round(base, 2),
+                        "side_label": "starting",
+                        "fixture_key": "",
+                        "pnl": 0.0,
+                    }]
+                for r in lst:
+                    pnl = float(r.get("pnl_realised_usdc") or 0.0)
+                    running += pnl
+                    by_strategy[name].append({
+                        "timestamp": r["settled_at"],
+                        "bankroll": round(running, 2),
+                        "side_label": r.get("side_label"),
+                        "fixture_key": r.get("fixture_key"),
+                        "pnl": round(pnl, 2),
+                    })
+
+            starting_map = {
+                name: round(_strat_starting(name, conn), 2)
+                for name in set(live_strategies) | set(by_strategy.keys())
+            }
         return jsonify({
             "success": True,
             "history": by_strategy,
@@ -5006,7 +4996,6 @@ def betting_portfolio():
     """
     try:
         from src.integrations.polymarket import PolymarketClient
-        from src.data.database import get_connection
         from config import POLYMARKET_CONFIG
 
         pm = PolymarketClient()
@@ -5022,7 +5011,7 @@ def betting_portfolio():
         wallet_cash = float(wallet.get('balance_usdc', 0.0))
 
         # 2. Open positions with their cost basis + token id
-        with get_connection() as conn:
+        with get_db_connection() as conn:
             cur = conn.cursor()
             cur.execute(
                 """
@@ -5108,10 +5097,9 @@ def betting_today():
     /live-betting view. Paper bets are shown at /paper-trades.
     """
     try:
-        from src.data.database import get_connection
         from datetime import datetime, timezone
         today_iso = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0).isoformat()
-        with get_connection() as conn:
+        with get_db_connection() as conn:
             cur = conn.cursor()
             cur.execute(
                 """
@@ -5517,9 +5505,8 @@ def _enrich_bets_with_sizing_context(bets: List[Dict[str, Any]]) -> None:
         if not strategy_label:
             return static_cap
         if strategy_label not in cap_by_strategy:
-            from src.data.database import get_connection
             from src.integrations.polymarket.live_bankroll import get_max_per_bet_usdc
-            with get_connection() as conn:
+            with get_db_connection() as conn:
                 cap_by_strategy[strategy_label] = get_max_per_bet_usdc(strategy_label, conn)
         return cap_by_strategy[strategy_label]
 
@@ -5602,7 +5589,6 @@ def betting_bets():
     /live-betting, analogous to /paper-trades but restricted to bet_kind='real'.
     """
     try:
-        from src.data.database import get_connection
         status = (request.args.get('status') or 'all').lower()
         strategy = request.args.get('strategy')
         try:
@@ -5633,7 +5619,7 @@ def betting_bets():
         """
         params.append(limit)
 
-        with get_connection() as conn:
+        with get_db_connection() as conn:
             cur = conn.cursor()
             cur.execute(sql, params)
             bets = [dict(r) for r in cur.fetchall()]
@@ -5651,8 +5637,7 @@ def betting_recent_settled():
     Wave 5.8: filters bet_kind='real'; paper bets surfaced at /paper-trades.
     """
     try:
-        from src.data.database import get_connection
-        with get_connection() as conn:
+        with get_db_connection() as conn:
             cur = conn.cursor()
             cur.execute(
                 """
@@ -5773,7 +5758,6 @@ def betting_upcoming():
         from src.integrations.polymarket.upcoming import (
             find_upcoming_cricket_events, attach_db_team_ids,
         )
-        from src.data.database import get_connection
         try:
             hours_ahead = float(request.args.get('hours_ahead') or 96.0)
         except ValueError:
@@ -5788,7 +5772,7 @@ def betting_upcoming():
         bet_counts: dict = {}
         if fixture_keys:
             placeholders = ",".join(["?"] * len(fixture_keys))
-            with get_connection() as conn:
+            with get_db_connection() as conn:
                 cur = conn.cursor()
                 cur.execute(
                     f"""
@@ -5948,8 +5932,7 @@ def betting_dashboard():
     """
     try:
         import math
-        from src.data.database import get_connection
-        with get_connection() as conn:
+        with get_db_connection() as conn:
             cur = conn.cursor()
             # Wave 5.8: restrict to real bets; paper bets live at /paper-trades.
             cur.execute(
@@ -6060,13 +6043,12 @@ def paper_trades_page():
 def paper_strategies():
     """Per-strategy summary: bankroll, P&L, win rate, bet counts."""
     try:
-        from src.data.database import get_connection
         from src.integrations.polymarket.paper_strategies import STRATEGIES
         starting_by_name = {s.name: s.starting_bankroll_usdc for s in STRATEGIES}
         descriptions = {s.name: s.description for s in STRATEGIES}
         enabled = {s.name: s.enabled for s in STRATEGIES}
 
-        with get_connection() as conn:
+        with get_db_connection() as conn:
             cur = conn.cursor()
             cur.execute(
                 """
@@ -6142,7 +6124,6 @@ def paper_bets():
     Query: ?status=open|settled|all (default 'all'), ?limit=50, ?strategy=name
     """
     try:
-        from src.data.database import get_connection
         status = (request.args.get('status') or 'all').lower()
         strategy = request.args.get('strategy')
         try:
@@ -6169,7 +6150,7 @@ def paper_bets():
         """
         params.append(limit)
 
-        with get_connection() as conn:
+        with get_db_connection() as conn:
             cur = conn.cursor()
             cur.execute(sql, params)
             bets = [dict(r) for r in cur.fetchall()]
@@ -6191,11 +6172,10 @@ def paper_bankroll_history():
     canonical bankroll over time.
     """
     try:
-        from src.data.database import get_connection
         from src.integrations.polymarket.paper_strategies import STRATEGIES
         starting = {s.name: s.starting_bankroll_usdc for s in STRATEGIES}
 
-        with get_connection() as conn:
+        with get_db_connection() as conn:
             cur = conn.cursor()
             cur.execute(
                 """
@@ -6371,7 +6351,6 @@ def paper_resolve_xi():
            names: [str, str, ...]}
     """
     try:
-        from src.data.database import get_connection
         from src.utils.name_matcher import match_abbreviated_name
         payload = request.get_json(silent=True) or {}
         team_id = int(payload.get("team_id") or 0)
@@ -6381,7 +6360,7 @@ def paper_resolve_xi():
         if not team_id or not names:
             return jsonify({"success": False, "error": "team_id and names required"}), 400
 
-        with get_connection() as conn:
+        with get_db_connection() as conn:
             cur = conn.cursor()
             cur.execute(
                 """
@@ -6717,7 +6696,6 @@ def betting_scale_up():
     """
     try:
         from src.integrations.polymarket.risk_gate import write_env_var, _is_scale_up_eligible
-        from src.data.database import get_connection
         from config import BETTING_CONFIG
         payload = request.get_json(silent=True) or {}
         target = str(payload.get('target', '500'))
@@ -6730,7 +6708,7 @@ def betting_scale_up():
 
         # Recompute eligibility live to avoid stale UI.
         # Wave 5.8: scale-up is based on REAL settled bets only.
-        with get_connection() as conn:
+        with get_db_connection() as conn:
             cur = conn.cursor()
             cur.execute(
                 """

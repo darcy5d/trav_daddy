@@ -29,7 +29,7 @@ from typing import List, Optional
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from src.data.database import get_connection, init_franchise_tables  # noqa: E402
+from src.data.database import get_connection, get_db_connection, init_franchise_tables  # noqa: E402
 
 logging.basicConfig(
     level=logging.INFO,
@@ -293,7 +293,7 @@ def main() -> int:
 
     init_franchise_tables()
 
-    with get_connection() as conn:
+    with get_db_connection() as conn:
         any_changed = False
         for u in UNIFICATIONS:
             if apply_unification(conn, u, dry_run=args.dry_run):

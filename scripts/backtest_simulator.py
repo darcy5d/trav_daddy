@@ -33,7 +33,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from src.data.database import get_connection, init_franchise_tables  # noqa: E402
+from src.data.database import get_connection, get_db_connection, init_franchise_tables  # noqa: E402
 from src.models.backtest import (  # noqa: E402
     BacktestRow,
     compute_metrics,
@@ -102,7 +102,7 @@ def main() -> int:
 
     init_franchise_tables()
 
-    with get_connection() as conn:
+    with get_db_connection() as conn:
         matches = load_holdout_matches(
             conn,
             formats=(args.format,),
@@ -141,7 +141,7 @@ def main() -> int:
     skipped_incomplete = 0
     start = time.time()
 
-    with get_connection() as conn:
+    with get_db_connection() as conn:
         for i, m in enumerate(matches, 1):
             try:
                 row = simulate_match(

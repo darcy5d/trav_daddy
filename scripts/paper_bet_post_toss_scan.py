@@ -41,7 +41,7 @@ from typing import Any, Dict, List, Optional
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from src.data.database import get_connection
+from src.data.database import get_connection, get_db_connection
 from src.integrations.polymarket import PolymarketClient
 from src.integrations.polymarket.upcoming import (
     find_upcoming_cricket_events, attach_db_team_ids,
@@ -164,7 +164,7 @@ def post_toss_scan(
             return xi[-5:]    # last 5 of whatever we have
         return []
 
-    with get_connection() as conn:
+    with get_db_connection() as conn:
         # Always pull recent-XI as a fallback (cheap, avoids the "10/11 names
         # matched -> insufficient lineup" trap when CREX returned 11 but our
         # name resolver only resolved 10 of them).
@@ -337,7 +337,7 @@ def post_toss_scan(
             continue
 
         # Place
-        with get_connection() as conn:
+        with get_db_connection() as conn:
             if _already_bet(conn, strat.name, fixture_key, ml.get("market_id") or "",
                             side_label or "", phase="post_toss"):
                 summary["bets_skipped"].append({"strategy": strat.name, "reason": "already-placed-this-phase"})

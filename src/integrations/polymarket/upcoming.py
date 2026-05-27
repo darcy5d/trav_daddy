@@ -460,9 +460,9 @@ def attach_db_team_ids(events: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     Format/gender for each fixture is taken from TOURNAMENT_PREFIX_MAP entries
     on the fixture itself.
     """
-    from src.data.database import get_connection
+    from src.data.database import get_connection, get_db_connection
     out = []
-    with get_connection() as conn:
+    with get_db_connection() as conn:
         for ev in events:
             fmt = ev.get("format", "T20")
             gender = ev.get("gender", "male")

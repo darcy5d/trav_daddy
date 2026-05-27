@@ -39,7 +39,7 @@ from typing import Dict, List, Tuple
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from config import DATABASE_PATH  # noqa: E402
-from src.data.database import get_connection, init_franchise_tables  # noqa: E402
+from src.data.database import get_connection, get_db_connection, init_franchise_tables  # noqa: E402
 
 logging.basicConfig(
     level=logging.INFO,
@@ -240,7 +240,7 @@ def main() -> int:
 
     init_franchise_tables()
 
-    with get_connection() as conn:
+    with get_db_connection() as conn:
         team_dupes, player_dupes = count_duplicate_history_rows(conn)
         logger.info(
             f"Pre-state: {team_dupes} (team_id, match_id) duplicate keys in team_elo_history, "
@@ -251,7 +251,7 @@ def main() -> int:
 
     if args.dry_run:
         logger.info("Dry run: skipping backup + recalc")
-        with get_connection() as conn:
+        with get_db_connection() as conn:
             print_team_diff(before_teams, before_teams)
             print_player_diff(before_players, before_players)
         return 0
@@ -269,7 +269,7 @@ def main() -> int:
     logger.info(f"Recalc complete in {time.time() - t0:.1f}s")
 
     # Now that history is clean, install the structural guard.
-    with get_connection() as conn:
+    with get_db_connection() as conn:
         add_unique_indexes(conn)
         team_dupes_after, player_dupes_after = count_duplicate_history_rows(conn)
         logger.info(

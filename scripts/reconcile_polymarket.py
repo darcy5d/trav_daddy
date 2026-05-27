@@ -961,7 +961,7 @@ def reconcile(
     fix_ghosts: bool = False,
     output_path: Optional[Path] = None,
 ) -> Dict[str, Any]:
-    from src.data.database import get_connection, init_cashout_columns
+    from src.data.database import get_connection, get_db_connection, init_cashout_columns
     from src.integrations.polymarket import PolymarketClient
 
     init_cashout_columns()
@@ -981,7 +981,7 @@ def reconcile(
     chunk_order_ids: set = set()
     known_order_ids: set = set()
 
-    with get_connection() as conn:
+    with get_db_connection() as conn:
         if fix_ghosts:
             purged_ghosts = _purge_reconcile_ghosts(conn, dry_run=dry_run)
 
@@ -996,7 +996,7 @@ def reconcile(
         trades, known_order_ids=known_order_ids,
     )
 
-    with get_connection() as conn:
+    with get_db_connection() as conn:
         if fix_ghosts:
             logger.info("Linking orphan DB rows to TAKER trades...")
             orphan_links = _link_orphan_bets(
@@ -1012,7 +1012,7 @@ def reconcile(
 
     try:
         from src.integrations.polymarket.order_audit import lookup_bet_for_order
-        with get_connection() as _conn_lookup:
+        with get_db_connection() as _conn_lookup:
             # Snapshot a closure that holds its own connection. Sized small so
             # repeated calls inside _match_bets_to_trades are cheap.
             _conn_lookup_handle = _conn_lookup
@@ -1067,7 +1067,7 @@ def reconcile(
     if fix_ghosts:
         if ghosts:
             logger.info(f"{'[DRY-RUN] ' if dry_run else ''}Fixing {len(ghosts)} ghost bet(s)...")
-            with get_connection() as conn:
+            with get_db_connection() as conn:
                 summary["ghost_fixes"] = _fix_ghosts(
                     conn, ghosts, token_fixture_map, sell_attribution, dry_run=dry_run,
                 )

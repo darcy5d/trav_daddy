@@ -27,7 +27,7 @@ def backfill(
     fixture_key: str | None = None,
     run_reconcile: bool = False,
 ) -> dict:
-    from src.data.database import get_connection
+    from src.data.database import get_connection, get_db_connection
     from src.integrations.polymarket import PolymarketClient
     from src.integrations.polymarket.clob_fills import (
         fetch_all_clob_trades,
@@ -41,7 +41,7 @@ def backfill(
     logger.info("Fetching CLOB trades...")
     trades = fetch_all_clob_trades(pm)
 
-    with get_connection() as conn:
+    with get_db_connection() as conn:
         cur = conn.cursor()
         cur.execute(
             "SELECT polymarket_order_id FROM order_chunks WHERE polymarket_order_id IS NOT NULL"
@@ -57,7 +57,7 @@ def backfill(
 
     summary = {"chunks_updated": 0, "plans_finalized": [], "settle": None}
 
-    with get_connection() as conn:
+    with get_db_connection() as conn:
         cur = conn.cursor()
         if fixture_key:
             cur.execute(

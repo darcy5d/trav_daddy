@@ -5,13 +5,13 @@ import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from src.data.database import get_connection
+from src.data.database import get_connection, get_db_connection
 from datetime import datetime, timezone
 import json
 
 def analyze_divergence():
     """Compare paper vs live betting patterns."""
-    with get_connection() as conn:
+    with get_db_connection() as conn:
         cur = conn.cursor()
         
         # Find the timestamp of the first live bet

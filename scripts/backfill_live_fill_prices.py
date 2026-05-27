@@ -90,7 +90,7 @@ def _compute_fill_from_trade(trade: Dict[str, Any]) -> Optional[Dict[str, float]
 
 
 def backfill(dry_run: bool = False, run_reconcile: bool = False) -> Dict[str, Any]:
-    from src.data.database import get_connection
+    from src.data.database import get_connection, get_db_connection
     from src.integrations.polymarket import PolymarketClient
 
     pm = PolymarketClient()
@@ -108,7 +108,7 @@ def backfill(dry_run: bool = False, run_reconcile: bool = False) -> Dict[str, An
     trades_by_order = _fetch_all_recent_trades(sdk)
     logger.info(f"  loaded {len(trades_by_order)} trade records")
 
-    with get_connection() as conn:
+    with get_db_connection() as conn:
         candidates = _fetch_candidate_bets(conn)
     summary["n_candidates"] = len(candidates)
     logger.info(f"Found {len(candidates)} bets with fill_price=NULL to backfill")
@@ -149,7 +149,7 @@ def backfill(dry_run: bool = False, run_reconcile: bool = False) -> Dict[str, An
             )
             continue
 
-        with get_connection() as conn:
+        with get_db_connection() as conn:
             conn.execute(
                 """
                 UPDATE bet_ledger
@@ -172,7 +172,7 @@ def backfill(dry_run: bool = False, run_reconcile: bool = False) -> Dict[str, An
         # Reset any previously-settled rows back to 'filled' so reconcile
         # picks them up again and recomputes pnl with the fresh fill_price.
         # This is safe because settle_outcome + pnl are overwritten.
-        with get_connection() as conn:
+        with get_db_connection() as conn:
             conn.execute(
                 """
                 UPDATE bet_ledger

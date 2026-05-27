@@ -78,13 +78,13 @@ def _recompute(bet: Dict[str, Any], fee_pct: float) -> Dict[str, Any]:
 
 
 def backfill(dry_run: bool = False) -> Dict[str, Any]:
-    from src.data.database import get_connection
+    from src.data.database import get_connection, get_db_connection
     from src.integrations.odds.polymarket_compare import POLYMARKET_TAKER_FEE
 
     summary: Dict[str, Any] = {"n_examined": 0, "n_updated": 0, "rows": []}
     now = _utc_now_iso()
 
-    with get_connection() as conn:
+    with get_db_connection() as conn:
         rows = conn.execute(
             """
             SELECT bl.bet_id, bl.strategy_label, bl.side_label, bl.fixture_key,

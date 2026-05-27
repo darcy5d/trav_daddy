@@ -15,7 +15,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from src.data.database import get_connection
+from src.data.database import get_connection, get_db_connection
 
 
 def get_recent_xi(conn, team_id: int, fmt: str, gender: str, n_recent_matches: int = 3):
@@ -148,7 +148,7 @@ def run_match(simulator_v2, simulator_v3, fixture):
     market_t2 = fixture["market_t2_pct"]
     n_sims = fixture.get("n_sims", 300)
 
-    with get_connection() as conn:
+    with get_db_connection() as conn:
         t1_bat, t1_bowl = get_recent_xi(conn, t1, fmt, gen)
         t2_bat, t2_bowl = get_recent_xi(conn, t2, fmt, gen)
         venue_id = get_venue_for_team(conn, t1, fmt, gen)

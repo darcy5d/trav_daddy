@@ -533,7 +533,7 @@ def main() -> int:
     args = parser.parse_args()
 
     from src.models.vectorized_nn_sim_v2 import V2Simulator, V2SimulatorConfig
-    from src.data.database import get_connection
+    from src.data.database import get_connection, get_db_connection
     from src.models.backtest import load_holdout_matches
 
     out_dir = Path(args.output_dir)
@@ -545,7 +545,7 @@ def main() -> int:
     sim._ensure_model_loaded()
 
     # Pick recent matches
-    with get_connection() as conn:
+    with get_db_connection() as conn:
         matches = load_holdout_matches(
             conn,
             formats=(args.format,),
@@ -561,7 +561,7 @@ def main() -> int:
 
     # Walk balls + run model
     all_records: List[Dict] = []
-    with get_connection() as conn:
+    with get_db_connection() as conn:
         for m in matches:
             recs = trace_match_balls(sim, conn, m.match_id)
             all_records.extend(recs)

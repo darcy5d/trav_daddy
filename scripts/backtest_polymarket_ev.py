@@ -57,7 +57,7 @@ def _lookback_sort_key(label: str) -> float:
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from src.data.database import get_connection, init_franchise_tables  # noqa: E402
+from src.data.database import get_connection, get_db_connection, init_franchise_tables  # noqa: E402
 from src.integrations.polymarket import PolymarketClient  # noqa: E402
 from src.integrations.polymarket.historical import (  # noqa: E402
     fetch_pre_match_prices,
@@ -309,7 +309,7 @@ def main() -> int:
     output_csv.parent.mkdir(parents=True, exist_ok=True)
     output_md.parent.mkdir(parents=True, exist_ok=True)
 
-    with get_connection() as conn:
+    with get_db_connection() as conn:
         matches = load_holdout_matches(
             conn,
             formats=(args.format,),
@@ -346,7 +346,7 @@ def main() -> int:
     else:
         v3_toss_modes = ["uncertain"]  # V2 doesn't take toss as a feature
 
-    with get_connection() as conn:
+    with get_db_connection() as conn:
         for i, m in enumerate(matches, 1):
             t1 = _team_lineup_from_stats(conn, m.match_id, m.team1_id)
             t2 = _team_lineup_from_stats(conn, m.match_id, m.team2_id)
