@@ -539,6 +539,7 @@ def init_cashout_columns(db_path: Optional[Path] = None) -> bool:
         ("cashout_pnl_usdc",      "REAL"),
         ("cashout_threshold_used","REAL"),
         ("cashout_order_id",      "TEXT"),
+        ("cashout_reason",        "TEXT"),
     ]
 
     schema_path = Path(__file__).parent / "schema_v8_cashout.sql"

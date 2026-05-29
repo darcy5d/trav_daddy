@@ -86,6 +86,16 @@ BETTING_CONFIG = {
     "max_loss_per_day_fraction": float(os.getenv("BETTING_MAX_LOSS_PER_DAY_FRACTION", "0")),
     "max_per_day_usdc": float(os.getenv("BETTING_MAX_PER_DAY", "50")),
     "max_loss_per_day_usdc": float(os.getenv("BETTING_MAX_LOSS_PER_DAY", "30")),
+    # Wave 5.11: guarded in-play stop-loss. Ships OFF; only the gated,
+    # deep-floor config survived the 35-day winners-vs-losers backtest split
+    # (floor 0.20 + 2nd-innings gate; ungated/shallow floors and re-entry lose
+    # money). When enabled, the cashout scanner SELLs a position whose price
+    # has fallen to stop_loss_floor after stop_loss_gate_min minutes from
+    # kickoff. No re-entry.
+    "stop_loss_enabled": os.getenv("BETTING_STOP_LOSS_ENABLED", "0").strip()
+    in ("1", "true", "True", "TRUE"),
+    "stop_loss_floor": float(os.getenv("BETTING_STOP_LOSS_FLOOR", "0.20")),
+    "stop_loss_gate_min": float(os.getenv("BETTING_STOP_LOSS_GATE_MIN", "105")),
     "auto_min_edge_pp": float(os.getenv("BETTING_AUTO_MIN_EDGE", "5.0")),
     # Comma-separated list (e.g. "moneyline,most_sixes"). Default to moneyline only;
     # the Wave 5 Phase 5 EV report should expand this list per-tournament.

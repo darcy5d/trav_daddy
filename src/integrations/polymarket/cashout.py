@@ -30,10 +30,19 @@ The cashed-out bet_ledger row is immediately marked status='settled' so the
 reconciler skips it.  It can be distinguished from a naturally-settled row by:
     WHERE cashout_triggered_at IS NOT NULL
 
+Wave 5.11 — guarded stop-loss (loss mitigation):
+    A separate SELL trigger fires when a losing position's price has *fallen*
+    to a floor, but only after a 2nd-innings time-gate (minutes from kickoff).
+    Ships OFF; only this gated, deep-floor config was net-positive in the
+    35-day backtest (no re-entry). Layered on top of the profit-take so the
+    scanner evaluates both per bet.
+
 Public API:
     tiered_cashout_threshold(fill_price) -> Optional[float]
     evaluate_cashout(bet_row, current_price, threshold) -> bool
-    execute_cashout(bet_row, cashout_price, conn, poly_client, dry_run) -> dict
+    stop_loss_config() -> dict
+    evaluate_stop_loss(bet_row, current_price, cfg, now) -> bool
+    execute_cashout(bet_row, cashout_price, conn, poly_client, dry_run, reason) -> dict
     scan_for_cashouts(conn, poly_client, dry_run) -> dict
 """
 
@@ -52,6 +61,19 @@ logger = logging.getLogger(__name__)
 
 def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _parse_iso_ts(iso: Optional[str]) -> Optional[datetime]:
+    """Parse an ISO8601 string to an aware UTC datetime; None on failure."""
+    if not iso:
+        return None
+    try:
+        d = datetime.fromisoformat(str(iso).replace("Z", "+00:00"))
+        if d.tzinfo is None:
+            d = d.replace(tzinfo=timezone.utc)
+        return d
+    except (ValueError, AttributeError):
+        return None
 
 
 # ---------------------------------------------------------------------------
@@ -115,6 +137,62 @@ def evaluate_cashout(
     return (current_price / fill_price) >= threshold
 
 
+# ---------------------------------------------------------------------------
+# Guarded stop-loss (Wave 5.11)
+# ---------------------------------------------------------------------------
+
+def stop_loss_config() -> Dict[str, Any]:
+    """Read the live stop-loss settings from BETTING_CONFIG.
+
+    Returns a dict with: enabled (bool), floor (float), gate_min (float).
+    Imported lazily so this module stays importable without config side
+    effects and so .env changes are picked up per process.
+    """
+    try:
+        from config import BETTING_CONFIG
+    except Exception:  # pragma: no cover - config always present in practice
+        return {"enabled": False, "floor": 0.20, "gate_min": 105.0}
+    return {
+        "enabled": bool(BETTING_CONFIG.get("stop_loss_enabled", False)),
+        "floor": float(BETTING_CONFIG.get("stop_loss_floor", 0.20)),
+        "gate_min": float(BETTING_CONFIG.get("stop_loss_gate_min", 105.0)),
+    }
+
+
+def evaluate_stop_loss(
+    bet_row: sqlite3.Row,
+    current_price: float,
+    cfg: Dict[str, Any],
+    now: Optional[datetime] = None,
+) -> bool:
+    """Return True if the position should be stopped out at current_price.
+
+    Guarded: fires only when the stop-loss is enabled, the price has fallen
+    to/through the floor, and at least gate_min minutes have elapsed since
+    kickoff (2nd-innings proxy). A missing/unparseable kickoff_at means we
+    cannot place the time-gate, so we hold — matching the backtest fallback.
+
+    Args:
+        bet_row:       A bet_ledger row (sqlite3.Row or dict-like).
+        current_price: Current CLOB midpoint for the outcome token [0, 1].
+        cfg:           Output of stop_loss_config().
+        now:           Override for the current time (tests); defaults to UTC now.
+    """
+    if not cfg.get("enabled"):
+        return False
+    if current_price <= 0 or current_price >= 1.0:
+        return False
+    if current_price > cfg["floor"]:
+        return False
+
+    kickoff = _parse_iso_ts(bet_row["kickoff_at"] if "kickoff_at" in bet_row.keys() else None)
+    if kickoff is None:
+        return False  # no anchor for the time-gate -> hold
+    now = now or datetime.now(timezone.utc)
+    minutes_since_kickoff = (now - kickoff).total_seconds() / 60.0
+    return minutes_since_kickoff >= cfg["gate_min"]
+
+
 def _compute_cashout_pnl(
     fill_price: float,
     fill_size_usdc: float,
@@ -137,15 +215,21 @@ def execute_cashout(
     conn: sqlite3.Connection,
     poly_client: Optional[PolymarketClient] = None,
     dry_run: bool = False,
+    reason: str = "profit",
 ) -> Dict[str, Any]:
     """Sell the position at cashout_price and update bet_ledger.
 
     For paper bets (bet_kind='paper') or dry_run=True the CLOB call is
     skipped and only the DB is updated.
 
+    Args:
+        reason: 'profit' for a tiered profit-take, 'stop' for a guarded
+                stop-loss. Recorded in bet_ledger.cashout_reason. For a stop
+                the return_ratio is < 1 and cashout_pnl is negative-but-mitigated.
+
     Returns a result dict with keys:
         success, bet_id, cashout_price, cashout_pnl, return_ratio,
-        is_simulated, order_response (None if simulated)
+        is_simulated, reason, order_response (None if simulated)
     """
     bet_id = bet_row["bet_id"]
     fill_price = bet_row["fill_price"]
@@ -234,7 +318,7 @@ def execute_cashout(
                     bet_id=bet_id,
                     token_id=token_id,
                     side="SELL",
-                    order_kind="cashout",
+                    order_kind="cashout" if reason == "profit" else "stop_loss",
                     limit_price=cashout_price,
                     size_usdc=cashout_price * shares_to_sell,
                     size_shares=shares_to_sell,
@@ -263,13 +347,14 @@ def execute_cashout(
             cashout_price          = ?,
             cashout_pnl_usdc       = ?,
             cashout_threshold_used = ?,
-            cashout_order_id       = ?
+            cashout_order_id       = ?,
+            cashout_reason         = ?
         WHERE bet_id = ?
         """,
         (
             now, cashout_pnl, bankroll_after,
             now, cashout_price, cashout_pnl, return_ratio,
-            cashout_oid,
+            cashout_oid, reason,
             bet_id,
         ),
     )
@@ -282,6 +367,7 @@ def execute_cashout(
         "cashout_pnl": cashout_pnl,
         "return_ratio": return_ratio,
         "is_simulated": is_simulated,
+        "reason": reason,
         "order_response": order_response,
     }
 
@@ -295,14 +381,18 @@ def scan_for_cashouts(
     poly_client: Optional[PolymarketClient] = None,
     dry_run: bool = False,
 ) -> Dict[str, Any]:
-    """Check all filled bets for cashout eligibility and execute if met.
+    """Check all filled bets for cashout / stop-loss eligibility and execute.
 
     For each bet_ledger row with status='filled':
-      1. Determine the cashout threshold via tiered_cashout_threshold(fill_price).
-         Buckets where holding is optimal (coin flip / favourites) return None
-         and are skipped automatically.
-      2. Fetch the current CLOB midpoint for the outcome token.
-      3. If evaluate_cashout() is True: call execute_cashout().
+      1. Profit-take: threshold via tiered_cashout_threshold(fill_price).
+         Buckets where holding is optimal (coin flip / favourites) return None.
+      2. Fetch the current CLOB midpoint for the outcome token (needed for
+         either trigger). Skipped only when profit-take holds AND stop-loss
+         is disabled.
+      3. Profit-take fires if evaluate_cashout() is True (reason='profit').
+         Otherwise, if the guarded stop-loss is enabled and evaluate_stop_loss()
+         is True, the position is stopped out (reason='stop'). The stop-loss is
+         evaluated across ALL price buckets, including favourites that collapse.
 
     Args:
         conn:        Open SQLite connection (created if None).
@@ -314,6 +404,7 @@ def scan_for_cashouts(
             "n_checked":   int,
             "n_triggered": int,
             "n_executed":  int,
+            "n_stops":     int,   # subset of n_executed that were stop-losses
             "cashouts":    [result_dict, ...],
             "errors":      [(bet_id, message), ...],
         }
@@ -344,20 +435,27 @@ def scan_for_cashouts(
     n_checked = len(rows)
     n_triggered = 0
     n_executed = 0
+    n_stops = 0
     cashouts: list = []
     errors: list = []
+
+    stop_cfg = stop_loss_config()
+    stop_enabled = bool(stop_cfg.get("enabled"))
+    now = datetime.now(timezone.utc)
 
     for bet in rows:
         bet_id = bet["bet_id"]
         token_id = bet["polymarket_token_id"]
         fill_price = float(bet["fill_price"])
 
-        # Tiered threshold — returns None for coin-flip / favourite buckets
+        # Tiered profit-take threshold — None for coin-flip / favourite buckets.
         threshold = tiered_cashout_threshold(fill_price)
-        if threshold is None:
+
+        # Nothing to do for this bet if profit-take holds AND stop-loss is off.
+        if threshold is None and not stop_enabled:
             continue
 
-        # Fetch current price
+        # Fetch current price (needed for either trigger).
         try:
             mid_resp = poly_client.get_clob_midpoint(token_id)
             current_price_raw = (
@@ -372,12 +470,20 @@ def scan_for_cashouts(
             errors.append((bet_id, f"midpoint fetch failed: {exc}"))
             continue
 
-        # Evaluate
-        if not evaluate_cashout(bet, current_price, threshold):
-            fill_price = bet["fill_price"]
+        # Decide which trigger (if any) fires. Profit-take takes precedence;
+        # the two are mutually exclusive by price (a ratio >= ~1.2 vs a price
+        # at/under the floor) so ordering is safe either way.
+        reason: Optional[str] = None
+        if threshold is not None and evaluate_cashout(bet, current_price, threshold):
+            reason = "profit"
+        elif stop_enabled and evaluate_stop_loss(bet, current_price, stop_cfg, now):
+            reason = "stop"
+
+        if reason is None:
             ratio = current_price / fill_price if fill_price else 0
             logger.debug(
-                f"  bet_id={bet_id}: ratio={ratio:.3f}x < threshold={threshold}x — hold"
+                f"  bet_id={bet_id}: ratio={ratio:.3f}x — hold "
+                f"(profit thr={threshold}, stop floor={stop_cfg['floor'] if stop_enabled else 'off'})"
             )
             continue
 
@@ -390,15 +496,19 @@ def scan_for_cashouts(
             conn=conn,
             poly_client=poly_client,
             dry_run=dry_run,
+            reason=reason,
         )
         cashouts.append(result)
         if result.get("success"):
             n_executed += 1
+            if reason == "stop":
+                n_stops += 1
             bet_kind_val = bet["bet_kind"] if "bet_kind" in bet.keys() else "real"
             tag = "[DRY-RUN]" if dry_run else ("[PAPER]" if bet_kind_val == "paper" else "[REAL]")
             side_label = bet["side_label"] if "side_label" in bet.keys() else "?"
+            label = "STOP-LOSS" if reason == "stop" else "CASHOUT"
             logger.info(
-                f"CASHOUT {tag} bet_id={bet_id} "
+                f"{label} {tag} bet_id={bet_id} "
                 f"side={side_label} "
                 f"return={result['return_ratio']:.2f}x "
                 f"pnl=${result['cashout_pnl']:+.2f}"
@@ -413,6 +523,7 @@ def scan_for_cashouts(
         "n_checked":   n_checked,
         "n_triggered": n_triggered,
         "n_executed":  n_executed,
+        "n_stops":     n_stops,
         "cashouts":    cashouts,
         "errors":      errors,
     }

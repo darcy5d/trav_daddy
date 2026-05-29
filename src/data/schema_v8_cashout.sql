@@ -23,6 +23,11 @@
 --   cashout_threshold_used The return_ratio (cashout_price / fill_price) that
 --                          triggered the cashout. Stored for audit + tuning.
 --
+--   cashout_reason         'profit' for a tiered profit-take SELL, 'stop' for a
+--                          Wave 5.11 guarded stop-loss SELL. NULL on legacy rows.
+--                          Lets us split recovered-loss vs profit-take when
+--                          tuning. (return_ratio < 1 for a stop.)
+--
 -- Settled rows cashed out can be distinguished from naturally settled rows by:
 --   WHERE cashout_triggered_at IS NOT NULL
 --

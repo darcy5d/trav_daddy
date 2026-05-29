@@ -83,18 +83,21 @@ def main() -> int:
     print(f"CASHOUT SCAN {mode_tag}— {run_ts}")
     print("=" * 70)
     print(f"  Filled positions checked: {summary['n_checked']}")
-    print(f"  Threshold(s) met:         {summary['n_triggered']}")
-    print(f"  Cashouts executed:        {summary['n_executed']}")
+    print(f"  Trigger(s) met:           {summary['n_triggered']}")
+    print(f"  Sells executed:           {summary['n_executed']}")
+    print(f"    of which stop-losses:   {summary.get('n_stops', 0)}")
 
     if summary["cashouts"]:
         print()
-        print(f"  {'bet_id':>8}  {'return':>8}  {'PnL':>10}  {'simulated':>10}")
-        print(f"  {'─'*8}  {'─'*8}  {'─'*10}  {'─'*10}")
+        print(f"  {'bet_id':>8}  {'reason':>9}  {'return':>8}  {'PnL':>10}  {'simulated':>10}")
+        print(f"  {'─'*8}  {'─'*9}  {'─'*8}  {'─'*10}  {'─'*10}")
         for c in summary["cashouts"]:
             if c.get("success"):
                 sim_tag = "YES" if c.get("is_simulated") else "NO (live)"
+                reason = "STOP-LOSS" if c.get("reason") == "stop" else "profit"
                 print(
                     f"  {c['bet_id']:>8}  "
+                    f"{reason:>9}  "
                     f"{c['return_ratio']:>7.2f}x  "
                     f"${c['cashout_pnl']:>+9.2f}  "
                     f"{sim_tag:>10}"
