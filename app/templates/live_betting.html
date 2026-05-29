@@ -586,7 +586,7 @@
 
 <div class="lb-section">
     <div class="lb-section-header">
-        <h2>Recent Settled <span class="lb-section-subtitle" id="lb-settled-count"></span></h2>
+        <h2>Recent Settled <span class="lb-section-subtitle">(last 7 days)</span> <span class="lb-section-subtitle" id="lb-settled-count"></span></h2>
         <div class="lb-section-controls">
             <div class="lb-filter-chips" id="lb-settled-filter-chips"></div>
         </div>
@@ -1292,7 +1292,7 @@
     async function fetchSettledBets() {
         let data;
         try {
-            const r = await fetch('/api/betting/bets?status=settled&limit=50');
+            const r = await fetch('/api/betting/bets?status=settled&days=7');
             data = await r.json();
         } catch (err) {
             document.getElementById('lb-settled-body').innerHTML = '<div class="lb-empty">Error loading settled bets</div>';

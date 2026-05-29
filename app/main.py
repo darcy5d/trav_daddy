@@ -172,32 +172,30 @@ def has_active_model(gender: str, format_type: str) -> bool:
 def index():
     """Home page with quick stats."""
     try:
-        conn = get_connection()
-        cursor = conn.cursor()
-        
-        # Get stats
-        cursor.execute("SELECT COUNT(*) FROM matches WHERE match_type = 'T20'")
-        t20_matches = cursor.fetchone()[0]
-        
-        cursor.execute("SELECT COUNT(DISTINCT player_id) FROM player_match_stats")
-        total_players = cursor.fetchone()[0]
-        
-        cursor.execute("SELECT COUNT(DISTINCT team_id) FROM teams")
-        total_teams = cursor.fetchone()[0]
-        
-        cursor.execute("SELECT COUNT(*) FROM deliveries")
-        total_deliveries = cursor.fetchone()[0]
-        
-        conn.close()
-        
-        stats = {
-            't20_matches': t20_matches,
-            'total_players': total_players,
-            'total_teams': total_teams,
-            'total_deliveries': total_deliveries
-        }
-        
-        return render_template('index.html', stats=stats)
+        with get_db_connection() as conn:
+            cursor = conn.cursor()
+            
+            # Get stats
+            cursor.execute("SELECT COUNT(*) FROM matches WHERE match_type = 'T20'")
+            t20_matches = cursor.fetchone()[0]
+            
+            cursor.execute("SELECT COUNT(DISTINCT player_id) FROM player_match_stats")
+            total_players = cursor.fetchone()[0]
+            
+            cursor.execute("SELECT COUNT(DISTINCT team_id) FROM teams")
+            total_teams = cursor.fetchone()[0]
+            
+            cursor.execute("SELECT COUNT(*) FROM deliveries")
+            total_deliveries = cursor.fetchone()[0]
+            
+            stats = {
+                't20_matches': t20_matches,
+                'total_players': total_players,
+                'total_teams': total_teams,
+                'total_deliveries': total_deliveries
+            }
+            
+            return render_template('index.html', stats=stats)
     except Exception as e:
         logger.error(f"Error loading index: {e}")
         return render_template('index.html', stats={})
@@ -207,22 +205,20 @@ def index():
 def predict_page():
     """Match prediction page."""
     try:
-        conn = get_connection()
-        cursor = conn.cursor()
-        
-        # Get teams
-        cursor.execute("""
-            SELECT DISTINCT t.team_id, t.name
-            FROM teams t
-            JOIN matches m ON t.team_id IN (m.team1_id, m.team2_id)
-            WHERE m.match_type = 'T20' AND m.gender = 'male'
-            ORDER BY t.name
-        """)
-        teams = [dict(row) for row in cursor.fetchall()]
-        
-        conn.close()
-        
-        return render_template('predict.html', teams=teams)
+        with get_db_connection() as conn:
+            cursor = conn.cursor()
+            
+            # Get teams
+            cursor.execute("""
+                SELECT DISTINCT t.team_id, t.name
+                FROM teams t
+                JOIN matches m ON t.team_id IN (m.team1_id, m.team2_id)
+                WHERE m.match_type = 'T20' AND m.gender = 'male'
+                ORDER BY t.name
+            """)
+            teams = [dict(row) for row in cursor.fetchall()]
+            
+            return render_template('predict.html', teams=teams)
     except Exception as e:
         logger.error(f"Error loading predict page: {e}")
         return render_template('predict.html', teams=[])
@@ -262,43 +258,42 @@ def _fetch_venue_quality_rows(gender: str = 'male', min_matches: int = 0) -> Lis
     Fetch venue rows with match counts for quality analysis.
     Uses LEFT JOIN to retain venues with zero matches when needed.
     """
-    conn = get_connection()
-    cursor = conn.cursor()
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
 
-    cursor.execute("PRAGMA table_info(venues)")
-    venue_columns = {row["name"] for row in cursor.fetchall()}
-    has_state_column = "state" in venue_columns
+        cursor.execute("PRAGMA table_info(venues)")
+        venue_columns = {row["name"] for row in cursor.fetchall()}
+        has_state_column = "state" in venue_columns
 
-    state_select = "v.state AS state," if has_state_column else "'' AS state,"
-    state_group = ", v.state" if has_state_column else ""
-    state_order = ", v.state" if has_state_column else ""
+        state_select = "v.state AS state," if has_state_column else "'' AS state,"
+        state_group = ", v.state" if has_state_column else ""
+        state_order = ", v.state" if has_state_column else ""
 
-    cursor.execute(
-        f"""
-        SELECT
-            v.venue_id,
-            v.name,
-            v.city,
-            v.country,
-            {state_select}
-            v.canonical_name,
-            v.region,
-            COUNT(m.match_id) AS match_count
-        FROM venues v
-        LEFT JOIN matches m
-            ON m.venue_id = v.venue_id
-           AND m.match_type = 'T20'
-           AND m.gender = ?
-        GROUP BY v.venue_id, v.name, v.city, v.country{state_group}, v.canonical_name, v.region
-        HAVING COUNT(m.match_id) >= ?
-        ORDER BY match_count DESC, v.country{state_order}, v.city, v.name
-        """,
-        (gender, max(0, min_matches)),
-    )
+        cursor.execute(
+            f"""
+            SELECT
+                v.venue_id,
+                v.name,
+                v.city,
+                v.country,
+                {state_select}
+                v.canonical_name,
+                v.region,
+                COUNT(m.match_id) AS match_count
+            FROM venues v
+            LEFT JOIN matches m
+                ON m.venue_id = v.venue_id
+               AND m.match_type = 'T20'
+               AND m.gender = ?
+            GROUP BY v.venue_id, v.name, v.city, v.country{state_group}, v.canonical_name, v.region
+            HAVING COUNT(m.match_id) >= ?
+            ORDER BY match_count DESC, v.country{state_order}, v.city, v.name
+            """,
+            (gender, max(0, min_matches)),
+        )
 
-    rows = [dict(r) for r in cursor.fetchall()]
-    conn.close()
-    return rows
+        rows = [dict(r) for r in cursor.fetchall()]
+        return rows
 
 
 def _build_venue_hierarchy(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -470,73 +465,72 @@ def data_explorer_venues():
 
 def _team_explorer_franchise_rows() -> List[Dict[str, Any]]:
     """List every team_groups row with its members + headline ELO."""
-    conn = get_connection()
-    cur = conn.cursor()
-    cur.execute(
-        """
-        SELECT
-            g.group_id,
-            g.canonical_name,
-            g.group_type,
-            g.country_code,
-            g.notes,
-            t.team_id,
-            t.name AS team_name,
-            t.team_type,
-            t.tier,
-            t.canonical_team_id,
-            ce.elo_t20_male,
-            ce.elo_t20_female,
-            (
-                SELECT COUNT(*) FROM matches m
-                WHERE m.team1_id = t.team_id OR m.team2_id = t.team_id
-            ) AS match_count
-        FROM team_groups g
-        LEFT JOIN teams t ON t.franchise_id = g.group_id
-        LEFT JOIN team_current_elo ce ON ce.team_id = t.team_id
-        ORDER BY g.canonical_name, t.name
-        """
-    )
-
-    grouped: Dict[int, Dict[str, Any]] = {}
-    for row in cur.fetchall():
-        gid = row["group_id"]
-        if gid not in grouped:
-            grouped[gid] = {
-                "group_id": gid,
-                "canonical_name": row["canonical_name"],
-                "group_type": row["group_type"],
-                "country_code": row["country_code"],
-                "notes": row["notes"],
-                "members": [],
-                "member_count": 0,
-                "total_matches": 0,
-                "canonical_elo_t20_male": None,
-                "canonical_elo_t20_female": None,
-            }
-        if row["team_id"] is None:
-            continue
-        is_canonical = row["team_id"] == row["canonical_team_id"]
-        grouped[gid]["members"].append(
-            {
-                "team_id": row["team_id"],
-                "name": row["team_name"],
-                "team_type": row["team_type"],
-                "tier": row["tier"],
-                "is_canonical": is_canonical,
-                "match_count": row["match_count"] or 0,
-                "elo_t20_male": row["elo_t20_male"],
-                "elo_t20_female": row["elo_t20_female"],
-            }
+    with get_db_connection() as conn:
+        cur = conn.cursor()
+        cur.execute(
+            """
+            SELECT
+                g.group_id,
+                g.canonical_name,
+                g.group_type,
+                g.country_code,
+                g.notes,
+                t.team_id,
+                t.name AS team_name,
+                t.team_type,
+                t.tier,
+                t.canonical_team_id,
+                ce.elo_t20_male,
+                ce.elo_t20_female,
+                (
+                    SELECT COUNT(*) FROM matches m
+                    WHERE m.team1_id = t.team_id OR m.team2_id = t.team_id
+                ) AS match_count
+            FROM team_groups g
+            LEFT JOIN teams t ON t.franchise_id = g.group_id
+            LEFT JOIN team_current_elo ce ON ce.team_id = t.team_id
+            ORDER BY g.canonical_name, t.name
+            """
         )
-        grouped[gid]["member_count"] += 1
-        grouped[gid]["total_matches"] += row["match_count"] or 0
-        if is_canonical:
-            grouped[gid]["canonical_elo_t20_male"] = row["elo_t20_male"]
-            grouped[gid]["canonical_elo_t20_female"] = row["elo_t20_female"]
 
-    conn.close()
-    return list(grouped.values())
+        grouped: Dict[int, Dict[str, Any]] = {}
+        for row in cur.fetchall():
+            gid = row["group_id"]
+            if gid not in grouped:
+                grouped[gid] = {
+                    "group_id": gid,
+                    "canonical_name": row["canonical_name"],
+                    "group_type": row["group_type"],
+                    "country_code": row["country_code"],
+                    "notes": row["notes"],
+                    "members": [],
+                    "member_count": 0,
+                    "total_matches": 0,
+                    "canonical_elo_t20_male": None,
+                    "canonical_elo_t20_female": None,
+                }
+            if row["team_id"] is None:
+                continue
+            is_canonical = row["team_id"] == row["canonical_team_id"]
+            grouped[gid]["members"].append(
+                {
+                    "team_id": row["team_id"],
+                    "name": row["team_name"],
+                    "team_type": row["team_type"],
+                    "tier": row["tier"],
+                    "is_canonical": is_canonical,
+                    "match_count": row["match_count"] or 0,
+                    "elo_t20_male": row["elo_t20_male"],
+                    "elo_t20_female": row["elo_t20_female"],
+                }
+            )
+            grouped[gid]["member_count"] += 1
+            grouped[gid]["total_matches"] += row["match_count"] or 0
+            if is_canonical:
+                grouped[gid]["canonical_elo_t20_male"] = row["elo_t20_male"]
+                grouped[gid]["canonical_elo_t20_female"] = row["elo_t20_female"]
+
+        return list(grouped.values())
 
 
 def _team_explorer_duplicate_candidates(
@@ -558,25 +552,24 @@ def _team_explorer_duplicate_candidates(
         logger.warning("rapidfuzz not installed; duplicate finder disabled")
         return []
 
-    conn = get_connection()
-    cur = conn.cursor()
-    cur.execute(
-        """
-        SELECT g.group_id, g.canonical_name, g.group_type, g.country_code,
-               COUNT(t.team_id) AS member_count,
-               (
-                   SELECT COUNT(*) FROM matches m
-                   JOIN teams tt ON tt.team_id IN (m.team1_id, m.team2_id)
-                   WHERE tt.franchise_id = g.group_id
-               ) AS match_count
-        FROM team_groups g
-        LEFT JOIN teams t ON t.franchise_id = g.group_id
-        GROUP BY g.group_id
-        ORDER BY g.canonical_name
-        """
-    )
-    groups = [dict(r) for r in cur.fetchall()]
-    conn.close()
+    with get_db_connection() as conn:
+        cur = conn.cursor()
+        cur.execute(
+            """
+            SELECT g.group_id, g.canonical_name, g.group_type, g.country_code,
+                   COUNT(t.team_id) AS member_count,
+                   (
+                       SELECT COUNT(*) FROM matches m
+                       JOIN teams tt ON tt.team_id IN (m.team1_id, m.team2_id)
+                       WHERE tt.franchise_id = g.group_id
+                   ) AS match_count
+            FROM team_groups g
+            LEFT JOIN teams t ON t.franchise_id = g.group_id
+            GROUP BY g.group_id
+            ORDER BY g.canonical_name
+            """
+        )
+        groups = [dict(r) for r in cur.fetchall()]
 
     candidates: List[Dict[str, Any]] = []
     for i, a in enumerate(groups):
@@ -677,38 +670,37 @@ def team_explorer_list_proposals():
     """List merge proposals, optionally filtered by status."""
     try:
         status = request.args.get('status')
-        conn = get_connection()
-        cur = conn.cursor()
-        if status:
-            cur.execute(
-                """
-                SELECT p.*, st.name AS source_team_name, tg.canonical_name AS target_group_name,
-                       tt.name AS target_canonical_team_name
-                FROM team_merge_proposals p
-                JOIN teams st ON st.team_id = p.source_team_id
-                JOIN team_groups tg ON tg.group_id = p.target_group_id
-                LEFT JOIN teams tt ON tt.team_id = p.target_canonical_team_id
-                WHERE p.status = ?
-                ORDER BY p.created_at DESC
-                """,
-                (status,),
-            )
-        else:
-            cur.execute(
-                """
-                SELECT p.*, st.name AS source_team_name, tg.canonical_name AS target_group_name,
-                       tt.name AS target_canonical_team_name
-                FROM team_merge_proposals p
-                JOIN teams st ON st.team_id = p.source_team_id
-                JOIN team_groups tg ON tg.group_id = p.target_group_id
-                LEFT JOIN teams tt ON tt.team_id = p.target_canonical_team_id
-                ORDER BY p.created_at DESC
-                LIMIT 200
-                """
-            )
-        proposals = [dict(r) for r in cur.fetchall()]
-        conn.close()
-        return jsonify({"success": True, "count": len(proposals), "proposals": proposals})
+        with get_db_connection() as conn:
+            cur = conn.cursor()
+            if status:
+                cur.execute(
+                    """
+                    SELECT p.*, st.name AS source_team_name, tg.canonical_name AS target_group_name,
+                           tt.name AS target_canonical_team_name
+                    FROM team_merge_proposals p
+                    JOIN teams st ON st.team_id = p.source_team_id
+                    JOIN team_groups tg ON tg.group_id = p.target_group_id
+                    LEFT JOIN teams tt ON tt.team_id = p.target_canonical_team_id
+                    WHERE p.status = ?
+                    ORDER BY p.created_at DESC
+                    """,
+                    (status,),
+                )
+            else:
+                cur.execute(
+                    """
+                    SELECT p.*, st.name AS source_team_name, tg.canonical_name AS target_group_name,
+                           tt.name AS target_canonical_team_name
+                    FROM team_merge_proposals p
+                    JOIN teams st ON st.team_id = p.source_team_id
+                    JOIN team_groups tg ON tg.group_id = p.target_group_id
+                    LEFT JOIN teams tt ON tt.team_id = p.target_canonical_team_id
+                    ORDER BY p.created_at DESC
+                    LIMIT 200
+                    """
+                )
+            proposals = [dict(r) for r in cur.fetchall()]
+            return jsonify({"success": True, "count": len(proposals), "proposals": proposals})
     except Exception as e:
         logger.error(f"Error listing merge proposals: {e}")
         return jsonify({"success": False, "error": str(e)}), 500
@@ -735,71 +727,66 @@ def team_explorer_create_proposal():
                 {"success": False, "error": "source_team_id and target_group_id required"}
             ), 400
 
-        conn = get_connection()
-        cur = conn.cursor()
+        with get_db_connection() as conn:
+            cur = conn.cursor()
 
-        # Validate both ends exist.
-        cur.execute("SELECT team_id, franchise_id FROM teams WHERE team_id = ?", (source_team_id,))
-        src = cur.fetchone()
-        if not src:
-            conn.close()
-            return jsonify({"success": False, "error": f"Unknown source_team_id={source_team_id}"}), 400
+            # Validate both ends exist.
+            cur.execute("SELECT team_id, franchise_id FROM teams WHERE team_id = ?", (source_team_id,))
+            src = cur.fetchone()
+            if not src:
+                return jsonify({"success": False, "error": f"Unknown source_team_id={source_team_id}"}), 400
 
-        cur.execute("SELECT group_id, canonical_name FROM team_groups WHERE group_id = ?", (target_group_id,))
-        tgt = cur.fetchone()
-        if not tgt:
-            conn.close()
-            return jsonify({"success": False, "error": f"Unknown target_group_id={target_group_id}"}), 400
+            cur.execute("SELECT group_id, canonical_name FROM team_groups WHERE group_id = ?", (target_group_id,))
+            tgt = cur.fetchone()
+            if not tgt:
+                return jsonify({"success": False, "error": f"Unknown target_group_id={target_group_id}"}), 400
 
-        # No-op merges should not be staged.
-        if src["franchise_id"] == target_group_id:
-            conn.close()
-            return jsonify(
-                {
-                    "success": False,
-                    "error": (
-                        f"team_id={source_team_id} is already in group {target_group_id} "
-                        f"({tgt['canonical_name']}); nothing to merge"
-                    ),
-                }
-            ), 400
+            # No-op merges should not be staged.
+            if src["franchise_id"] == target_group_id:
+                return jsonify(
+                    {
+                        "success": False,
+                        "error": (
+                            f"team_id={source_team_id} is already in group {target_group_id} "
+                            f"({tgt['canonical_name']}); nothing to merge"
+                        ),
+                    }
+                ), 400
 
-        # Default target_canonical_team_id to whichever team_id currently owns
-        # the target group's rating series.
-        target_canonical = data.get('target_canonical_team_id')
-        if not target_canonical:
+            # Default target_canonical_team_id to whichever team_id currently owns
+            # the target group's rating series.
+            target_canonical = data.get('target_canonical_team_id')
+            if not target_canonical:
+                cur.execute(
+                    """
+                    SELECT canonical_team_id FROM teams
+                    WHERE franchise_id = ? AND canonical_team_id = team_id
+                    LIMIT 1
+                    """,
+                    (target_group_id,),
+                )
+                row = cur.fetchone()
+                target_canonical = row['canonical_team_id'] if row else None
+
             cur.execute(
                 """
-                SELECT canonical_team_id FROM teams
-                WHERE franchise_id = ? AND canonical_team_id = team_id
-                LIMIT 1
+                INSERT INTO team_merge_proposals (
+                    source_team_id, target_group_id, target_canonical_team_id,
+                    status, proposer, rationale, fuzzy_score
+                ) VALUES (?, ?, ?, 'pending', ?, ?, ?)
                 """,
-                (target_group_id,),
+                (
+                    source_team_id,
+                    target_group_id,
+                    target_canonical,
+                    data.get('proposer') or 'team-explorer-ui',
+                    data.get('rationale') or '',
+                    data.get('fuzzy_score'),
+                ),
             )
-            row = cur.fetchone()
-            target_canonical = row['canonical_team_id'] if row else None
+            proposal_id = cur.lastrowid
 
-        cur.execute(
-            """
-            INSERT INTO team_merge_proposals (
-                source_team_id, target_group_id, target_canonical_team_id,
-                status, proposer, rationale, fuzzy_score
-            ) VALUES (?, ?, ?, 'pending', ?, ?, ?)
-            """,
-            (
-                source_team_id,
-                target_group_id,
-                target_canonical,
-                data.get('proposer') or 'team-explorer-ui',
-                data.get('rationale') or '',
-                data.get('fuzzy_score'),
-            ),
-        )
-        proposal_id = cur.lastrowid
-        conn.commit()
-        conn.close()
-
-        return jsonify({"success": True, "proposal_id": proposal_id})
+            return jsonify({"success": True, "proposal_id": proposal_id})
     except Exception as e:
         logger.error(f"Error creating merge proposal: {e}")
         return jsonify({"success": False, "error": str(e)}), 500
@@ -815,24 +802,21 @@ def team_explorer_decide_proposal(proposal_id: int):
             return jsonify({"success": False, "error": "decision must be 'approve' or 'reject'"}), 400
 
         new_status = 'approved' if decision == 'approve' else 'rejected'
-        conn = get_connection()
-        cur = conn.cursor()
-        cur.execute(
-            """
-            UPDATE team_merge_proposals
-            SET status = ?, decided_at = CURRENT_TIMESTAMP, decided_by = ?
-            WHERE proposal_id = ? AND status = 'pending'
-            """,
-            (new_status, data.get('decided_by') or 'team-explorer-ui', proposal_id),
-        )
-        if cur.rowcount == 0:
-            conn.close()
-            return jsonify(
-                {"success": False, "error": "Proposal not found or not pending"}
-            ), 404
-        conn.commit()
-        conn.close()
-        return jsonify({"success": True, "proposal_id": proposal_id, "status": new_status})
+        with get_db_connection() as conn:
+            cur = conn.cursor()
+            cur.execute(
+                """
+                UPDATE team_merge_proposals
+                SET status = ?, decided_at = CURRENT_TIMESTAMP, decided_by = ?
+                WHERE proposal_id = ? AND status = 'pending'
+                """,
+                (new_status, data.get('decided_by') or 'team-explorer-ui', proposal_id),
+            )
+            if cur.rowcount == 0:
+                return jsonify(
+                    {"success": False, "error": "Proposal not found or not pending"}
+                ), 404
+            return jsonify({"success": True, "proposal_id": proposal_id, "status": new_status})
     except Exception as e:
         logger.error(f"Error deciding proposal {proposal_id}: {e}")
         return jsonify({"success": False, "error": str(e)}), 500
@@ -974,48 +958,47 @@ def get_teams():
         gender = request.args.get('gender', 'male')
         team_type = request.args.get('team_type', 'all')
         
-        conn = get_connection()
-        cursor = conn.cursor()
-        
-        # Build query based on filters
-        if team_type == 'all':
-            cursor.execute("""
-                SELECT DISTINCT t.team_id, t.name, t.team_type
-                FROM teams t
-                JOIN matches m ON t.team_id IN (m.team1_id, m.team2_id)
-                WHERE m.match_type = 'T20' AND m.gender = ?
-                ORDER BY t.name
-            """, (gender,))
-        elif team_type == 'club':
-            # 'club' combines franchise and domestic
-            cursor.execute("""
-                SELECT DISTINCT t.team_id, t.name, t.team_type
-                FROM teams t
-                JOIN matches m ON t.team_id IN (m.team1_id, m.team2_id)
-                WHERE m.match_type = 'T20' AND m.gender = ?
-                  AND t.team_type IN ('franchise', 'domestic')
-                ORDER BY t.name
-            """, (gender,))
-        else:
-            cursor.execute("""
-                SELECT DISTINCT t.team_id, t.name, t.team_type
-                FROM teams t
-                JOIN matches m ON t.team_id IN (m.team1_id, m.team2_id)
-                WHERE m.match_type = 'T20' AND m.gender = ?
-                  AND t.team_type = ?
-                ORDER BY t.name
-            """, (gender, team_type))
-        
-        teams = [dict(row) for row in cursor.fetchall()]
-        conn.close()
-        
-        return jsonify({
-            'success': True, 
-            'teams': teams, 
-            'gender': gender,
-            'team_type': team_type,
-            'count': len(teams)
-        })
+        with get_db_connection() as conn:
+            cursor = conn.cursor()
+            
+            # Build query based on filters
+            if team_type == 'all':
+                cursor.execute("""
+                    SELECT DISTINCT t.team_id, t.name, t.team_type
+                    FROM teams t
+                    JOIN matches m ON t.team_id IN (m.team1_id, m.team2_id)
+                    WHERE m.match_type = 'T20' AND m.gender = ?
+                    ORDER BY t.name
+                """, (gender,))
+            elif team_type == 'club':
+                # 'club' combines franchise and domestic
+                cursor.execute("""
+                    SELECT DISTINCT t.team_id, t.name, t.team_type
+                    FROM teams t
+                    JOIN matches m ON t.team_id IN (m.team1_id, m.team2_id)
+                    WHERE m.match_type = 'T20' AND m.gender = ?
+                      AND t.team_type IN ('franchise', 'domestic')
+                    ORDER BY t.name
+                """, (gender,))
+            else:
+                cursor.execute("""
+                    SELECT DISTINCT t.team_id, t.name, t.team_type
+                    FROM teams t
+                    JOIN matches m ON t.team_id IN (m.team1_id, m.team2_id)
+                    WHERE m.match_type = 'T20' AND m.gender = ?
+                      AND t.team_type = ?
+                    ORDER BY t.name
+                """, (gender, team_type))
+            
+            teams = [dict(row) for row in cursor.fetchall()]
+            
+            return jsonify({
+                'success': True, 
+                'teams': teams, 
+                'gender': gender,
+                'team_type': team_type,
+                'count': len(teams)
+            })
     
     except Exception as e:
         logger.error(f"Error fetching teams: {e}")
@@ -1037,67 +1020,64 @@ def get_team_recent_lineup(team_id):
         
         gender = request.args.get('gender', 'male')
         
-        conn = get_connection()
-        cursor = conn.cursor()
-        
-        # Get the most recent match for this team
-        cursor.execute("""
-            SELECT m.match_id, m.date, m.team1_id, m.team2_id,
-                   t1.name as team1_name, t2.name as team2_name
-            FROM matches m
-            JOIN teams t1 ON m.team1_id = t1.team_id
-            JOIN teams t2 ON m.team2_id = t2.team_id
-            WHERE (m.team1_id = ? OR m.team2_id = ?)
-              AND m.match_type = 'T20'
-              AND m.gender = ?
-            ORDER BY m.date DESC
-            LIMIT 1
-        """, (team_id, team_id, gender))
-        
-        recent_match = cursor.fetchone()
-        
-        if not recent_match:
-            conn.close()
-            return jsonify({
-                'success': False,
-                'error': 'No recent matches found for this team'
-            })
-        
-        match_id = recent_match['match_id']
-        match_date = recent_match['date']
-        opponent_name = recent_match['team2_name'] if recent_match['team1_id'] == team_id else recent_match['team1_name']
-        
-        # Get the players who played in that match with their stats
-        cursor.execute("""
-            SELECT 
-                p.player_id,
-                p.name,
-                pms.batting_position,
-                pms.runs_scored as match_runs,
-                pms.wickets_taken as match_wickets,
-                pms.stumpings as match_stumpings,
-                -- Career stats for role inference
-                (SELECT COUNT(DISTINCT match_id) FROM player_match_stats WHERE player_id = p.player_id) as total_matches,
-                (SELECT SUM(runs_scored) FROM player_match_stats WHERE player_id = p.player_id) as career_runs,
-                (SELECT SUM(balls_faced) FROM player_match_stats WHERE player_id = p.player_id) as career_balls,
-                (SELECT SUM(overs_bowled) FROM player_match_stats WHERE player_id = p.player_id) as career_overs,
-                (SELECT SUM(wickets_taken) FROM player_match_stats WHERE player_id = p.player_id) as career_wickets,
-                (SELECT SUM(stumpings) FROM player_match_stats WHERE player_id = p.player_id) as career_stumpings,
-                (SELECT AVG(CASE WHEN batting_position > 0 THEN batting_position END) FROM player_match_stats WHERE player_id = p.player_id) as avg_position
-            FROM player_match_stats pms
-            JOIN players p ON pms.player_id = p.player_id
-            WHERE pms.match_id = ? AND pms.team_id = ?
-            ORDER BY pms.batting_position, p.name
-        """, (match_id, team_id))
-        
-        players_data = cursor.fetchall()
-        
-        # Get team name
-        cursor.execute("SELECT name FROM teams WHERE team_id = ?", (team_id,))
-        team_row = cursor.fetchone()
-        team_name = team_row['name'] if team_row else 'Unknown'
-        
-        conn.close()
+        with get_db_connection() as conn:
+            cursor = conn.cursor()
+            
+            # Get the most recent match for this team
+            cursor.execute("""
+                SELECT m.match_id, m.date, m.team1_id, m.team2_id,
+                       t1.name as team1_name, t2.name as team2_name
+                FROM matches m
+                JOIN teams t1 ON m.team1_id = t1.team_id
+                JOIN teams t2 ON m.team2_id = t2.team_id
+                WHERE (m.team1_id = ? OR m.team2_id = ?)
+                  AND m.match_type = 'T20'
+                  AND m.gender = ?
+                ORDER BY m.date DESC
+                LIMIT 1
+            """, (team_id, team_id, gender))
+            
+            recent_match = cursor.fetchone()
+            
+            if not recent_match:
+                return jsonify({
+                    'success': False,
+                    'error': 'No recent matches found for this team'
+                })
+            
+            match_id = recent_match['match_id']
+            match_date = recent_match['date']
+            opponent_name = recent_match['team2_name'] if recent_match['team1_id'] == team_id else recent_match['team1_name']
+            
+            # Get the players who played in that match with their stats
+            cursor.execute("""
+                SELECT 
+                    p.player_id,
+                    p.name,
+                    pms.batting_position,
+                    pms.runs_scored as match_runs,
+                    pms.wickets_taken as match_wickets,
+                    pms.stumpings as match_stumpings,
+                    -- Career stats for role inference
+                    (SELECT COUNT(DISTINCT match_id) FROM player_match_stats WHERE player_id = p.player_id) as total_matches,
+                    (SELECT SUM(runs_scored) FROM player_match_stats WHERE player_id = p.player_id) as career_runs,
+                    (SELECT SUM(balls_faced) FROM player_match_stats WHERE player_id = p.player_id) as career_balls,
+                    (SELECT SUM(overs_bowled) FROM player_match_stats WHERE player_id = p.player_id) as career_overs,
+                    (SELECT SUM(wickets_taken) FROM player_match_stats WHERE player_id = p.player_id) as career_wickets,
+                    (SELECT SUM(stumpings) FROM player_match_stats WHERE player_id = p.player_id) as career_stumpings,
+                    (SELECT AVG(CASE WHEN batting_position > 0 THEN batting_position END) FROM player_match_stats WHERE player_id = p.player_id) as avg_position
+                FROM player_match_stats pms
+                JOIN players p ON pms.player_id = p.player_id
+                WHERE pms.match_id = ? AND pms.team_id = ?
+                ORDER BY pms.batting_position, p.name
+            """, (match_id, team_id))
+            
+            players_data = cursor.fetchall()
+            
+            # Get team name
+            cursor.execute("SELECT name FROM teams WHERE team_id = ?", (team_id,))
+            team_row = cursor.fetchone()
+            team_name = team_row['name'] if team_row else 'Unknown'
         
         # Build players list with roles
         players = []
@@ -1181,22 +1161,21 @@ def get_venues():
         gender = request.args.get('gender', 'male')
         min_matches = int(request.args.get('min_matches', 3))
         
-        conn = get_connection()
-        cursor = conn.cursor()
-        
-        cursor.execute("""
-            SELECT v.venue_id, v.name, v.city, v.country, v.canonical_name,
-                   COUNT(m.match_id) as match_count
-            FROM venues v
-            JOIN matches m ON m.venue_id = v.venue_id
-            WHERE m.match_type = 'T20' AND m.gender = ?
-            GROUP BY v.venue_id
-            HAVING match_count >= ?
-            ORDER BY v.city, v.name
-        """, (gender, min_matches))
-        
-        raw_venues = cursor.fetchall()
-        conn.close()
+        with get_db_connection() as conn:
+            cursor = conn.cursor()
+            
+            cursor.execute("""
+                SELECT v.venue_id, v.name, v.city, v.country, v.canonical_name,
+                       COUNT(m.match_id) as match_count
+                FROM venues v
+                JOIN matches m ON m.venue_id = v.venue_id
+                WHERE m.match_type = 'T20' AND m.gender = ?
+                GROUP BY v.venue_id
+                HAVING match_count >= ?
+                ORDER BY v.city, v.name
+            """, (gender, min_matches))
+            
+            raw_venues = cursor.fetchall()
         
         # Consolidate duplicate venues by canonical name + city
         # Keep the venue with the most matches
@@ -1325,43 +1304,42 @@ def get_player_details():
         # Parse comma-separated IDs
         player_id_list = [int(pid.strip()) for pid in player_ids.split(',') if pid.strip()]
         
-        conn = get_connection()
-        cursor = conn.cursor()
-        
-        # Get player details
-        placeholders = ','.join('?' * len(player_id_list))
-        cursor.execute(f"""
-            SELECT player_id, name, batting_style, bowling_style
-            FROM players
-            WHERE player_id IN ({placeholders})
-        """, player_id_list)
-        
-        players_raw = cursor.fetchall()
-        conn.close()
-        
-        # Infer playing role from batting and bowling styles
-        players = []
-        for row in players_raw:
-            player_dict = dict(row)
-            batting = player_dict.get('batting_style', '') or ''
-            bowling = player_dict.get('bowling_style', '') or ''
+        with get_db_connection() as conn:
+            cursor = conn.cursor()
             
-            # Infer role
-            if batting and bowling:
-                player_dict['playing_role'] = 'Allrounder'
-            elif bowling:
-                player_dict['playing_role'] = 'Bowler'
-            elif batting:
-                player_dict['playing_role'] = 'Batter'
-            else:
-                player_dict['playing_role'] = ''
+            # Get player details
+            placeholders = ','.join('?' * len(player_id_list))
+            cursor.execute(f"""
+                SELECT player_id, name, batting_style, bowling_style
+                FROM players
+                WHERE player_id IN ({placeholders})
+            """, player_id_list)
             
-            players.append(player_dict)
-        
-        return jsonify({
-            'success': True,
-            'players': players
-        })
+            players_raw = cursor.fetchall()
+            
+            # Infer playing role from batting and bowling styles
+            players = []
+            for row in players_raw:
+                player_dict = dict(row)
+                batting = player_dict.get('batting_style', '') or ''
+                bowling = player_dict.get('bowling_style', '') or ''
+                
+                # Infer role
+                if batting and bowling:
+                    player_dict['playing_role'] = 'Allrounder'
+                elif bowling:
+                    player_dict['playing_role'] = 'Bowler'
+                elif batting:
+                    player_dict['playing_role'] = 'Batter'
+                else:
+                    player_dict['playing_role'] = ''
+                
+                players.append(player_dict)
+            
+            return jsonify({
+                'success': True,
+                'players': players
+            })
     
     except Exception as e:
         logger.error(f"Error fetching player details: {e}")
@@ -1391,45 +1369,43 @@ def get_players_by_ids():
         if not player_ids:
             return jsonify({'success': False, 'error': 'No player IDs provided'}), 400
         
-        conn = get_connection()
-        cursor = conn.cursor()
-        
-        placeholders = ','.join(['?'] * len(player_ids))
-        cursor.execute(f"""
-            SELECT 
-                p.player_id,
-                p.name,
-                SUM(pms.runs_scored) as total_runs,
-                SUM(pms.balls_faced) as balls_faced,
-                SUM(pms.wickets_taken) as total_wickets,
-                SUM(pms.overs_bowled) as overs_bowled,
-                COUNT(DISTINCT pms.match_id) as matches
-            FROM players p
-            LEFT JOIN player_match_stats pms ON p.player_id = pms.player_id
-            LEFT JOIN matches m ON pms.match_id = m.match_id AND m.match_type = 'T20' AND m.gender = ?
-            WHERE p.player_id IN ({placeholders})
-            GROUP BY p.player_id
-        """, (gender,) + tuple(player_ids))
-        
-        players = []
-        for row in cursor.fetchall():
-            players.append({
-                'player_id': row['player_id'],
-                'name': row['name'],
-                'total_runs': row['total_runs'] or 0,
-                'balls_faced': row['balls_faced'] or 0,
-                'total_wickets': row['total_wickets'] or 0,
-                'overs_bowled': row['overs_bowled'] or 0,
-                'matches': row['matches'] or 0
+        with get_db_connection() as conn:
+            cursor = conn.cursor()
+            
+            placeholders = ','.join(['?'] * len(player_ids))
+            cursor.execute(f"""
+                SELECT 
+                    p.player_id,
+                    p.name,
+                    SUM(pms.runs_scored) as total_runs,
+                    SUM(pms.balls_faced) as balls_faced,
+                    SUM(pms.wickets_taken) as total_wickets,
+                    SUM(pms.overs_bowled) as overs_bowled,
+                    COUNT(DISTINCT pms.match_id) as matches
+                FROM players p
+                LEFT JOIN player_match_stats pms ON p.player_id = pms.player_id
+                LEFT JOIN matches m ON pms.match_id = m.match_id AND m.match_type = 'T20' AND m.gender = ?
+                WHERE p.player_id IN ({placeholders})
+                GROUP BY p.player_id
+            """, (gender,) + tuple(player_ids))
+            
+            players = []
+            for row in cursor.fetchall():
+                players.append({
+                    'player_id': row['player_id'],
+                    'name': row['name'],
+                    'total_runs': row['total_runs'] or 0,
+                    'balls_faced': row['balls_faced'] or 0,
+                    'total_wickets': row['total_wickets'] or 0,
+                    'overs_bowled': row['overs_bowled'] or 0,
+                    'matches': row['matches'] or 0
+                })
+            
+            logger.info(f"Fetched stats for {len(players)} players")
+            return jsonify({
+                'success': True,
+                'players': players
             })
-        
-        conn.close()
-        
-        logger.info(f"Fetched stats for {len(players)} players")
-        return jsonify({
-            'success': True,
-            'players': players
-        })
     
     except Exception as e:
         logger.error(f"Error fetching players by IDs: {e}")
@@ -1452,42 +1428,41 @@ def get_team_players(team_id):
             get_role_display_name, is_bowling_option
         )
         
-        conn = get_connection()
-        cursor = conn.cursor()
-        
-        # Get ALL players with T20 experience for this gender
-        # Players who have played for this specific team will be prioritized
-        cursor.execute("""
-            SELECT 
-                p.player_id,
-                p.name,
-                COUNT(DISTINCT pms.match_id) as total_matches,
-                SUM(pms.runs_scored) as runs_scored,
-                SUM(pms.balls_faced) as balls_faced,
-                SUM(pms.overs_bowled) as overs_bowled,
-                SUM(pms.wickets_taken) as wickets_taken,
-                SUM(pms.stumpings) as stumpings,
-                AVG(CASE WHEN pms.batting_position > 0 THEN pms.batting_position END) as avg_batting_position,
-                CASE 
-                    WHEN SUM(pms.not_out) > 0 THEN 
-                        CAST(SUM(pms.runs_scored) AS FLOAT) / (COUNT(DISTINCT CASE WHEN pms.runs_scored > 0 THEN pms.match_id END) - SUM(pms.not_out))
-                    ELSE 
-                        CAST(SUM(pms.runs_scored) AS FLOAT) / NULLIF(COUNT(DISTINCT CASE WHEN pms.runs_scored > 0 THEN pms.match_id END), 0)
-                END as batting_avg,
-                -- Priority: 1 if played for this team, 0 otherwise
-                CASE WHEN SUM(CASE WHEN pms.team_id = ? THEN 1 ELSE 0 END) > 0 THEN 1 ELSE 0 END as played_for_team
-            FROM players p
-            JOIN player_match_stats pms ON p.player_id = pms.player_id
-            JOIN matches m ON pms.match_id = m.match_id
-            WHERE m.match_type = 'T20' AND m.gender = ?
-            GROUP BY p.player_id
-            HAVING total_matches > 0
-            ORDER BY played_for_team DESC, total_matches DESC, runs_scored DESC
-            LIMIT 500
-        """, (team_id, gender))
-        
-        players_data = cursor.fetchall()
-        conn.close()
+        with get_db_connection() as conn:
+            cursor = conn.cursor()
+            
+            # Get ALL players with T20 experience for this gender
+            # Players who have played for this specific team will be prioritized
+            cursor.execute("""
+                SELECT 
+                    p.player_id,
+                    p.name,
+                    COUNT(DISTINCT pms.match_id) as total_matches,
+                    SUM(pms.runs_scored) as runs_scored,
+                    SUM(pms.balls_faced) as balls_faced,
+                    SUM(pms.overs_bowled) as overs_bowled,
+                    SUM(pms.wickets_taken) as wickets_taken,
+                    SUM(pms.stumpings) as stumpings,
+                    AVG(CASE WHEN pms.batting_position > 0 THEN pms.batting_position END) as avg_batting_position,
+                    CASE 
+                        WHEN SUM(pms.not_out) > 0 THEN 
+                            CAST(SUM(pms.runs_scored) AS FLOAT) / (COUNT(DISTINCT CASE WHEN pms.runs_scored > 0 THEN pms.match_id END) - SUM(pms.not_out))
+                        ELSE 
+                            CAST(SUM(pms.runs_scored) AS FLOAT) / NULLIF(COUNT(DISTINCT CASE WHEN pms.runs_scored > 0 THEN pms.match_id END), 0)
+                    END as batting_avg,
+                    -- Priority: 1 if played for this team, 0 otherwise
+                    CASE WHEN SUM(CASE WHEN pms.team_id = ? THEN 1 ELSE 0 END) > 0 THEN 1 ELSE 0 END as played_for_team
+                FROM players p
+                JOIN player_match_stats pms ON p.player_id = pms.player_id
+                JOIN matches m ON pms.match_id = m.match_id
+                WHERE m.match_type = 'T20' AND m.gender = ?
+                GROUP BY p.player_id
+                HAVING total_matches > 0
+                ORDER BY played_for_team DESC, total_matches DESC, runs_scored DESC
+                LIMIT 500
+            """, (team_id, gender))
+            
+            players_data = cursor.fetchall()
         
         # Process players and infer roles
         players = []
@@ -1613,104 +1588,104 @@ def waterfall_team_selection():
                             scraper.match_players_to_db(team_data, team_name_for_matching, match.gender)
                         
                         # Step 1b: Optimize from External Squad
-                        conn = get_connection()
-                        cursor = conn.cursor()
-                        
-                        # Get database players matching squad (ESPN uses espn_id, CREX uses name matching)
-                        # For ESPN, try espn_player_id lookup first
-                        espn_player_ids = [getattr(p, 'espn_id', None) for p in team_data.players if getattr(p, 'espn_id', None)]
-                        db_players = []
-                        
-                        if espn_player_ids:
-                            placeholders = ','.join(['?'] * len(espn_player_ids))
-                            cursor.execute(f"""
-                                SELECT 
-                                    p.player_id,
-                                    p.name,
-                                    p.espn_player_id,
-                                    COUNT(DISTINCT pms.match_id) as total_matches,
-                                    SUM(pms.runs_scored) as runs_scored,
-                                    SUM(pms.balls_faced) as balls_faced,
-                                    SUM(pms.overs_bowled) as overs_bowled,
-                                    SUM(pms.wickets_taken) as wickets_taken,
-                                    SUM(pms.stumpings) as stumpings,
-                                    AVG(CASE WHEN pms.batting_position > 0 THEN pms.batting_position END) as avg_position
-                                FROM players p
-                                LEFT JOIN player_match_stats pms ON p.player_id = pms.player_id
-                                LEFT JOIN matches m ON pms.match_id = m.match_id AND m.match_type = 'T20' AND m.gender = ?
-                                WHERE p.espn_player_id IN ({placeholders})
-                                GROUP BY p.player_id
-                            """, (gender,) + tuple(espn_player_ids))
+                        with get_db_connection() as conn:
+                            cursor = conn.cursor()
                             
-                            # Convert sqlite3.Row objects to dicts
-                            db_players = [dict(row) for row in cursor.fetchall()]
-                        
-                        # Also try name matching for players without db_player_id (primary method for CREX)
-                        name_matcher = PlayerNameMatcher()
-                        team_name = team_match[1] if team_match else None
-                        for squad_player in team_data.players:
-                            if not squad_player.db_player_id:
-                                # Try to match by name
-                                # Get external ID (espn_id or crex_id depending on source)
-                                external_id = getattr(squad_player, 'espn_id', None) or getattr(squad_player, 'crex_id', None)
-                                matched = name_matcher.find_player(
-                                    squad_player.name,
-                                    team_name=team_name,
-                                    espn_player_id=external_id if source_type == 'ESPN' else None
-                                )
-                                if matched:
-                                    squad_player.db_player_id = matched.player_id
-                        
-                        # Build squad from matched players
-                        squad = []
-                        db_players_dict = {p['player_id']: p for p in db_players}
-                        
-                        for squad_player in team_data.players:
-                            db_id = squad_player.db_player_id
+                            # Get database players matching squad (ESPN uses espn_id, CREX uses name matching)
+                            # For ESPN, try espn_player_id lookup first
+                            espn_player_ids = [getattr(p, 'espn_id', None) for p in team_data.players if getattr(p, 'espn_id', None)]
+                            db_players = []
                             
-                            if db_id:
-                                # Get stats for this player (from query or fetch if name-matched)
-                                player_row = db_players_dict.get(db_id)
+                            if espn_player_ids:
+                                placeholders = ','.join(['?'] * len(espn_player_ids))
+                                cursor.execute(f"""
+                                    SELECT 
+                                        p.player_id,
+                                        p.name,
+                                        p.espn_player_id,
+                                        COUNT(DISTINCT pms.match_id) as total_matches,
+                                        SUM(pms.runs_scored) as runs_scored,
+                                        SUM(pms.balls_faced) as balls_faced,
+                                        SUM(pms.overs_bowled) as overs_bowled,
+                                        SUM(pms.wickets_taken) as wickets_taken,
+                                        SUM(pms.stumpings) as stumpings,
+                                        AVG(CASE WHEN pms.batting_position > 0 THEN pms.batting_position END) as avg_position
+                                    FROM players p
+                                    LEFT JOIN player_match_stats pms ON p.player_id = pms.player_id
+                                    LEFT JOIN matches m ON pms.match_id = m.match_id AND m.match_type = 'T20' AND m.gender = ?
+                                    WHERE p.espn_player_id IN ({placeholders})
+                                    GROUP BY p.player_id
+                                """, (gender,) + tuple(espn_player_ids))
                                 
-                                if not player_row:
-                                    # Player was matched by name but not in query - fetch stats
-                                    cursor.execute("""
-                                        SELECT 
-                                            p.player_id,
-                                            p.name,
-                                            COUNT(DISTINCT pms.match_id) as total_matches,
-                                            SUM(pms.runs_scored) as runs_scored,
-                                            SUM(pms.balls_faced) as balls_faced,
-                                            SUM(pms.overs_bowled) as overs_bowled,
-                                            SUM(pms.wickets_taken) as wickets_taken,
-                                            SUM(pms.stumpings) as stumpings,
-                                            AVG(CASE WHEN pms.batting_position > 0 THEN pms.batting_position END) as avg_position
-                                        FROM players p
-                                        LEFT JOIN player_match_stats pms ON p.player_id = pms.player_id
-                                        LEFT JOIN matches m ON pms.match_id = m.match_id AND m.match_type = 'T20' AND m.gender = ?
-                                        WHERE p.player_id = ?
-                                        GROUP BY p.player_id
-                                    """, (gender, db_id))
-                                    row = cursor.fetchone()
-                                    if row:
-                                        player_row = dict(row)
-                                
-                                if player_row:
-                                    stats = {
-                                        'total_matches': player_row.get('total_matches', 0),
-                                        'runs_scored': player_row.get('runs_scored', 0),
-                                        'balls_faced': player_row.get('balls_faced', 0),
-                                        'overs_bowled': player_row.get('overs_bowled', 0),
-                                        'wickets_taken': player_row.get('wickets_taken', 0),
-                                        'stumpings': player_row.get('stumpings', 0),
-                                        'avg_batting_position': player_row.get('avg_position', 5.5)
-                                    }
-                                    
-                                    role = infer_role_from_stats(stats)
-                                    role_category = categorize_role(role)
-                                    
-                                    # Get external ID (espn_id or crex_id)
+                                # Convert sqlite3.Row objects to dicts
+                                db_players = [dict(row) for row in cursor.fetchall()]
+                            
+                            # Also try name matching for players without db_player_id (primary method for CREX)
+                            name_matcher = PlayerNameMatcher()
+                            team_name = team_match[1] if team_match else None
+                            for squad_player in team_data.players:
+                                if not squad_player.db_player_id:
+                                    # Try to match by name
+                                    # Get external ID (espn_id or crex_id depending on source)
                                     external_id = getattr(squad_player, 'espn_id', None) or getattr(squad_player, 'crex_id', None)
+                                    matched = name_matcher.find_player(
+                                        squad_player.name,
+                                        team_name=team_name,
+                                        espn_player_id=external_id if source_type == 'ESPN' else None
+                                    )
+                                    if matched:
+                                        squad_player.db_player_id = matched.player_id
+                            
+                            # Build squad from matched players
+                            squad = []
+                            db_players_dict = {p['player_id']: p for p in db_players}
+                            
+                            for squad_player in team_data.players:
+                                db_id = squad_player.db_player_id
+                                
+                                if db_id:
+                                    # Get stats for this player (from query or fetch if name-matched)
+                                    player_row = db_players_dict.get(db_id)
+                                    
+                                    if not player_row:
+                                        # Player was matched by name but not in query - fetch stats
+                                        cursor.execute("""
+                                            SELECT 
+                                                p.player_id,
+                                                p.name,
+                                                COUNT(DISTINCT pms.match_id) as total_matches,
+                                                SUM(pms.runs_scored) as runs_scored,
+                                                SUM(pms.balls_faced) as balls_faced,
+                                                SUM(pms.overs_bowled) as overs_bowled,
+                                                SUM(pms.wickets_taken) as wickets_taken,
+                                                SUM(pms.stumpings) as stumpings,
+                                                AVG(CASE WHEN pms.batting_position > 0 THEN pms.batting_position END) as avg_position
+                                            FROM players p
+                                            LEFT JOIN player_match_stats pms ON p.player_id = pms.player_id
+                                            LEFT JOIN matches m ON pms.match_id = m.match_id AND m.match_type = 'T20' AND m.gender = ?
+                                            WHERE p.player_id = ?
+                                            GROUP BY p.player_id
+                                        """, (gender, db_id))
+                                        row = cursor.fetchone()
+                                        if row:
+                                            player_row = dict(row)
+                                    
+                                    if player_row:
+                                        stats = {
+                                            'total_matches': player_row.get('total_matches', 0),
+                                            'runs_scored': player_row.get('runs_scored', 0),
+                                            'balls_faced': player_row.get('balls_faced', 0),
+                                            'overs_bowled': player_row.get('overs_bowled', 0),
+                                            'wickets_taken': player_row.get('wickets_taken', 0),
+                                            'stumpings': player_row.get('stumpings', 0),
+                                            'avg_batting_position': player_row.get('avg_position', 5.5)
+                                        }
+                                        
+                                        role = infer_role_from_stats(stats)
+                                        role_category = categorize_role(role)
+                                        
+                                        # Get external ID (espn_id or crex_id)
+                                        external_id = getattr(squad_player, 'espn_id', None) or getattr(squad_player, 'crex_id', None)
                                     
                                     squad.append({
                                         'player_id': db_id,
@@ -1725,8 +1700,6 @@ def waterfall_team_selection():
                                         },
                                         'external_id': external_id  # Works for both ESPN and CREX
                                     })
-                        
-                        conn.close()
                         
                         if len(squad) >= 11:
                             # Optimize XI from external squad
@@ -1782,33 +1755,32 @@ def waterfall_team_selection():
         # Step 3: Fallback - optimize from ALL available T20 players
         logger.info(f"No ESPN or database data, optimizing from all available players")
         
-        conn = get_connection()
-        cursor = conn.cursor()
-        
-        # Get top 50 T20 players by experience (mix of batters and bowlers)
-        cursor.execute("""
-            SELECT 
-                p.player_id,
-                p.name,
-                COUNT(DISTINCT pms.match_id) as total_matches,
-                SUM(pms.runs_scored) as runs_scored,
-                SUM(pms.balls_faced) as balls_faced,
-                SUM(pms.overs_bowled) as overs_bowled,
-                SUM(pms.wickets_taken) as wickets_taken,
-                SUM(pms.stumpings) as stumpings,
-                AVG(CASE WHEN pms.batting_position > 0 THEN pms.batting_position END) as avg_position
-            FROM players p
-            JOIN player_match_stats pms ON p.player_id = pms.player_id
-            JOIN matches m ON pms.match_id = m.match_id
-            WHERE m.match_type = 'T20' AND m.gender = ?
-            GROUP BY p.player_id
-            HAVING total_matches > 2
-            ORDER BY total_matches DESC
-            LIMIT 50
-        """, (gender,))
-        
-        players_data = cursor.fetchall()
-        conn.close()
+        with get_db_connection() as conn:
+            cursor = conn.cursor()
+            
+            # Get top 50 T20 players by experience (mix of batters and bowlers)
+            cursor.execute("""
+                SELECT 
+                    p.player_id,
+                    p.name,
+                    COUNT(DISTINCT pms.match_id) as total_matches,
+                    SUM(pms.runs_scored) as runs_scored,
+                    SUM(pms.balls_faced) as balls_faced,
+                    SUM(pms.overs_bowled) as overs_bowled,
+                    SUM(pms.wickets_taken) as wickets_taken,
+                    SUM(pms.stumpings) as stumpings,
+                    AVG(CASE WHEN pms.batting_position > 0 THEN pms.batting_position END) as avg_position
+                FROM players p
+                JOIN player_match_stats pms ON p.player_id = pms.player_id
+                JOIN matches m ON pms.match_id = m.match_id
+                WHERE m.match_type = 'T20' AND m.gender = ?
+                GROUP BY p.player_id
+                HAVING total_matches > 2
+                ORDER BY total_matches DESC
+                LIMIT 50
+            """, (gender,))
+            
+            players_data = cursor.fetchall()
         
         squad = []
         for row in players_data:
@@ -1904,31 +1876,30 @@ def optimize_team_from_squad():
             get_role_display_name, is_bowling_option
         )
         
-        conn = get_connection()
-        cursor = conn.cursor()
-        
-        # Get stats for all squad players
-        placeholders = ','.join('?' * len(squad_ids))
-        cursor.execute(f"""
-            SELECT 
-                p.player_id,
-                p.name,
-                COUNT(DISTINCT pms.match_id) as total_matches,
-                SUM(pms.runs_scored) as runs_scored,
-                SUM(pms.balls_faced) as balls_faced,
-                SUM(pms.overs_bowled) as overs_bowled,
-                SUM(pms.wickets_taken) as wickets_taken,
-                SUM(pms.stumpings) as stumpings,
-                AVG(CASE WHEN pms.batting_position > 0 THEN pms.batting_position END) as avg_batting_position
-            FROM players p
-            JOIN player_match_stats pms ON p.player_id = pms.player_id
-            JOIN matches m ON pms.match_id = m.match_id
-            WHERE p.player_id IN ({placeholders}) AND m.match_type = 'T20' AND m.gender = ?
-            GROUP BY p.player_id
-        """, squad_ids + [gender])
-        
-        squad_data = [dict(row) for row in cursor.fetchall()]
-        conn.close()
+        with get_db_connection() as conn:
+            cursor = conn.cursor()
+            
+            # Get stats for all squad players
+            placeholders = ','.join('?' * len(squad_ids))
+            cursor.execute(f"""
+                SELECT 
+                    p.player_id,
+                    p.name,
+                    COUNT(DISTINCT pms.match_id) as total_matches,
+                    SUM(pms.runs_scored) as runs_scored,
+                    SUM(pms.balls_faced) as balls_faced,
+                    SUM(pms.overs_bowled) as overs_bowled,
+                    SUM(pms.wickets_taken) as wickets_taken,
+                    SUM(pms.stumpings) as stumpings,
+                    AVG(CASE WHEN pms.batting_position > 0 THEN pms.batting_position END) as avg_batting_position
+                FROM players p
+                JOIN player_match_stats pms ON p.player_id = pms.player_id
+                JOIN matches m ON pms.match_id = m.match_id
+                WHERE p.player_id IN ({placeholders}) AND m.match_type = 'T20' AND m.gender = ?
+                GROUP BY p.player_id
+            """, squad_ids + [gender])
+            
+            squad_data = [dict(row) for row in cursor.fetchall()]
         
         # Build squad list with roles
         squad = []
@@ -2048,39 +2019,38 @@ def pad_with_db_fillers(batting_order, team_id, team_elo, gender, format_type):
     canonical_team_id = get_resolver().canonical(team_id) or team_id
 
     try:
-        conn = get_connection()
-        cursor = conn.cursor()
+        with get_db_connection() as conn:
+            cursor = conn.cursor()
 
-        # Always resolve the team's actual current ELO from the DB when possible;
-        # the caller-supplied `team_elo` defaults to 1500 for matched teams which
-        # would select their historically *best* players rather than their average.
-        cursor.execute(
-            f"SELECT COALESCE({team_elo_col}, ?) FROM team_current_elo WHERE team_id = ?",
-            (team_elo, canonical_team_id)
-        )
-        row = cursor.fetchone()
-        resolved_elo = row[0] if row else team_elo
+            # Always resolve the team's actual current ELO from the DB when possible;
+            # the caller-supplied `team_elo` defaults to 1500 for matched teams which
+            # would select their historically *best* players rather than their average.
+            cursor.execute(
+                f"SELECT COALESCE({team_elo_col}, ?) FROM team_current_elo WHERE team_id = ?",
+                (team_elo, canonical_team_id)
+            )
+            row = cursor.fetchone()
+            resolved_elo = row[0] if row else team_elo
 
-        cursor.execute(f"""
-            SELECT DISTINCT pms.player_id,
-                   COALESCE(pce.{elo_col}, 1500) as player_elo,
-                   ABS(COALESCE(pce.{elo_col}, 1500) - ?) as elo_diff
-            FROM player_match_stats pms
-            LEFT JOIN player_current_elo pce ON pms.player_id = pce.player_id
-            JOIN matches m ON pms.match_id = m.match_id
-            WHERE pms.team_id = ?
-              AND m.match_type = ?
-              AND m.gender = ?
-            ORDER BY elo_diff ASC
-            LIMIT ?
-        """, (resolved_elo, team_id, format_type.upper(), gender, n_needed + len(already)))
+            cursor.execute(f"""
+                SELECT DISTINCT pms.player_id,
+                       COALESCE(pce.{elo_col}, 1500) as player_elo,
+                       ABS(COALESCE(pce.{elo_col}, 1500) - ?) as elo_diff
+                FROM player_match_stats pms
+                LEFT JOIN player_current_elo pce ON pms.player_id = pce.player_id
+                JOIN matches m ON pms.match_id = m.match_id
+                WHERE pms.team_id = ?
+                  AND m.match_type = ?
+                  AND m.gender = ?
+                ORDER BY elo_diff ASC
+                LIMIT ?
+            """, (resolved_elo, team_id, format_type.upper(), gender, n_needed + len(already)))
 
-        fillers = []
-        for row in cursor.fetchall():
-            if row['player_id'] not in already and len(fillers) < n_needed:
-                fillers.append(row['player_id'])
-                already.add(row['player_id'])
-        conn.close()
+            fillers = []
+            for row in cursor.fetchall():
+                if row['player_id'] not in already and len(fillers) < n_needed:
+                    fillers.append(row['player_id'])
+                    already.add(row['player_id'])
     except Exception as e:
         logger.warning(f"[PADDING] Could not fetch DB fillers for team {team_id}: {e}")
         return batting_order, []
@@ -2915,20 +2885,19 @@ def simulate_match_stream():
 def get_available_months():
     """Get list of available months for historical ELO data."""
     try:
-        conn = get_connection()
-        cursor = conn.cursor()
-        
-        cursor.execute("""
-            SELECT DISTINCT strftime('%Y-%m', date) as month
-            FROM team_elo_history
-            ORDER BY month DESC
-            LIMIT 36
-        """)
-        
-        months = [row[0] for row in cursor.fetchall()]
-        conn.close()
-        
-        return jsonify({'success': True, 'months': months})
+        with get_db_connection() as conn:
+            cursor = conn.cursor()
+            
+            cursor.execute("""
+                SELECT DISTINCT strftime('%Y-%m', date) as month
+                FROM team_elo_history
+                ORDER BY month DESC
+                LIMIT 36
+            """)
+            
+            months = [row[0] for row in cursor.fetchall()]
+            
+            return jsonify({'success': True, 'months': months})
     
     except Exception as e:
         logger.error(f"Error fetching months: {e}")
@@ -2956,79 +2925,77 @@ def get_team_rankings():
         month = request.args.get('month')  # YYYY-MM or None for current
         limit = int(request.args.get('limit', 50))
         
-        conn = get_connection()
-        cursor = conn.cursor()
-        
-        # Build tier filter clause
-        tier_clause = f"AND t.tier = {tier_filter}" if tier_filter else ""
-        
-        if month:
-            # Get historical data for specific month (end of month snapshot)
-            cursor.execute(f"""
-                SELECT t.team_id, t.name, t.tier, h.elo, 
-                       (SELECT COUNT(*) FROM matches m 
-                        WHERE (m.team1_id = t.team_id OR m.team2_id = t.team_id)
-                          AND m.match_type = ? AND m.gender = ?
-                          AND m.date <= date(? || '-01', '+1 month', '-1 day')) as match_count,
-                       NULL as elo_change_30d,
-                       (SELECT MAX(date) FROM team_elo_history h2 
-                        WHERE h2.team_id = t.team_id AND h2.format = ? AND h2.gender = ?
-                          AND h2.date <= date(? || '-01', '+1 month', '-1 day')) as last_match_date
-                FROM team_elo_history h
-                JOIN teams t ON h.team_id = t.team_id
-                WHERE h.format = ? AND h.gender = ?
-                  AND strftime('%Y-%m', h.date) = ?
-                  {tier_clause}
-                GROUP BY t.team_id
-                HAVING match_count >= ?
-                ORDER BY h.elo DESC
-                LIMIT ?
-            """, (format_type, gender, month, format_type, gender, month, 
-                  format_type, gender, month, min_matches, limit))
-        else:
-            # Get current ELO with tier information and 30-day change
-            elo_col = f"elo_{format_type.lower()}_{gender}"
-            cursor.execute(f"""
-                SELECT t.team_id, t.name, t.tier, e.{elo_col} as elo,
-                       (SELECT COUNT(*) FROM matches m 
-                        WHERE (m.team1_id = t.team_id OR m.team2_id = t.team_id)
-                          AND m.match_type = ? AND m.gender = ?) as match_count,
-                       (SELECT ROUND(e.{elo_col} - h_30d.elo, 1)
-                        FROM team_elo_history h_30d
-                        WHERE h_30d.team_id = t.team_id 
-                          AND h_30d.format = ? AND h_30d.gender = ?
-                          AND h_30d.date <= date('now', '-30 days')
-                        ORDER BY h_30d.date DESC
-                        LIMIT 1) as elo_change_30d,
-                       e.last_{format_type.lower()}_{gender}_date as last_match_date
-                FROM team_current_elo e
-                JOIN teams t ON e.team_id = t.team_id
-                WHERE e.{elo_col} IS NOT NULL AND e.{elo_col} != 1500
-                  {tier_clause}
-                GROUP BY t.team_id
-                HAVING match_count >= ?
-                ORDER BY e.{elo_col} DESC
-                LIMIT ?
-            """, (format_type, gender, format_type, gender, min_matches, limit))
-        
-        rankings = []
-        for idx, row in enumerate(cursor.fetchall(), 1):
-            rankings.append({
-                'rank': idx,
-                'team_id': row[0],
-                'name': row[1],
-                'tier': row[2] or 3,  # Default to tier 3 if NULL
-                'elo': round(row[3], 1),
-                'matches': row[4],
-                'elo_change_30d': row[5] or 0,
-                'last_match_date': row[6]
-            })
-        
-        conn.close()
-        
-        return jsonify({
-            'success': True,
-            'rankings': rankings,
+        with get_db_connection() as conn:
+            cursor = conn.cursor()
+            
+            # Build tier filter clause
+            tier_clause = f"AND t.tier = {tier_filter}" if tier_filter else ""
+            
+            if month:
+                # Get historical data for specific month (end of month snapshot)
+                cursor.execute(f"""
+                    SELECT t.team_id, t.name, t.tier, h.elo, 
+                           (SELECT COUNT(*) FROM matches m 
+                            WHERE (m.team1_id = t.team_id OR m.team2_id = t.team_id)
+                              AND m.match_type = ? AND m.gender = ?
+                              AND m.date <= date(? || '-01', '+1 month', '-1 day')) as match_count,
+                           NULL as elo_change_30d,
+                           (SELECT MAX(date) FROM team_elo_history h2 
+                            WHERE h2.team_id = t.team_id AND h2.format = ? AND h2.gender = ?
+                              AND h2.date <= date(? || '-01', '+1 month', '-1 day')) as last_match_date
+                    FROM team_elo_history h
+                    JOIN teams t ON h.team_id = t.team_id
+                    WHERE h.format = ? AND h.gender = ?
+                      AND strftime('%Y-%m', h.date) = ?
+                      {tier_clause}
+                    GROUP BY t.team_id
+                    HAVING match_count >= ?
+                    ORDER BY h.elo DESC
+                    LIMIT ?
+                """, (format_type, gender, month, format_type, gender, month, 
+                      format_type, gender, month, min_matches, limit))
+            else:
+                # Get current ELO with tier information and 30-day change
+                elo_col = f"elo_{format_type.lower()}_{gender}"
+                cursor.execute(f"""
+                    SELECT t.team_id, t.name, t.tier, e.{elo_col} as elo,
+                           (SELECT COUNT(*) FROM matches m 
+                            WHERE (m.team1_id = t.team_id OR m.team2_id = t.team_id)
+                              AND m.match_type = ? AND m.gender = ?) as match_count,
+                           (SELECT ROUND(e.{elo_col} - h_30d.elo, 1)
+                            FROM team_elo_history h_30d
+                            WHERE h_30d.team_id = t.team_id 
+                              AND h_30d.format = ? AND h_30d.gender = ?
+                              AND h_30d.date <= date('now', '-30 days')
+                            ORDER BY h_30d.date DESC
+                            LIMIT 1) as elo_change_30d,
+                           e.last_{format_type.lower()}_{gender}_date as last_match_date
+                    FROM team_current_elo e
+                    JOIN teams t ON e.team_id = t.team_id
+                    WHERE e.{elo_col} IS NOT NULL AND e.{elo_col} != 1500
+                      {tier_clause}
+                    GROUP BY t.team_id
+                    HAVING match_count >= ?
+                    ORDER BY e.{elo_col} DESC
+                    LIMIT ?
+                """, (format_type, gender, format_type, gender, min_matches, limit))
+            
+            rankings = []
+            for idx, row in enumerate(cursor.fetchall(), 1):
+                rankings.append({
+                    'rank': idx,
+                    'team_id': row[0],
+                    'name': row[1],
+                    'tier': row[2] or 3,  # Default to tier 3 if NULL
+                    'elo': round(row[3], 1),
+                    'matches': row[4],
+                    'elo_change_30d': row[5] or 0,
+                    'last_match_date': row[6]
+                })
+            
+            return jsonify({
+                'success': True,
+                'rankings': rankings,
             'filters': {
                 'format': format_type,
                 'gender': gender,
@@ -3054,28 +3021,27 @@ def get_batting_rankings():
         
         elo_col = f"batting_elo_{format_type.lower()}_{gender}"
         
-        conn = get_connection()
-        cursor = conn.cursor()
-        
-        cursor.execute(f"""
-            SELECT p.name, p.country as team, e.{elo_col} as elo,
-                   (SELECT COUNT(DISTINCT pms.match_id) FROM player_match_stats pms
-                    JOIN matches m ON pms.match_id = m.match_id
-                    WHERE pms.player_id = p.player_id 
-                      AND m.match_type = ? AND m.gender = ?) as match_count
-            FROM player_current_elo e
-            JOIN players p ON e.player_id = p.player_id
-            WHERE e.{elo_col} IS NOT NULL AND e.{elo_col} != 1500
-            GROUP BY p.player_id
-            HAVING match_count >= ?
-            ORDER BY e.{elo_col} DESC
-            LIMIT 30
-        """, (format_type, gender, min_matches))
-        
-        rankings = [{'name': r[0], 'team': r[1] or '', 'elo': round(r[2], 1), 'matches': r[3]} for r in cursor.fetchall()]
-        conn.close()
-        
-        return jsonify({'success': True, 'rankings': rankings})
+        with get_db_connection() as conn:
+            cursor = conn.cursor()
+            
+            cursor.execute(f"""
+                SELECT p.name, p.country as team, e.{elo_col} as elo,
+                       (SELECT COUNT(DISTINCT pms.match_id) FROM player_match_stats pms
+                        JOIN matches m ON pms.match_id = m.match_id
+                        WHERE pms.player_id = p.player_id 
+                          AND m.match_type = ? AND m.gender = ?) as match_count
+                FROM player_current_elo e
+                JOIN players p ON e.player_id = p.player_id
+                WHERE e.{elo_col} IS NOT NULL AND e.{elo_col} != 1500
+                GROUP BY p.player_id
+                HAVING match_count >= ?
+                ORDER BY e.{elo_col} DESC
+                LIMIT 30
+            """, (format_type, gender, min_matches))
+            
+            rankings = [{'name': r[0], 'team': r[1] or '', 'elo': round(r[2], 1), 'matches': r[3]} for r in cursor.fetchall()]
+            
+            return jsonify({'success': True, 'rankings': rankings})
     
     except Exception as e:
         logger.error(f"Error fetching batting rankings: {e}")
@@ -3094,28 +3060,27 @@ def get_bowling_rankings():
         
         elo_col = f"bowling_elo_{format_type.lower()}_{gender}"
         
-        conn = get_connection()
-        cursor = conn.cursor()
-        
-        cursor.execute(f"""
-            SELECT p.name, p.country as team, e.{elo_col} as elo,
-                   (SELECT COUNT(DISTINCT pms.match_id) FROM player_match_stats pms
-                    JOIN matches m ON pms.match_id = m.match_id
-                    WHERE pms.player_id = p.player_id 
-                      AND m.match_type = ? AND m.gender = ?) as match_count
-            FROM player_current_elo e
-            JOIN players p ON e.player_id = p.player_id
-            WHERE e.{elo_col} IS NOT NULL AND e.{elo_col} != 1500
-            GROUP BY p.player_id
-            HAVING match_count >= ?
-            ORDER BY e.{elo_col} DESC
-            LIMIT 30
-        """, (format_type, gender, min_matches))
-        
-        rankings = [{'name': r[0], 'team': r[1] or '', 'elo': round(r[2], 1), 'matches': r[3]} for r in cursor.fetchall()]
-        conn.close()
-        
-        return jsonify({'success': True, 'rankings': rankings})
+        with get_db_connection() as conn:
+            cursor = conn.cursor()
+            
+            cursor.execute(f"""
+                SELECT p.name, p.country as team, e.{elo_col} as elo,
+                       (SELECT COUNT(DISTINCT pms.match_id) FROM player_match_stats pms
+                        JOIN matches m ON pms.match_id = m.match_id
+                        WHERE pms.player_id = p.player_id 
+                          AND m.match_type = ? AND m.gender = ?) as match_count
+                FROM player_current_elo e
+                JOIN players p ON e.player_id = p.player_id
+                WHERE e.{elo_col} IS NOT NULL AND e.{elo_col} != 1500
+                GROUP BY p.player_id
+                HAVING match_count >= ?
+                ORDER BY e.{elo_col} DESC
+                LIMIT 30
+            """, (format_type, gender, min_matches))
+            
+            rankings = [{'name': r[0], 'team': r[1] or '', 'elo': round(r[2], 1), 'matches': r[3]} for r in cursor.fetchall()]
+            
+            return jsonify({'success': True, 'rankings': rankings})
     
     except Exception as e:
         logger.error(f"Error fetching bowling rankings: {e}")
@@ -3128,46 +3093,44 @@ def get_bowling_rankings():
 def get_tier_statistics():
     """Get statistics about team tier distribution."""
     try:
-        conn = get_connection()
-        cursor = conn.cursor()
-        
-        # Get team counts by tier
-        cursor.execute("""
-            SELECT tier, COUNT(*) as team_count
-            FROM teams
-            WHERE tier IS NOT NULL
-            GROUP BY tier
-            ORDER BY tier
-        """)
-        
-        tier_counts = {}
-        tier_names = {
-            1: "Elite Full Members",
-            2: "Full Members",
-            3: "Top Associates/Premier Franchises",
-            4: "Associates/Regional",
-            5: "Emerging/Domestic"
-        }
-        
-        for row in cursor.fetchall():
-            tier = row[0]
-            tier_counts[tier] = {
-                'tier': tier,
-                'name': tier_names.get(tier, f"Tier {tier}"),
-                'team_count': row[1]
+        with get_db_connection() as conn:
+            cursor = conn.cursor()
+            
+            # Get team counts by tier
+            cursor.execute("""
+                SELECT tier, COUNT(*) as team_count
+                FROM teams
+                WHERE tier IS NOT NULL
+                GROUP BY tier
+                ORDER BY tier
+            """)
+            
+            tier_counts = {}
+            tier_names = {
+                1: "Elite Full Members",
+                2: "Full Members",
+                3: "Top Associates/Premier Franchises",
+                4: "Associates/Regional",
+                5: "Emerging/Domestic"
             }
-        
-        # Get promotion flags count
-        cursor.execute("SELECT COUNT(*) FROM promotion_review_flags WHERE reviewed = FALSE")
-        pending_flags = cursor.fetchone()[0]
-        
-        conn.close()
-        
-        return jsonify({
-            'success': True,
-            'tier_counts': list(tier_counts.values()),
-            'pending_promotion_flags': pending_flags
-        })
+            
+            for row in cursor.fetchall():
+                tier = row[0]
+                tier_counts[tier] = {
+                    'tier': tier,
+                    'name': tier_names.get(tier, f"Tier {tier}"),
+                    'team_count': row[1]
+                }
+            
+            # Get promotion flags count
+            cursor.execute("SELECT COUNT(*) FROM promotion_review_flags WHERE reviewed = FALSE")
+            pending_flags = cursor.fetchone()[0]
+            
+            return jsonify({
+                'success': True,
+                'tier_counts': list(tier_counts.values()),
+                'pending_promotion_flags': pending_flags
+            })
     
     except Exception as e:
         logger.error(f"Error fetching tier statistics: {e}")
@@ -3402,24 +3365,23 @@ def get_t20_match(match_id):
             def get_player_details(player_ids, gender):
                 if not player_ids:
                     return []
-                conn = get_connection()
-                cursor = conn.cursor()
-                placeholders = ','.join('?' * len(player_ids))
-                elo_col_bat = f'batting_elo_t20_{gender}'
-                elo_col_bowl = f'bowling_elo_t20_{gender}'
-                cursor.execute(f"""
-                    SELECT p.player_id, p.name,
-                           COALESCE(e.{elo_col_bat}, 1500) as batting_elo,
-                           COALESCE(e.{elo_col_bowl}, 1500) as bowling_elo
-                    FROM players p
-                    LEFT JOIN player_current_elo e ON p.player_id = e.player_id
-                    WHERE p.player_id IN ({placeholders})
-                """, player_ids)
-                players = [dict(row) for row in cursor.fetchall()]
-                conn.close()
-                # Sort by original order
-                id_to_player = {p['player_id']: p for p in players}
-                return [id_to_player[pid] for pid in player_ids if pid in id_to_player]
+                with get_db_connection() as conn:
+                    cursor = conn.cursor()
+                    placeholders = ','.join('?' * len(player_ids))
+                    elo_col_bat = f'batting_elo_t20_{gender}'
+                    elo_col_bowl = f'bowling_elo_t20_{gender}'
+                    cursor.execute(f"""
+                        SELECT p.player_id, p.name,
+                               COALESCE(e.{elo_col_bat}, 1500) as batting_elo,
+                               COALESCE(e.{elo_col_bowl}, 1500) as bowling_elo
+                        FROM players p
+                        LEFT JOIN player_current_elo e ON p.player_id = e.player_id
+                        WHERE p.player_id IN ({placeholders})
+                    """, player_ids)
+                    players = [dict(row) for row in cursor.fetchall()]
+                    # Sort by original order
+                    id_to_player = {p['player_id']: p for p in players}
+                    return [id_to_player[pid] for pid in player_ids if pid in id_to_player]
             
             team1_players = get_player_details(team1_recent_xi, gender)
             team2_players = get_player_details(team2_recent_xi, gender)
@@ -3542,17 +3504,16 @@ def _get_player_names(player_ids: list) -> dict:
     if not player_ids:
         return {}
     
-    conn = get_connection()
-    cursor = conn.cursor()
-    
-    placeholders = ','.join('?' for _ in player_ids)
-    cursor.execute(f"""
-        SELECT player_id, name FROM players WHERE player_id IN ({placeholders})
-    """, player_ids)
-    
-    result = {row['player_id']: row['name'] for row in cursor.fetchall()}
-    conn.close()
-    return result
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        
+        placeholders = ','.join('?' for _ in player_ids)
+        cursor.execute(f"""
+            SELECT player_id, name FROM players WHERE player_id IN ({placeholders})
+        """, player_ids)
+        
+        result = {row['player_id']: row['name'] for row in cursor.fetchall()}
+        return result
 
 
 @app.route('/api/wbbl/fixtures', methods=['GET'])
@@ -3994,68 +3955,66 @@ def get_crex_match():
             """Load recent lineup from database for a team."""
             from src.utils.role_classifier import infer_role_from_stats
             
-            conn = get_connection()
-            cursor = conn.cursor()
-            
-            # Get the most recent match for this team
-            cursor.execute("""
-                SELECT m.match_id FROM matches m
-                WHERE (m.team1_id = ? OR m.team2_id = ?)
-                  AND m.match_type = 'T20' AND m.gender = ?
-                ORDER BY m.date DESC LIMIT 1
-            """, (team_id, team_id, gender))
-            match_row = cursor.fetchone()
-            
-            if not match_row:
-                conn.close()
-                return []
-            
-            match_id = match_row['match_id']
-            
-            # Get players from that match
-            cursor.execute("""
-                SELECT 
-                    p.player_id, p.name,
-                    (SELECT SUM(overs_bowled) FROM player_match_stats WHERE player_id = p.player_id) as overs,
-                    (SELECT SUM(wickets_taken) FROM player_match_stats WHERE player_id = p.player_id) as wickets,
-                    (SELECT SUM(runs_scored) FROM player_match_stats WHERE player_id = p.player_id) as runs,
-                    (SELECT SUM(balls_faced) FROM player_match_stats WHERE player_id = p.player_id) as balls,
-                    (SELECT SUM(stumpings) FROM player_match_stats WHERE player_id = p.player_id) as stumpings
-                FROM player_match_stats pms
-                JOIN players p ON pms.player_id = p.player_id
-                WHERE pms.match_id = ? AND pms.team_id = ?
-                ORDER BY pms.batting_position
-            """, (match_id, team_id))
-            
-            players = []
-            for row in cursor.fetchall():
-                stats = {
-                    'total_matches': 1,
-                    'runs_scored': row['runs'] or 0,
-                    'balls_faced': row['balls'] or 0,
-                    'overs_bowled': row['overs'] or 0,
-                    'wickets_taken': row['wickets'] or 0,
-                    'stumpings': row['stumpings'] or 0
-                }
-                role = infer_role_from_stats(stats)
-                # role can be an enum or string, handle both
-                role_name = role.value if hasattr(role, 'value') else str(role)
-                role_str = 'WK' if 'keeper' in role_name.lower() else ('All Rounder' if 'all' in role_name.lower() else ('Bowler' if 'bowl' in role_name.lower() else 'Batter'))
+            with get_db_connection() as conn:
+                cursor = conn.cursor()
                 
-                players.append({
-                    'crex_id': None,
-                    'name': row['name'],
-                    'short_name': row['name'].split()[0] if row['name'] else 'Unknown',
-                    'role': role_str,
-                    'is_captain': False,
-                    'is_wicketkeeper': 'keeper' in role_name.lower(),
-                    'is_overseas': False,
-                    'db_player_id': row['player_id']
-                })
-            
-            conn.close()
-            logger.info(f"Loaded {len(players)} players from database for {team_name}")
-            return players
+                # Get the most recent match for this team
+                cursor.execute("""
+                    SELECT m.match_id FROM matches m
+                    WHERE (m.team1_id = ? OR m.team2_id = ?)
+                      AND m.match_type = 'T20' AND m.gender = ?
+                    ORDER BY m.date DESC LIMIT 1
+                """, (team_id, team_id, gender))
+                match_row = cursor.fetchone()
+                
+                if not match_row:
+                    return []
+                
+                match_id = match_row['match_id']
+                
+                # Get players from that match
+                cursor.execute("""
+                    SELECT 
+                        p.player_id, p.name,
+                        (SELECT SUM(overs_bowled) FROM player_match_stats WHERE player_id = p.player_id) as overs,
+                        (SELECT SUM(wickets_taken) FROM player_match_stats WHERE player_id = p.player_id) as wickets,
+                        (SELECT SUM(runs_scored) FROM player_match_stats WHERE player_id = p.player_id) as runs,
+                        (SELECT SUM(balls_faced) FROM player_match_stats WHERE player_id = p.player_id) as balls,
+                        (SELECT SUM(stumpings) FROM player_match_stats WHERE player_id = p.player_id) as stumpings
+                    FROM player_match_stats pms
+                    JOIN players p ON pms.player_id = p.player_id
+                    WHERE pms.match_id = ? AND pms.team_id = ?
+                    ORDER BY pms.batting_position
+                """, (match_id, team_id))
+                
+                players = []
+                for row in cursor.fetchall():
+                    stats = {
+                        'total_matches': 1,
+                        'runs_scored': row['runs'] or 0,
+                        'balls_faced': row['balls'] or 0,
+                        'overs_bowled': row['overs'] or 0,
+                        'wickets_taken': row['wickets'] or 0,
+                        'stumpings': row['stumpings'] or 0
+                    }
+                    role = infer_role_from_stats(stats)
+                    # role can be an enum or string, handle both
+                    role_name = role.value if hasattr(role, 'value') else str(role)
+                    role_str = 'WK' if 'keeper' in role_name.lower() else ('All Rounder' if 'all' in role_name.lower() else ('Bowler' if 'bowl' in role_name.lower() else 'Batter'))
+                    
+                    players.append({
+                        'crex_id': None,
+                        'name': row['name'],
+                        'short_name': row['name'].split()[0] if row['name'] else 'Unknown',
+                        'role': role_str,
+                        'is_captain': False,
+                        'is_wicketkeeper': 'keeper' in role_name.lower(),
+                        'is_overseas': False,
+                        'db_player_id': row['player_id']
+                    })
+                
+                logger.info(f"Loaded {len(players)} players from database for {team_name}")
+                return players
         
         if match.team1:
             logger.info(f"[CREX DEBUG] Team1 '{match.team1.name}' has {len(match.team1.players)} players from CREX scrape")
@@ -4218,11 +4177,10 @@ def get_crex_match():
                 for alt_team_id, count in sorted(squad2_team['all_affiliations'].items(), key=lambda x: -x[1]):
                     if alt_team_id != team1_db['team_id']:
                         # Get team name for this alternative
-                        conn = get_connection()
-                        cursor = conn.cursor()
-                        cursor.execute("SELECT name FROM teams WHERE team_id = ?", (alt_team_id,))
-                        result = cursor.fetchone()
-                        conn.close()
+                        with get_db_connection() as conn:
+                            cursor = conn.cursor()
+                            cursor.execute("SELECT name FROM teams WHERE team_id = ?", (alt_team_id,))
+                            result = cursor.fetchone()
                         
                         if result:
                             alt_team_name = result['name']
@@ -4237,11 +4195,10 @@ def get_crex_match():
                 # Squad2 wins the conflict, Squad1 gets its best alternative team
                 for alt_team_id, count in sorted(squad1_team['all_affiliations'].items(), key=lambda x: -x[1]):
                     if alt_team_id != team2_db['team_id']:
-                        conn = get_connection()
-                        cursor = conn.cursor()
-                        cursor.execute("SELECT name FROM teams WHERE team_id = ?", (alt_team_id,))
-                        result = cursor.fetchone()
-                        conn.close()
+                        with get_db_connection() as conn:
+                            cursor = conn.cursor()
+                            cursor.execute("SELECT name FROM teams WHERE team_id = ?", (alt_team_id,))
+                            result = cursor.fetchone()
                         
                         if result:
                             alt_team_name = result['name']
@@ -4316,16 +4273,15 @@ def get_crex_match():
         def find_team_in_db(team_name, gender):
             """Find team in database by name using improved matching."""
             from difflib import SequenceMatcher
-            conn = get_connection()
-            cursor = conn.cursor()
-            cursor.execute("""
-                SELECT DISTINCT t.team_id, t.name 
-                FROM teams t
-                JOIN matches m ON t.team_id IN (m.team1_id, m.team2_id)
-                WHERE m.gender = ? AND m.match_type = 'T20'
-            """, (gender,))
-            teams = cursor.fetchall()
-            conn.close()
+            with get_db_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute("""
+                    SELECT DISTINCT t.team_id, t.name 
+                    FROM teams t
+                    JOIN matches m ON t.team_id IN (m.team1_id, m.team2_id)
+                    WHERE m.gender = ? AND m.match_type = 'T20'
+                """, (gender,))
+                teams = cursor.fetchall()
             
             # Direction words that must match exactly
             directions = {'northern', 'southern', 'eastern', 'western', 'central'}
@@ -4446,13 +4402,12 @@ def get_crex_match():
             # Look up DB team name if we have a db_team_id
             db_team_name = None
             if team.db_team_id:
-                conn = get_connection()
-                cursor = conn.cursor()
-                cursor.execute("SELECT name FROM teams WHERE team_id = ?", (team.db_team_id,))
-                row = cursor.fetchone()
-                conn.close()
-                if row:
-                    db_team_name = row['name']
+                with get_db_connection() as conn:
+                    cursor = conn.cursor()
+                    cursor.execute("SELECT name FROM teams WHERE team_id = ?", (team.db_team_id,))
+                    row = cursor.fetchone()
+                    if row:
+                        db_team_name = row['name']
             return {
                 'crex_id': team.crex_id,
                 'name': team.name,
@@ -5583,7 +5538,8 @@ def _enrich_betting_bets(conn, bets: List[Dict[str, Any]]) -> None:
 def betting_bets():
     """Wave 5.8.3: Live bets (card UI) — mirrors /api/paper/bets for real bets.
 
-    Query: ?status=open|settled|all (default 'all'), ?limit=200, ?strategy=name
+    Query: ?status=open|settled|all (default 'all'), ?limit=200, ?strategy=name,
+            ?days=N (settled only — bets with settled_at in the last N UTC days)
 
     Drives the card-style 'Open Live Bets' and 'Recent Settled' sections on
     /live-betting, analogous to /paper-trades but restricted to bet_kind='real'.
@@ -5591,8 +5547,10 @@ def betting_bets():
     try:
         status = (request.args.get('status') or 'all').lower()
         strategy = request.args.get('strategy')
+        days_param = request.args.get('days')
         try:
-            limit = max(1, min(int(request.args.get('limit') or 200), 500))
+            default_limit = 500 if (status == 'settled' and days_param) else 200
+            limit = max(1, min(int(request.args.get('limit') or default_limit), 500))
         except ValueError:
             limit = 200
 
@@ -5604,6 +5562,14 @@ def betting_bets():
         elif status == 'settled':
             where.append("status = 'settled'")
             order_by = "settled_at DESC"
+            if days_param is not None:
+                try:
+                    days = max(1, min(int(days_param), 90))
+                except ValueError:
+                    days = 7
+                since = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+                where.append("settled_at >= ?")
+                params.append(since)
         else:
             order_by = "proposed_at DESC"
         if strategy:
@@ -5632,11 +5598,16 @@ def betting_bets():
 
 @app.route('/api/betting/recent-settled', methods=['GET'])
 def betting_recent_settled():
-    """Last 50 settled REAL bets.
+    """Settled REAL bets in the last N days (default 7).
 
-    Wave 5.8: filters bet_kind='real'; paper bets surfaced at /paper-trades.
+    Query: ?days=7 (max 90). Wave 5.8: bet_kind='real' only.
     """
     try:
+        try:
+            days = max(1, min(int(request.args.get('days') or 7), 90))
+        except ValueError:
+            days = 7
+        since = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
         with get_db_connection() as conn:
             cur = conn.cursor()
             cur.execute(
@@ -5644,9 +5615,11 @@ def betting_recent_settled():
                 SELECT * FROM bet_ledger
                 WHERE COALESCE(bet_kind, 'real') = 'real'
                   AND settled_at IS NOT NULL
+                  AND settled_at >= ?
                 ORDER BY settled_at DESC
-                LIMIT 50
-                """
+                LIMIT 500
+                """,
+                (since,),
             )
             bets = [dict(r) for r in cur.fetchall()]
             _enrich_betting_bets(conn, bets)
@@ -6758,42 +6731,40 @@ def get_db_status():
         JSON with database statistics by gender and format
     """
     try:
-        conn = get_connection()
-        cursor = conn.cursor()
-        
-        # Get T20 match statistics by gender
-        cursor.execute("""
-            SELECT 
-                gender,
-                COUNT(*) as total_matches,
-                MIN(date) as earliest_date,
-                MAX(date) as latest_date
-            FROM matches
-            WHERE match_type = 'T20'
-            GROUP BY gender
-        """)
-        
-        match_stats = {}
-        for row in cursor.fetchall():
-            gender = row['gender']
-            match_stats[gender] = {
-                'total_matches': row['total_matches'],
-                'earliest_date': row['earliest_date'],
-                'latest_date': row['latest_date'],
-                'days_since_latest': (datetime.now().date() - datetime.strptime(row['latest_date'], '%Y-%m-%d').date()).days if row['latest_date'] else None
-            }
-        
-        # Get overall statistics
-        cursor.execute("SELECT COUNT(DISTINCT player_id) FROM player_match_stats")
-        total_players = cursor.fetchone()[0]
-        
-        cursor.execute("SELECT COUNT(DISTINCT team_id) FROM teams")
-        total_teams = cursor.fetchone()[0]
-        
-        cursor.execute("SELECT COUNT(*) FROM deliveries")
-        total_deliveries = cursor.fetchone()[0]
-        
-        conn.close()
+        with get_db_connection() as conn:
+            cursor = conn.cursor()
+            
+            # Get T20 match statistics by gender
+            cursor.execute("""
+                SELECT 
+                    gender,
+                    COUNT(*) as total_matches,
+                    MIN(date) as earliest_date,
+                    MAX(date) as latest_date
+                FROM matches
+                WHERE match_type = 'T20'
+                GROUP BY gender
+            """)
+            
+            match_stats = {}
+            for row in cursor.fetchall():
+                gender = row['gender']
+                match_stats[gender] = {
+                    'total_matches': row['total_matches'],
+                    'earliest_date': row['earliest_date'],
+                    'latest_date': row['latest_date'],
+                    'days_since_latest': (datetime.now().date() - datetime.strptime(row['latest_date'], '%Y-%m-%d').date()).days if row['latest_date'] else None
+                }
+            
+            # Get overall statistics
+            cursor.execute("SELECT COUNT(DISTINCT player_id) FROM player_match_stats")
+            total_players = cursor.fetchone()[0]
+            
+            cursor.execute("SELECT COUNT(DISTINCT team_id) FROM teams")
+            total_teams = cursor.fetchone()[0]
+            
+            cursor.execute("SELECT COUNT(*) FROM deliveries")
+            total_deliveries = cursor.fetchone()[0]
 
         # Optional: include Cricsheet source freshness (cached)
         source_status = None
@@ -7265,38 +7236,37 @@ def get_promotion_flags():
         JSON with list of teams flagged for tier review
     """
     try:
-        conn = get_connection()
-        cursor = conn.cursor()
-        
-        cursor.execute("""
-            SELECT 
-                prf.*,
-                t.name as team_name
-            FROM promotion_review_flags prf
-            JOIN teams t ON prf.team_id = t.team_id
-            WHERE prf.reviewed = FALSE
-            ORDER BY prf.flagged_date DESC
-        """)
-        
-        flags = []
-        for row in cursor.fetchall():
-            flags.append({
-                'flag_id': row['flag_id'],
-                'team_id': row['team_id'],
-                'team_name': row['team_name'],
-                'format': row['format'],
-                'gender': row['gender'],
-                'current_tier': row['current_tier'],
-                'suggested_tier': row['suggested_tier'],
-                'trigger_reason': row['trigger_reason'],
-                'current_elo': row['current_elo'],
-                'months_at_ceiling': row['months_at_ceiling'],
-                'cross_tier_record': row['cross_tier_record'],
-                'flagged_date': row['flagged_date']
-            })
-        
-        conn.close()
-        return jsonify({'success': True, 'flags': flags})
+        with get_db_connection() as conn:
+            cursor = conn.cursor()
+            
+            cursor.execute("""
+                SELECT 
+                    prf.*,
+                    t.name as team_name
+                FROM promotion_review_flags prf
+                JOIN teams t ON prf.team_id = t.team_id
+                WHERE prf.reviewed = FALSE
+                ORDER BY prf.flagged_date DESC
+            """)
+            
+            flags = []
+            for row in cursor.fetchall():
+                flags.append({
+                    'flag_id': row['flag_id'],
+                    'team_id': row['team_id'],
+                    'team_name': row['team_name'],
+                    'format': row['format'],
+                    'gender': row['gender'],
+                    'current_tier': row['current_tier'],
+                    'suggested_tier': row['suggested_tier'],
+                    'trigger_reason': row['trigger_reason'],
+                    'current_elo': row['current_elo'],
+                    'months_at_ceiling': row['months_at_ceiling'],
+                    'cross_tier_record': row['cross_tier_record'],
+                    'flagged_date': row['flagged_date']
+                })
+            
+            return jsonify({'success': True, 'flags': flags})
     
     except Exception as e:
         logger.error(f"Error getting promotion flags: {e}")
@@ -7315,50 +7285,46 @@ def approve_promotion(flag_id):
         JSON with success status
     """
     try:
-        conn = get_connection()
-        cursor = conn.cursor()
-        
-        # Get flag details
-        cursor.execute("""
-            SELECT * FROM promotion_review_flags WHERE flag_id = ?
-        """, (flag_id,))
-        flag = cursor.fetchone()
-        
-        if not flag:
-            conn.close()
-            return jsonify({'success': False, 'error': 'Flag not found'}), 404
-        
-        # Update team tier
-        cursor.execute("""
-            UPDATE teams 
-            SET tier = ?, 
-                tier_last_reviewed = CURRENT_DATE, 
-                tier_notes = ?
-            WHERE team_id = ?
-        """, (
-            flag['suggested_tier'],
-            f"Promoted/relegated from tier {flag['current_tier']} on {datetime.now().strftime('%Y-%m-%d')}",
-            flag['team_id']
-        ))
-        
-        # Mark flag as reviewed
-        cursor.execute("""
-            UPDATE promotion_review_flags
-            SET reviewed = TRUE, 
-                reviewed_date = CURRENT_DATE,
-                reviewer_notes = 'Approved - tier changed'
-            WHERE flag_id = ?
-        """, (flag_id,))
-        
-        conn.commit()
-        conn.close()
-        
-        logger.info(f"Approved promotion flag {flag_id}: team {flag['team_id']} tier {flag['current_tier']} → {flag['suggested_tier']}")
-        
-        return jsonify({
-            'success': True, 
-            'message': f'Team tier updated from {flag["current_tier"]} to {flag["suggested_tier"]}'
-        })
+        with get_db_connection() as conn:
+            cursor = conn.cursor()
+            
+            # Get flag details
+            cursor.execute("""
+                SELECT * FROM promotion_review_flags WHERE flag_id = ?
+            """, (flag_id,))
+            flag = cursor.fetchone()
+            
+            if not flag:
+                return jsonify({'success': False, 'error': 'Flag not found'}), 404
+            
+            # Update team tier
+            cursor.execute("""
+                UPDATE teams 
+                SET tier = ?, 
+                    tier_last_reviewed = CURRENT_DATE, 
+                    tier_notes = ?
+                WHERE team_id = ?
+            """, (
+                flag['suggested_tier'],
+                f"Promoted/relegated from tier {flag['current_tier']} on {datetime.now().strftime('%Y-%m-%d')}",
+                flag['team_id']
+            ))
+            
+            # Mark flag as reviewed
+            cursor.execute("""
+                UPDATE promotion_review_flags
+                SET reviewed = TRUE, 
+                    reviewed_date = CURRENT_DATE,
+                    reviewer_notes = 'Approved - tier changed'
+                WHERE flag_id = ?
+            """, (flag_id,))
+            
+            logger.info(f"Approved promotion flag {flag_id}: team {flag['team_id']} tier {flag['current_tier']} → {flag['suggested_tier']}")
+            
+            return jsonify({
+                'success': True, 
+                'message': f'Team tier updated from {flag["current_tier"]} to {flag["suggested_tier"]}'
+            })
     
     except Exception as e:
         logger.error(f"Error approving promotion: {e}")
@@ -7385,30 +7351,26 @@ def reject_promotion(flag_id):
         data = request.get_json() or {}
         notes = data.get('notes', 'Rejected by admin')
         
-        conn = get_connection()
-        cursor = conn.cursor()
-        
-        # Check flag exists
-        cursor.execute("SELECT flag_id FROM promotion_review_flags WHERE flag_id = ?", (flag_id,))
-        if not cursor.fetchone():
-            conn.close()
-            return jsonify({'success': False, 'error': 'Flag not found'}), 404
-        
-        # Mark flag as reviewed
-        cursor.execute("""
-            UPDATE promotion_review_flags
-            SET reviewed = TRUE, 
-                reviewed_date = CURRENT_DATE, 
-                reviewer_notes = ?
-            WHERE flag_id = ?
-        """, (notes, flag_id))
-        
-        conn.commit()
-        conn.close()
-        
-        logger.info(f"Rejected promotion flag {flag_id}: {notes}")
-        
-        return jsonify({'success': True, 'message': 'Promotion flag rejected'})
+        with get_db_connection() as conn:
+            cursor = conn.cursor()
+            
+            # Check flag exists
+            cursor.execute("SELECT flag_id FROM promotion_review_flags WHERE flag_id = ?", (flag_id,))
+            if not cursor.fetchone():
+                return jsonify({'success': False, 'error': 'Flag not found'}), 404
+            
+            # Mark flag as reviewed
+            cursor.execute("""
+                UPDATE promotion_review_flags
+                SET reviewed = TRUE, 
+                    reviewed_date = CURRENT_DATE, 
+                    reviewer_notes = ?
+                WHERE flag_id = ?
+            """, (notes, flag_id))
+            
+            logger.info(f"Rejected promotion flag {flag_id}: {notes}")
+            
+            return jsonify({'success': True, 'message': 'Promotion flag rejected'})
     
     except Exception as e:
         logger.error(f"Error rejecting promotion: {e}")
