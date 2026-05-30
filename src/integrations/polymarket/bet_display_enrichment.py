@@ -21,7 +21,10 @@ _GAMMA_FETCH_TIMEOUT_SEC = 10.0
 
 _GAMMA_CACHE: Dict[str, Tuple[float, Optional[Dict[str, Any]]]] = {}
 _FIXTURE_META_CACHE: Dict[str, Tuple[float, Dict[str, str]]] = {}
-_CACHE_TTL_SEC = 6 * 3600  # settled display data is immutable
+_CACHE_TTL_SEC = 6 * 3600  # resolved (closed) display data is immutable
+# Un-closed markets can flip to resolved at any time; cache them only briefly so
+# cashout counterfactuals appear on the next settled poll once Gamma marks them closed.
+_CACHE_TTL_UNRESOLVED_SEC = 90
 _lock = threading.Lock()
 
 
@@ -65,8 +68,12 @@ def _gamma_cache_get(market_id: str) -> Tuple[bool, Optional[Dict[str, Any]]]:
     with _lock:
         entry = _GAMMA_CACHE.get(market_id)
         # Do not treat cached fetch failures as hits — they poison cashout counterfactuals.
-        if entry and entry[1] is not None and (now - entry[0]) < _CACHE_TTL_SEC:
-            return True, entry[1]
+        if entry and entry[1] is not None:
+            # Resolved markets are immutable (6h); un-closed markets re-fetch every ~90s
+            # so a freshly-resolved market surfaces its counterfactual almost immediately.
+            ttl = _CACHE_TTL_SEC if entry[1].get("closed") else _CACHE_TTL_UNRESOLVED_SEC
+            if (now - entry[0]) < ttl:
+                return True, entry[1]
     return False, None
 
 

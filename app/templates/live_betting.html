@@ -1250,6 +1250,9 @@
             const isoKo = kickoffForBet(fx.bets[0]);
             const ko = kickoffBadgeFor(isoKo, false);
             const totalStake = fx.bets.reduce((a, b) => a + (b.size_usdc || 0), 0);
+            const totalFilled = fx.bets.reduce((a, b) => a + ((b.fill_size_usdc != null && b.fill_size_usdc > 0) ? b.fill_size_usdc : 0), 0);
+            const fillPct = totalStake > 0 ? (totalFilled / totalStake) * 100 : 0;
+            const partialFill = totalFilled < totalStake - 0.01;
             const avgEdge = fx.bets.reduce((a, b) => a + (b.edge_pp || 0), 0) / fx.bets.length;
             const sides = [...new Set(fx.bets.map(b => b.side_label))];
             const sideLabel = sides.length === 1 ? sides[0] : `${sides.length} sides`;
@@ -1271,6 +1274,7 @@
                     <div class="lb-card-meta">
                         <div class="lb-meta-cell"><span class="lb-meta-label">bets</span><span class="lb-meta-value">${fx.bets.length}</span></div>
                         <div class="lb-meta-cell"><span class="lb-meta-label">stake</span><span class="lb-meta-value">${fmtUsd(totalStake)}</span></div>
+                        <div class="lb-meta-cell"><span class="lb-meta-label">filled</span><span class="lb-meta-value"${partialFill ? ' style="color:#f59e0b"' : ''}>${fmtUsd(totalFilled)}${partialFill ? ` <span style="font-size:0.65rem;color:var(--text-muted)">${fillPct.toFixed(0)}%</span>` : ''}</span></div>
                         <div class="lb-meta-cell"><span class="lb-meta-label">avg edge</span><span class="lb-meta-value">+${avgEdge.toFixed(1)}pp</span></div>
                     </div>
                 </div>
