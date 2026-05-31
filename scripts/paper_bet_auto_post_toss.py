@@ -498,6 +498,89 @@ def process_fixture(
     return result
 
 
+def _cancel_order_confirmed(pm_client: PolymarketClient, order_id: Optional[str]) -> bool:
+    """Cancel an order and confirm the exchange acknowledged it.
+
+    Returns True ONLY when the order id appears in the response's 'canceled'
+    list. On any error, or if the id is missing/not-canceled, returns False so
+    callers do NOT orphan the order — they must leave it tracked and retry next
+    tick. This is the guard that prevents the cancel/repost duplicate-order bug.
+    """
+    if not order_id:
+        return False
+    try:
+        resp = pm_client.cancel_order(order_id)
+    except Exception as exc:
+        logger.warning(f"  cancel_order failed for {order_id}: {exc}")
+        return False
+    try:
+        canceled = (resp or {}).get("canceled") or (resp or {}).get("cancelled") or []
+        return str(order_id) in [str(x) for x in canceled]
+    except Exception:
+        return False
+
+
+def _reconcile_exchange_orders(conn, cur, pm_client: PolymarketClient, dry_run: bool) -> int:
+    """Circuit breaker: cancel any OPEN exchange order we no longer actively track.
+
+    Resize/reprice churn or daemon-restart races can leave live orders resting on
+    the book whose ids we've lost (nulled in order_chunks). Any open order whose id
+    is not in our ACTIVE set (placed chunks + open/filled ledger rows) is an orphan
+    and gets cancelled. This is what stops unbounded duplicate-order pileups.
+
+    Conservative by design: if we cannot read the active set from the DB at all,
+    we skip entirely (never mass-cancel on a DB read failure).
+    """
+    try:
+        oo = pm_client.get_open_orders()
+    except Exception as exc:
+        logger.warning(f"Exchange reconcile: get_open_orders failed: {exc}")
+        return 0
+    orders = oo if isinstance(oo, list) else (oo.get("data", []) if isinstance(oo, dict) else [])
+    if not orders:
+        return 0
+
+    known_active: set = set()
+    read_ok = False
+    try:
+        cur.execute(
+            "SELECT polymarket_order_id FROM order_chunks "
+            "WHERE status = 'placed' AND polymarket_order_id IS NOT NULL"
+        )
+        known_active.update(str(r[0]) for r in cur.fetchall() if r[0])
+        read_ok = True
+    except Exception as exc:
+        logger.warning(f"Exchange reconcile: order_chunks read failed: {exc}")
+    try:
+        cur.execute(
+            "SELECT polymarket_order_id FROM bet_ledger "
+            "WHERE polymarket_order_id IS NOT NULL AND status IN ('placed', 'filled', 'proposed')"
+        )
+        known_active.update(str(r[0]) for r in cur.fetchall() if r[0])
+        read_ok = True
+    except Exception as exc:
+        logger.warning(f"Exchange reconcile: bet_ledger read failed: {exc}")
+    if not read_ok:
+        logger.warning("Exchange reconcile: could not read active order set; skipping (no cancels)")
+        return 0
+
+    n = 0
+    for o in orders:
+        oid = str(o.get("id") or "")
+        if not oid or oid in known_active:
+            continue
+        logger.warning(
+            f"Exchange reconcile: ORPHAN open order {oid} "
+            f"(outcome={o.get('outcome')}, size={o.get('original_size')}, px={o.get('price')}) "
+            f"— not tracked as active in DB; cancelling"
+        )
+        if not dry_run and _cancel_order_confirmed(pm_client, oid):
+            n += 1
+    if n:
+        logger.warning(f"Exchange reconcile: cancelled {n} orphan order(s)")
+    return n
+
+
 def _process_twap_plans(dry_run: bool = False) -> Dict[str, Any]:
     """Execute pending TWAP order plans: place next chunk, check fills, cancel stale.
 
@@ -509,7 +592,7 @@ def _process_twap_plans(dry_run: bool = False) -> Dict[str, Any]:
 
     Returns a summary dict for logging.
     """
-    twap_summary: Dict[str, Any] = {"plans_processed": 0, "chunks_placed": 0, "chunks_filled": 0, "plans_completed": 0, "plans_cancelled": 0}
+    twap_summary: Dict[str, Any] = {"plans_processed": 0, "chunks_placed": 0, "chunks_filled": 0, "plans_completed": 0, "plans_cancelled": 0, "orphans_cancelled": 0}
 
     try:
         conn = get_connection()
@@ -533,6 +616,14 @@ def _process_twap_plans(dry_run: bool = False) -> Dict[str, Any]:
         return twap_summary
 
     pm_client = PolymarketClient()
+
+    # Circuit breaker FIRST: cancel any orphaned open orders we no longer track
+    # (runs even when there are no DB plans — orphans can outlive their plans).
+    try:
+        orphans = _reconcile_exchange_orders(conn, cur, pm_client, dry_run=dry_run)
+        twap_summary["orphans_cancelled"] = orphans
+    except Exception as exc:
+        logger.warning(f"Exchange reconcile raised: {exc}")
 
     if not plans:
         conn.close()
@@ -765,7 +856,15 @@ def _resize_plan_to_bankroll(
          - Reset those chunks to 'pending' with the new size.
          - Update plan's total_size_usdc / chunk_size_usdc.
       4. Return True if a resize occurred.
+
+    DISABLED by default (2026-05-31): mid-flight resize caused a runaway
+    cancel/repost loop when the wallet-balance API intermittently failed and
+    the bankroll collapsed to the config fallback (halving the stake every
+    tick). A plan now keeps its creation-time size unless TWAP_RESIZE_ENABLED
+    is explicitly turned on.
     """
+    if os.getenv("TWAP_RESIZE_ENABLED", "0").strip() not in ("1", "true", "True", "TRUE"):
+        return False
     from src.integrations.polymarket.live_bankroll import get_strategy_bankroll
     from src.integrations.polymarket.paper_strategies import STRATEGIES
     from src.integrations.polymarket.sizing import live_scaled_kelly_stake
@@ -819,10 +918,14 @@ def _resize_plan_to_bankroll(
     for chunk in placed:
         oid = chunk["polymarket_order_id"]
         if oid:
-            try:
-                pm_client.cancel_order(oid)
-            except Exception as exc:
-                logger.warning(f"  cancel chunk {chunk['chunk_id']} failed: {exc}")
+            # Only reset/repost if the cancel is CONFIRMED — otherwise leave the
+            # live order in place (do not orphan + repost a duplicate).
+            if not _cancel_order_confirmed(pm_client, oid):
+                logger.warning(
+                    f"  Resize skipped for chunk {chunk['chunk_id']}: "
+                    f"cancel of {oid} not confirmed; leaving existing order in place"
+                )
+                continue
             # History: keep the old oid as 'cancelled' (resize) so reconcile can
             # still attribute any late MAKER fill back to this chunk.
             record_order_cancelled(oid, reason="resize", conn=conn)
@@ -915,12 +1018,15 @@ def _reprice_placed_chunks(
         if dry_run:
             continue
 
-        # Cancel old order
-        if old_order_id:
-            try:
-                pm_client.cancel_order(old_order_id)
-            except Exception as exc:
-                logger.warning(f"  Reprice cancel failed for {old_order_id}: {exc}")
+        # Cancel old order — only repost if the cancel is CONFIRMED. If it isn't,
+        # skip this chunk (leave the live order tracked) rather than orphaning it
+        # and stacking a duplicate. This is the core duplicate-order guard.
+        if old_order_id and not _cancel_order_confirmed(pm_client, old_order_id):
+            logger.warning(
+                f"  Reprice skipped for plan #{plan_id} chunk #{chunk['chunk_index']}: "
+                f"cancel of {old_order_id} not confirmed; leaving existing order in place"
+            )
+            continue
 
         # Place new order at improved price
         size_usdc = chunk["size_usdc"]
