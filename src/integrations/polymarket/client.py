@@ -16,6 +16,8 @@ from config import POLYMARKET_CONFIG
 
 logger = logging.getLogger(__name__)
 
+DATA_API_BASE = "https://data-api.polymarket.com"
+
 
 class PolymarketClient:
     """Thin wrapper around Polymarket public + CLOB endpoints.
@@ -465,6 +467,48 @@ class PolymarketClient:
         if hasattr(client, "get_orderbook_positions"):
             return client.get_orderbook_positions()
         return []
+
+    def get_wallet_address(self) -> str:
+        """Proxy/funder wallet address used for Polymarket data-api queries."""
+        funder = (POLYMARKET_CONFIG.get("funder_address") or "").strip()
+        if funder:
+            return funder
+        try:
+            client = self._get_clob_sdk_client()
+        except (ValueError, RuntimeError):
+            return ""
+        for attr in ("get_address", "get_funder"):
+            fn = getattr(client, attr, None)
+            if callable(fn):
+                addr = str(fn() or "").strip()
+                if addr:
+                    return addr
+        builder = getattr(client, "builder", None)
+        funder_attr = getattr(builder, "funder", None) if builder else None
+        return str(funder_attr or "").strip()
+
+    def get_data_api_positions(
+        self,
+        size_threshold: float = 0.01,
+        limit: int = 500,
+    ) -> List[Dict[str, Any]]:
+        """Fetch wallet positions from Polymarket's public data-api.
+
+        Includes resolved markets with redeemable winning tokens that are
+        still held on-chain until the user claims them.
+        """
+        addr = self.get_wallet_address()
+        if not addr:
+            return []
+        data = self._get_json(
+            f"{DATA_API_BASE}/positions",
+            params={
+                "user": addr,
+                "sizeThreshold": size_threshold,
+                "limit": limit,
+            },
+        )
+        return data if isinstance(data, list) else []
 
     def get_token_midpoints(self, token_ids: List[str]) -> Dict[str, float]:
         """Wave 5.8: batched midpoint query for a list of outcome tokens.

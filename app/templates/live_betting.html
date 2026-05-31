@@ -337,6 +337,22 @@
         padding: 0.45rem 0.5rem; border-bottom: 1px solid rgba(55,65,81,0.4);
         text-align: left; vertical-align: top;
     }
+    .lb-gender-badge {
+        display: inline-block; padding: 0.12rem 0.5rem; border-radius: 999px;
+        font-size: 0.65rem; font-weight: 700; letter-spacing: 0.3px; margin-left: 0.25rem;
+        vertical-align: middle;
+    }
+    .lb-gender-badge.male   { background: rgba(59, 130, 246, 0.2); color: #93c5fd; border: 1px solid rgba(59, 130, 246, 0.35); }
+    .lb-gender-badge.female { background: rgba(236, 72, 153, 0.18); color: #f9a8d4; border: 1px solid rgba(236, 72, 153, 0.4); }
+    .lb-format-tag { font-weight: 600; color: var(--text-secondary); }
+    .lb-model-line { font-size: 0.68rem; color: var(--text-muted); margin-top: 0.2rem; }
+    .lb-xi-badge {
+        display: inline-block; padding: 0.1rem 0.45rem; border-radius: 999px;
+        font-size: 0.6rem; font-weight: 700; letter-spacing: 0.3px; margin-left: 0.3rem;
+        background: rgba(245, 158, 11, 0.16); color: #fbbf24; border: 1px solid rgba(245, 158, 11, 0.4);
+    }
+    .lb-drift-up   { color: #4ade80; font-weight: 600; }
+    .lb-drift-down { color: #f87171; font-weight: 600; }
     .lb-fixtures-table th {
         color: var(--text-muted); font-weight: 600; text-transform: uppercase;
         letter-spacing: 0.4px; font-size: 0.65rem;
@@ -394,10 +410,10 @@
 </div>
 
 <div class="lb-wallet-bar" id="wallet-bar" title="Live on-chain USDC balance in the Polymarket proxy wallet (queried via py-clob-client)">
-    <div class="lb-wallet-cell" title="Wallet cash + open positions marked to current CLOB midpoint">
+    <div class="lb-wallet-cell" title="Wallet cash + open positions (CLOB mid) + unredeemed winning tokens">
         <div class="lb-label">Portfolio value</div>
         <div class="lb-value" id="portfolio-value">--</div>
-        <div class="lb-sub" id="portfolio-value-sub">cash + open positions</div>
+        <div class="lb-sub" id="portfolio-value-sub">cash + open + redeemable</div>
     </div>
     <div class="lb-wallet-cell">
         <div class="lb-label">Polymarket wallet</div>
@@ -757,13 +773,18 @@
         document.getElementById('portfolio-value').textContent = fmtUsd(data.portfolio_value_usdc);
         const cash = data.wallet_cash_usdc;
         const positions = data.open_positions_market_value_usdc;
+        const redeemable = data.redeemable_usdc || 0;
         const n = data.open_positions_count;
         const unrealised = data.unrealised_pnl_usdc;
         const unrealisedStr = unrealised !== 0
             ? ` (${unrealised >= 0 ? '+' : ''}${fmtUsd(unrealised)} open)`
             : '';
         const sub = document.getElementById('portfolio-value-sub');
-        sub.textContent = `${fmtUsd(cash)} cash + ${fmtUsd(positions)} in ${n} pos${unrealisedStr}`;
+        const parts = [`${fmtUsd(cash)} cash`, `${fmtUsd(positions)} in ${n} open`];
+        if (redeemable > 0) {
+            parts.push(`${fmtUsd(redeemable)} redeemable`);
+        }
+        sub.textContent = parts.join(' + ') + unrealisedStr;
         sub.className = 'lb-sub ' + (unrealised !== 0 ? plClass(unrealised) : '');
     }
 
@@ -1791,7 +1812,7 @@
     async function fetchUpcomingFixtures() {
         let data;
         try {
-            const r = await fetch('/api/betting/upcoming?hours_ahead=72');
+            const r = await fetch('/api/betting/upcoming?hours_ahead=168');
             data = await r.json();
         } catch (err) {
             document.getElementById('lb-fixtures-body').innerHTML =
@@ -1806,6 +1827,39 @@
     // Pure render from the in-memory `lbUpcomingFixtures` cache. Called by
     // both `fetchUpcomingFixtures` (after a network round-trip) and the
     // 'timezoneChanged' listener (no network — just re-format the times).
+    function lbGenderBadge(gender) {
+        const g = (gender || '').toLowerCase();
+        if (g === 'female') {
+            return '<span class="lb-gender-badge female" title="Women\'s match">WOMEN</span>';
+        }
+        if (g === 'male') {
+            return '<span class="lb-gender-badge male" title="Men\'s match">MEN</span>';
+        }
+        return `<span class="lb-gender-badge" title="Gender unknown">${gender || '?'}</span>`;
+    }
+
+    // Render the "model now vs at bet" drift line + XI-changed flag for a
+    // fixture from its `live_model` payload (may be null when never simmed).
+    function lbModelDriftLine(lm) {
+        if (!lm || lm.current_model_prob == null) return '';
+        const nowPct = (lm.current_model_prob * 100).toFixed(1);
+        const side = lm.side_label ? `${lm.side_label} ` : '';
+        let inner = `model now: ${side}${nowPct}%`;
+        if (lm.has_bet && lm.bet_model_prob != null) {
+            const wasPct = (lm.bet_model_prob * 100).toFixed(1);
+            inner += ` <span title="model prob when we bet">(was ${wasPct}%)</span>`;
+            if (lm.prob_delta_pp != null && Math.abs(lm.prob_delta_pp) >= 0.1) {
+                const cls = lm.prob_delta_pp > 0 ? 'lb-drift-up' : 'lb-drift-down';
+                const sign = lm.prob_delta_pp > 0 ? '+' : '';
+                inner += ` <span class="${cls}">${sign}${lm.prob_delta_pp.toFixed(1)}pp</span>`;
+            }
+        }
+        if (lm.xi_changed) {
+            inner += '<span class="lb-xi-badge" title="Lineup changed since we placed our bet">XI changed</span>';
+        }
+        return `<div class="lb-model-line">${inner}</div>`;
+    }
+
     function renderUpcomingFixtures() {
         const tbody = document.getElementById('lb-fixtures-body');
         const koHeader = document.getElementById('lb-fixtures-kickoff-th');
@@ -1824,8 +1878,9 @@
             const tr = document.createElement('tr');
             tr.innerHTML = `
                 <td><strong>${fx.team1}</strong> vs <strong>${fx.team2}</strong>
-                    <br><span style="color:var(--text-muted);font-size:0.7rem">${fx.tournament_name || ''}</span></td>
-                <td>${fx.format} ${fx.gender}</td>
+                    <br><span style="color:var(--text-muted);font-size:0.7rem">${fx.tournament_name || ''}</span>
+                    ${lbModelDriftLine(fx.live_model)}</td>
+                <td><span class="lb-format-tag">${fx.format || '?'}</span> ${lbGenderBadge(fx.gender)}</td>
                 <td title="UTC: ${(fx.scheduled_start_utc || '').replace('T', ' ').slice(0, 16)}">${lbFormatKickoff(fx.scheduled_start_utc)}</td>
                 <td>${typeof t1Px === 'number' ? (t1Px*100).toFixed(1)+'c' : '--'} / ${typeof t2Px === 'number' ? (t2Px*100).toFixed(1)+'c' : '--'}</td>
                 <td style="text-align:right">${fx.pre_toss_real_bets}</td>

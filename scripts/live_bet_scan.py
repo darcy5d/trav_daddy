@@ -39,9 +39,19 @@ from typing import Any, Dict, List, Optional
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from src.data.database import get_connection, get_db_connection, get_active_model_snapshot
+from src.data.database import (
+    get_connection,
+    get_db_connection,
+    get_active_model_snapshot,
+    init_live_model_snapshots,
+    upsert_live_model_snapshot,
+)
 from src.integrations.polymarket import PolymarketClient
-from src.integrations.polymarket.bet_placement import place_bet, place_bet_twap
+from src.integrations.polymarket.bet_placement import place_bet, place_bet_twap, reduce_position
+from src.integrations.polymarket.rebalance import (
+    rebalance_enabled,
+    decide_rebalance,
+)
 from src.integrations.polymarket.upcoming import (
     find_upcoming_cricket_events,
     attach_db_team_ids,
@@ -50,6 +60,7 @@ from src.integrations.polymarket.paper_inputs import (
     get_recent_xi,
     get_cached_xi,
     get_default_venue_for_team,
+    compute_xi_signature,
 )
 from src.integrations.polymarket.paper_strategies import (
     PaperStrategy,
@@ -233,6 +244,10 @@ def _sim_team1_win_prob(simulator, fixture: Dict[str, Any], conn) -> Optional[fl
         )
         return None
 
+    # Stamp the lineup signature used for this scan so placements/snapshots
+    # can record exactly which XI the model saw and later detect changes.
+    fixture["_xi_signature"] = compute_xi_signature(t1_bat, t1_bowl, t2_bat, t2_bowl)
+
     result = simulator.simulate_matches(
         300, t1_bat, t1_bowl, t2_bat, t2_bowl,
         venue_id=venue_id, team1_id=t1, team2_id=t2,
@@ -258,6 +273,7 @@ def scan_and_place_live_bets(
         "bets_placed": [],
         "bets_rejected": [],
         "bets_skipped": [],
+        "rebalances": [],
     }
 
     # Enforce mode gate up-front so cron logs make it obvious when betting is off
@@ -297,6 +313,12 @@ def scan_and_place_live_bets(
 
     # Capture active model snapshot once per scan run for bet_ledger stamping.
     model_snapshot = get_active_model_snapshot()
+
+    # Ensure the rolling model-view table exists (scanner can run before Flask).
+    try:
+        init_live_model_snapshots()
+    except Exception as exc:
+        logger.warning(f"init_live_model_snapshots failed (non-fatal): {exc}")
 
     needs_v2 = any(s.model_version in ("v2", "consensus") for s in enabled_strats)
     needs_v3 = any(s.model_version in ("v3", "consensus") for s in enabled_strats)
@@ -338,23 +360,11 @@ def scan_and_place_live_bets(
             continue
         summary["fixtures_in_window"] += 1
 
-        # Same re-sim skip optimisation as paper scanner
-        with get_db_connection() as conn:
-            all_eligible_have_bets = all(
-                _strategy_has_any_live_bet_on_fixture(conn, s.name, fix["fixture_key"])
-                for s in eligible
-            )
-        if all_eligible_have_bets:
-            logger.info(
-                f"  [skip-resim] {fix['team1_db_name']} vs {fix['team2_db_name']} "
-                f"(T-{hours_to_kickoff:.1f}h) - all {len(eligible)} eligible strategies "
-                f"already placed live bets, no need to re-simulate"
-            )
-            summary["fixtures_in_window"] -= 1
-            summary.setdefault("fixtures_skipped_resim", 0)
-            summary["fixtures_skipped_resim"] += 1
-            continue
-
+        # XI-aware re-evaluation: we deliberately do NOT skip fixtures that
+        # already have live bets. Re-running the sim every scan lets us pick
+        # up updated CREX lineups (and market moves) and rebalance exposure
+        # toward the fresh Kelly target. Dedup / churn-control happens later
+        # in the placement / rebalance path, not here.
         with get_db_connection() as conn:
             need_v2_now = needs_v2 or any(s.model_version == "consensus" for s in eligible)
             need_v3_now = needs_v3 or any(s.model_version == "consensus" for s in eligible)
@@ -414,6 +424,25 @@ def scan_and_place_live_bets(
             logger.warning(f"  [skip] missing market price")
             continue
 
+        # Label -> outcome map so the rebalancer can resolve token_id / price
+        # for any side it needs to sell (reduce or edge-flip exit).
+        outcome_by_label: Dict[str, Dict[str, Any]] = {}
+        for _o in (t1_outcome, t2_outcome):
+            if _o and _o.get("label"):
+                outcome_by_label[_o["label"]] = _o
+
+        def _sell_price(token_id: Optional[str], fallback: float) -> float:
+            """Best available SELL price (current bid) for a token, else last price."""
+            if token_id:
+                try:
+                    bi = pm_client.get_book_spread(token_id)
+                    bid = (bi or {}).get("bid")
+                    if bid and float(bid) > 0:
+                        return float(bid)
+                except Exception:
+                    pass
+            return float(fallback)
+
         for strat in eligible:
             if strat.model_version == "v2":
                 if v2_t1_prob is None:
@@ -450,6 +479,26 @@ def scan_and_place_live_bets(
                     t2_pred, market_price_t2, edge_t2_pp,
                 )
 
+            # Record the latest model view for this (strategy, fixture) every
+            # scan — even when we won't act — so the rebalancer/UI can compare
+            # against the bet we actually placed and flag XI/edge drift.
+            try:
+                with get_db_connection() as snap_conn:
+                    upsert_live_model_snapshot(
+                        snap_conn,
+                        strategy_label=strat.name,
+                        fixture_key=fix["fixture_key"],
+                        side_label=side_label,
+                        model_prob=model_prob,
+                        market_price=market_price,
+                        edge_pp=edge_pp,
+                        xi_signature=fix.get("_xi_signature"),
+                        model_version=strat.model_version,
+                        kickoff_at=kickoff.isoformat() if kickoff else None,
+                    )
+            except Exception as exc:
+                logger.warning(f"    [{strat.name}] snapshot upsert failed: {exc}")
+
             if edge_pp < strat.min_edge_pp:
                 summary["bets_skipped"].append({
                     "strategy": strat.name, "fixture": fix["fixture_key"],
@@ -482,14 +531,6 @@ def scan_and_place_live_bets(
                 continue
 
             with get_db_connection() as conn:
-                if _already_bet_live(conn, strat.name, fix["fixture_key"],
-                                     ml.get("market_id") or "", side_label or ""):
-                    summary["bets_skipped"].append({
-                        "strategy": strat.name, "fixture": fix["fixture_key"],
-                        "reason": "already-placed",
-                    })
-                    continue
-
                 bankroll_now = get_live_strategy_bankroll(strat.name, conn)
                 if bankroll_now <= 0:
                     summary["bets_skipped"].append({
@@ -497,11 +538,104 @@ def scan_and_place_live_bets(
                         "reason": "bankroll-exhausted",
                     })
                     continue
-                stake = live_scaled_kelly_stake(model_prob, market_price, bankroll_now, strat)
+
+                if rebalance_enabled():
+                    # XI-aware path: re-size toward the fresh Kelly target.
+                    action = decide_rebalance(
+                        conn,
+                        strat=strat,
+                        fixture_key=fix["fixture_key"],
+                        chosen_side_label=side_label or "",
+                        model_prob=model_prob,
+                        market_price=market_price,
+                        edge_pp=edge_pp,
+                        bankroll=bankroll_now,
+                        minutes_to_kickoff=hours_to_kickoff * 60.0,
+                    )
+                else:
+                    # Legacy path: one bet per fixture/strategy/side, no resize.
+                    action = None
+                    if _already_bet_live(conn, strat.name, fix["fixture_key"],
+                                         ml.get("market_id") or "", side_label or ""):
+                        summary["bets_skipped"].append({
+                            "strategy": strat.name, "fixture": fix["fixture_key"],
+                            "reason": "already-placed",
+                        })
+                        continue
+                    stake = live_scaled_kelly_stake(model_prob, market_price, bankroll_now, strat)
+                    if stake <= 0:
+                        summary["bets_skipped"].append({
+                            "strategy": strat.name, "fixture": fix["fixture_key"],
+                            "reason": "kelly-stake-zero",
+                        })
+                        continue
+
+            # --- Apply the rebalance decision (sells happen here; adds fall
+            # through to the placement block below with stake=action.size_usdc).
+            if action is not None:
+                if action.action == "hold":
+                    summary["bets_skipped"].append({
+                        "strategy": strat.name, "fixture": fix["fixture_key"],
+                        "reason": f"rebalance-hold: {action.reason}",
+                    })
+                    continue
+
+                if action.action in ("reduce", "exit_flip"):
+                    sells = list(action.exits) if action.action == "exit_flip" else [
+                        (side_label or "", action.size_usdc)
+                    ]
+                    for sell_label, sell_usdc in sells:
+                        out = outcome_by_label.get(sell_label)
+                        sell_token = (out.get("token_id") if out else None) or (
+                            side_token_id if sell_label == side_label else None
+                        )
+                        if not sell_token:
+                            logger.warning(
+                                f"    [{strat.name}] rebalance sell skipped — no token for {sell_label}"
+                            )
+                            continue
+                        sell_px = _sell_price(
+                            sell_token,
+                            (out.get("last_price") if out else None) or market_price,
+                        )
+                        try:
+                            sres = reduce_position(
+                                strategy_label=strat.name,
+                                fixture_key=fix["fixture_key"],
+                                side_label=sell_label,
+                                polymarket_token_id=sell_token,
+                                reduce_usdc=sell_usdc,
+                                current_price=sell_px,
+                                poly_client=pm_client,
+                                dry_run=dry_run,
+                                reason="rebalance",
+                                phase="pre_toss",
+                            )
+                        except Exception as exc:
+                            logger.error(f"    [{strat.name}] reduce_position raised: {exc}")
+                            sres = {"success": False, "reason": str(exc)}
+                        logger.info(
+                            f"    [{strat.name}] REBALANCE {action.action.upper()} {sell_label}: "
+                            f"sell ${sell_usdc:.2f} @ {sell_px:.4f} -> {sres}"
+                        )
+                        summary["rebalances"].append({
+                            "strategy": strat.name, "fixture": fix["fixture_key"],
+                            "action": action.action, "side_label": sell_label,
+                            "reduce_usdc": sell_usdc, "result": sres,
+                            "reason": action.reason,
+                        })
+
+                    if action.action == "reduce":
+                        # Done — a reduce never also adds.
+                        continue
+                    # exit_flip: fall through to open the new chosen side.
+
+                # add / exit_flip add: size the new order to the target delta.
+                stake = action.size_usdc
                 if stake <= 0:
                     summary["bets_skipped"].append({
                         "strategy": strat.name, "fixture": fix["fixture_key"],
-                        "reason": "kelly-stake-zero",
+                        "reason": f"rebalance-{action.action}-zero-size",
                     })
                     continue
 
@@ -590,6 +724,7 @@ def scan_and_place_live_bets(
                         strategy_label=strat.name,
                         bankroll_at_proposal=bankroll_now,
                         phase="pre_toss",
+                        xi_signature=fix.get("_xi_signature"),
                         kickoff_at=kickoff_iso,
                         model_snapshot=model_snapshot,
                     )
@@ -609,6 +744,7 @@ def scan_and_place_live_bets(
                         strategy_label=strat.name,
                         bankroll_at_proposal=bankroll_now,
                         phase="pre_toss",
+                        xi_signature=fix.get("_xi_signature"),
                         kickoff_at=kickoff_iso,
                         model_snapshot=model_snapshot,
                     )
@@ -687,6 +823,7 @@ def main() -> int:
     print(f"  Bets placed:            {len(summary['bets_placed'])}")
     print(f"  Bets rejected:          {len(summary['bets_rejected'])}")
     print(f"  Bets filter-skipped:    {len(summary['bets_skipped'])}")
+    print(f"  Rebalance actions:      {len(summary.get('rebalances', []))}")
     if summary["bets_placed"]:
         print()
         print("  Bets placed this scan:")

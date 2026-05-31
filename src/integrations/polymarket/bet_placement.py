@@ -44,6 +44,30 @@ def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _uncapped_kelly_stake(
+    bankroll_at_proposal: Optional[float],
+    model_prob: Optional[float],
+    market_price_at_proposal: Optional[float],
+    strategy_label: Optional[str],
+) -> Optional[float]:
+    """Numeric uncapped Kelly stake (before the kelly_fraction_cap) for the
+    risk dashboard's "risk trimmed by the cap" metric. Reuses the same
+    derivation as the display layer so the persisted value matches the UI.
+    Returns None when inputs are insufficient (kept non-fatal)."""
+    try:
+        from src.integrations.polymarket.sizing import compute_sizing_context
+
+        ctx = compute_sizing_context({
+            "bankroll_at_proposal": bankroll_at_proposal,
+            "model_prob": model_prob,
+            "market_price_at_proposal": market_price_at_proposal,
+            "strategy_label": strategy_label,
+        })
+        return ctx.get("kelly_uncapped_stake") if ctx else None
+    except Exception:
+        return None
+
+
 def place_bet(
     *,
     fixture_key: str,
@@ -101,6 +125,9 @@ def place_bet(
 
     proposed_at = _utc_now_iso()
     fees_est = round(size_usdc * POLYMARKET_TAKER_FEE, 4)
+    kelly_uncapped_stake = _uncapped_kelly_stake(
+        bankroll_at_proposal, model_prob, market_price_at_proposal, strategy_label
+    )
 
     # Step 2: insert proposed row
     conn = get_connection()
@@ -115,8 +142,9 @@ def place_bet(
                 side, size_usdc, fees_estimated_usdc,
                 status, mode, bet_kind, strategy_label,
                 bankroll_at_proposal, phase, xi_signature,
-                toss_winner_team_id, toss_chose_to, kickoff_at, model_snapshot
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'proposed', ?, 'real', ?, ?, ?, ?, ?, ?, ?, ?)
+                toss_winner_team_id, toss_chose_to, kickoff_at, model_snapshot,
+                kelly_uncapped_stake
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'proposed', ?, 'real', ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 proposed_at, match_id, fixture_key, market_type,
@@ -126,6 +154,7 @@ def place_bet(
                 requested_mode, strategy_label,
                 bankroll_at_proposal, phase, xi_signature,
                 toss_winner_team_id, toss_chose_to, kickoff_at, model_snapshot,
+                kelly_uncapped_stake,
             ),
         )
         bet_id = cur.lastrowid
@@ -294,6 +323,229 @@ def _classify_order_error(exc: Exception) -> str:
     return "unknown"
 
 
+def reduce_position(
+    *,
+    strategy_label: str,
+    fixture_key: str,
+    side_label: str,
+    polymarket_token_id: str,
+    reduce_usdc: float,
+    current_price: float,
+    poly_client: Optional[PolymarketClient] = None,
+    conn: Optional[Any] = None,
+    dry_run: bool = False,
+    reason: str = "rebalance",
+    phase: str = "pre_toss",
+) -> Dict[str, Any]:
+    """De-risk an existing live position by SELLing part (or all) of it.
+
+    Used by the XI-aware rebalancer when an updated lineup drops the model
+    edge: instead of holding stale exposure we sell shares at the current
+    price. `reduce_usdc` is expressed in ENTRY-COST terms (how much of the
+    originally-staked USDC to take off the table), so it composes cleanly
+    with the exposure math the risk gate uses.
+
+    Mechanics:
+      * Gather filled BUY rows for (strategy, fixture, side, token).
+      * Sell a pro-rata fraction `f = reduce_usdc / total_entry_cost` of the
+        held shares at `current_price` via a SELL limit order (real only).
+      * Decrement each BUY row's `fill_size_usdc` by its share of the cut so
+        open exposure (and its eventual settlement pnl) shrinks correctly;
+        fully-consumed rows are marked settled.
+      * Insert one SELL adjustment row carrying the realized pnl.
+
+    Returns a dict: success, shares_sold, proceeds_usdc, entry_cost_removed,
+    realized_pnl_usdc, sell_bet_id, order_response, is_simulated.
+    """
+    from src.data.database import get_connection
+
+    own_conn = False
+    if conn is None:
+        conn = get_connection()
+        own_conn = True
+
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            """
+            SELECT bet_id, fill_price, fill_size_usdc
+            FROM bet_ledger
+            WHERE COALESCE(bet_kind, 'real') = 'real'
+              AND status = 'filled'
+              AND side = 'BUY'
+              AND strategy_label = ?
+              AND fixture_key = ?
+              AND side_label = ?
+              AND polymarket_token_id = ?
+              AND fill_price IS NOT NULL
+              AND fill_size_usdc IS NOT NULL
+              AND fill_size_usdc > 0
+            ORDER BY filled_at ASC
+            """,
+            (strategy_label, fixture_key, side_label, polymarket_token_id),
+        )
+        rows = cur.fetchall()
+        total_entry = sum(float(r["fill_size_usdc"]) for r in rows)
+        if total_entry <= 0:
+            return {
+                "success": False,
+                "reason": "no-open-position-to-reduce",
+                "shares_sold": 0.0,
+            }
+        if current_price <= 0:
+            return {"success": False, "reason": "invalid-current-price"}
+
+        reduce_usdc = min(float(reduce_usdc), total_entry)
+        if reduce_usdc <= 0:
+            return {"success": False, "reason": "non-positive-reduce-amount"}
+
+        f = reduce_usdc / total_entry
+        total_shares = sum(float(r["fill_size_usdc"]) / float(r["fill_price"]) for r in rows)
+        shares_to_sell = round(total_shares * f, 4)
+        if shares_to_sell <= 0:
+            return {"success": False, "reason": "rounded-to-zero-shares"}
+
+        proceeds = shares_to_sell * current_price
+        fee = proceeds * POLYMARKET_TAKER_FEE
+        realized_pnl = round(proceeds - reduce_usdc - fee, 4)
+
+        # dry_run is a pure preview: never touches the CLOB or the ledger.
+        if dry_run:
+            logger.info(
+                f"Rebalance SELL DRY-RUN (no order/no DB): {strategy_label} {fixture_key} "
+                f"{side_label} shares={shares_to_sell:.4f} entry_removed=${reduce_usdc:.2f} "
+                f"pnl=${realized_pnl:+.2f}"
+            )
+            return {
+                "success": True,
+                "dry_run": True,
+                "is_simulated": True,
+                "shares_sold": shares_to_sell,
+                "proceeds_usdc": round(proceeds, 4),
+                "entry_cost_removed": round(reduce_usdc, 4),
+                "realized_pnl_usdc": realized_pnl,
+                "sell_bet_id": None,
+                "order_response": None,
+                "reason": reason,
+            }
+
+        # --- Place the SELL order ---
+        order_response: Optional[Dict[str, Any]] = None
+        if poly_client is None:
+            poly_client = PolymarketClient()
+        try:
+            order_response = poly_client.place_limit_order(
+                token_id=polymarket_token_id,
+                side="SELL",
+                price=round(current_price, 4),
+                size_shares=shares_to_sell,
+            )
+            logger.info(
+                f"Rebalance SELL placed: {strategy_label} {fixture_key} {side_label} "
+                f"shares={shares_to_sell:.4f} @ {current_price:.4f} "
+                f"entry_removed=${reduce_usdc:.2f} pnl=${realized_pnl:+.2f}"
+            )
+        except Exception as exc:
+            logger.error(f"Rebalance SELL failed ({strategy_label}/{fixture_key}): {exc}")
+            return {"success": False, "reason": f"SELL order failed: {exc}"}
+
+        now = _utc_now_iso()
+
+        # --- Decrement BUY rows' open stake pro-rata ---
+        for r in rows:
+            row_cut = float(r["fill_size_usdc"]) * f
+            new_fill = round(float(r["fill_size_usdc"]) - row_cut, 6)
+            if new_fill <= 1e-6:
+                cur.execute(
+                    """
+                    UPDATE bet_ledger
+                    SET fill_size_usdc = 0,
+                        status = 'settled',
+                        settled_at = ?,
+                        pnl_realised_usdc = COALESCE(pnl_realised_usdc, 0.0)
+                    WHERE bet_id = ?
+                    """,
+                    (now, r["bet_id"]),
+                )
+            else:
+                cur.execute(
+                    "UPDATE bet_ledger SET fill_size_usdc = ? WHERE bet_id = ?",
+                    (new_fill, r["bet_id"]),
+                )
+
+        # --- Insert the SELL adjustment row (carries the realized pnl) ---
+        # mode must satisfy CHECK(mode IN ('manual','auto')); model_prob/edge_pp
+        # are NOT NULL so we stamp the sell price / 0 edge. Rebalance sells are
+        # identified by side='SELL' AND cashout_triggered_at IS NULL.
+        cur.execute(
+            """
+            INSERT INTO bet_ledger (
+                proposed_at, placed_at, filled_at, settled_at,
+                fixture_key, market_type,
+                polymarket_market_id, polymarket_token_id,
+                side_label, model_prob, market_price_at_proposal, edge_pp,
+                side, size_usdc, fees_estimated_usdc,
+                fill_price, fill_size_usdc,
+                status, mode, bet_kind, strategy_label, phase,
+                pnl_realised_usdc, cancel_reason
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'SELL', ?, ?, ?, ?, 'settled', 'auto', 'real', ?, ?, ?, 'rebalance')
+            """,
+            (
+                now, now, now, now,
+                fixture_key, "moneyline",
+                "", polymarket_token_id,
+                side_label, current_price, current_price, 0.0,
+                reduce_usdc, round(fee, 4),
+                current_price, proceeds,
+                strategy_label, phase,
+                realized_pnl,
+            ),
+        )
+        sell_bet_id = cur.lastrowid
+        conn.commit()
+
+        order_id = (order_response or {}).get("orderID") or (order_response or {}).get("orderId")
+        if order_id:
+            try:
+                record_order_placed(
+                    order_id,
+                    bet_id=sell_bet_id,
+                    token_id=polymarket_token_id,
+                    side="SELL",
+                    order_kind="rebalance_sell",
+                    limit_price=round(current_price, 4),
+                    size_usdc=proceeds,
+                    size_shares=shares_to_sell,
+                    posted_at=now,
+                    conn=conn,
+                )
+                record_order_filled(
+                    order_id,
+                    fill_usdc=proceeds,
+                    fill_price=current_price,
+                    filled_at=now,
+                    conn=conn,
+                )
+            except Exception as exc:
+                logger.warning(f"Audit record for rebalance SELL {order_id} failed: {exc}")
+
+        return {
+            "success": True,
+            "shares_sold": shares_to_sell,
+            "proceeds_usdc": round(proceeds, 4),
+            "entry_cost_removed": round(reduce_usdc, 4),
+            "realized_pnl_usdc": realized_pnl,
+            "sell_bet_id": sell_bet_id,
+            "order_response": order_response,
+            "is_simulated": False,
+            "dry_run": False,
+            "reason": reason,
+        }
+    finally:
+        if own_conn:
+            conn.close()
+
+
 def place_bet_twap(
     *,
     fixture_key: str,
@@ -356,6 +608,9 @@ def place_bet_twap(
 
     proposed_at = _utc_now_iso()
     fees_est = round(size_usdc * POLYMARKET_TAKER_FEE, 4)
+    kelly_uncapped_stake = _uncapped_kelly_stake(
+        bankroll_at_proposal, model_prob, market_price_at_proposal, strategy_label
+    )
 
     # Step 2: insert proposed bet_ledger row (status='proposed', not placed yet)
     conn = get_connection()
@@ -370,8 +625,9 @@ def place_bet_twap(
                 side, size_usdc, fees_estimated_usdc,
                 status, mode, bet_kind, strategy_label,
                 bankroll_at_proposal, phase, xi_signature,
-                toss_winner_team_id, toss_chose_to, kickoff_at, model_snapshot
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'proposed', ?, 'real', ?, ?, ?, ?, ?, ?, ?, ?)
+                toss_winner_team_id, toss_chose_to, kickoff_at, model_snapshot,
+                kelly_uncapped_stake
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'proposed', ?, 'real', ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 proposed_at, match_id, fixture_key, market_type,
@@ -381,6 +637,7 @@ def place_bet_twap(
                 requested_mode, strategy_label,
                 bankroll_at_proposal, phase, xi_signature,
                 toss_winner_team_id, toss_chose_to, kickoff_at, model_snapshot,
+                kelly_uncapped_stake,
             ),
         )
         bet_id = cur.lastrowid

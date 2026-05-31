@@ -1,0 +1,401 @@
+{% extends "base.html" %}
+{% block title %}Live Risk Management{% endblock %}
+{% block head %}
+<style>
+    .lrm-header { display: flex; justify-content: space-between; align-items: flex-end; flex-wrap: wrap; gap: 0.75rem; margin-bottom: 1rem; }
+    .lrm-header h1 { font-size: 1.5rem; font-weight: 700; }
+    .lrm-header .lrm-sub { color: var(--text-secondary); font-size: 0.85rem; margin-top: 0.2rem; }
+    .lrm-updated { color: var(--text-muted); font-size: 0.72rem; }
+
+    .lrm-controls { display: flex; flex-direction: column; gap: 0.5rem; margin-bottom: 1.25rem; }
+    .lrm-chiprow { display: flex; align-items: center; gap: 0.4rem; flex-wrap: wrap; }
+    .lrm-chiprow .lrm-chiplabel { color: var(--text-muted); font-size: 0.65rem; text-transform: uppercase; letter-spacing: 0.6px; width: 78px; }
+    .lrm-chip {
+        padding: 0.35rem 0.85rem; border-radius: 999px; border: 1px solid var(--border-color);
+        background: transparent; color: var(--text-secondary); cursor: pointer; font-weight: 600;
+        font-size: 0.8rem; font-family: inherit; transition: all 0.12s ease;
+    }
+    .lrm-chip:hover { border-color: var(--accent-secondary); color: var(--text-primary); }
+    .lrm-chip.active { background: rgba(16, 185, 129, 0.18); color: var(--accent-primary); border-color: rgba(16, 185, 129, 0.5); }
+
+    .lrm-panel { background: var(--bg-secondary); border: 1px solid var(--border-color); border-radius: 12px; padding: 1.1rem 1.25rem; margin-bottom: 1.25rem; }
+    .lrm-panel h2 { font-size: 0.78rem; text-transform: uppercase; letter-spacing: 0.6px; color: var(--text-muted); margin-bottom: 0.9rem; font-weight: 600; }
+
+    .lrm-kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 0.75rem; }
+    .lrm-kpi { padding: 0.5rem 0.2rem; }
+    .lrm-kpi .lrm-kpi-label { color: var(--text-muted); font-size: 0.66rem; text-transform: uppercase; letter-spacing: 0.5px; }
+    .lrm-kpi .lrm-kpi-value { font-weight: 700; font-size: 1.5rem; margin-top: 0.15rem; font-family: 'JetBrains Mono', monospace; }
+    .lrm-kpi .lrm-kpi-sub { color: var(--text-secondary); font-size: 0.72rem; margin-top: 0.1rem; }
+
+    .pos { color: var(--accent-primary); }
+    .neg { color: #ef4444; }
+    .warn { color: var(--accent-warning); }
+    .muted { color: var(--text-muted); }
+
+    .lrm-mit-hero { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 0.9rem; margin-bottom: 1rem; }
+    .lrm-hero-cell { border: 1px solid var(--border-color); border-radius: 10px; padding: 0.8rem; background: var(--bg-tertiary); }
+    .lrm-hero-cell .h-label { color: var(--text-muted); font-size: 0.66rem; text-transform: uppercase; letter-spacing: 0.5px; }
+    .lrm-hero-cell .h-value { font-weight: 700; font-size: 1.65rem; margin-top: 0.2rem; font-family: 'JetBrains Mono', monospace; }
+    .lrm-hero-cell .h-sub { color: var(--text-secondary); font-size: 0.72rem; margin-top: 0.2rem; }
+
+    .lrm-breakdown { display: grid; grid-template-columns: 1fr 1fr; gap: 0.8rem; margin-bottom: 1rem; }
+    @media (max-width: 640px) { .lrm-breakdown { grid-template-columns: 1fr; } }
+    .lrm-bd-card { border: 1px solid var(--border-color); border-radius: 10px; padding: 0.7rem 0.85rem; }
+    .lrm-bd-card .bd-title { font-weight: 700; font-size: 0.9rem; margin-bottom: 0.35rem; }
+    .lrm-bd-card .bd-row { display: flex; justify-content: space-between; font-size: 0.8rem; padding: 0.18rem 0; color: var(--text-secondary); }
+    .lrm-bd-card .bd-row b { color: var(--text-primary); font-family: 'JetBrains Mono', monospace; }
+
+    .lrm-chart-wrap { width: 100%; }
+    .lrm-chart-wrap canvas { width: 100%; height: 240px; display: block; }
+    .lrm-legend { display: flex; gap: 1rem; font-size: 0.72rem; color: var(--text-secondary); margin-top: 0.4rem; }
+    .lrm-legend span { display: inline-flex; align-items: center; gap: 0.3rem; }
+    .lrm-dot { width: 10px; height: 10px; border-radius: 2px; display: inline-block; }
+
+    .lrm-guard { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 0.9rem; }
+    .lrm-guard-cell .g-label { color: var(--text-muted); font-size: 0.66rem; text-transform: uppercase; letter-spacing: 0.5px; }
+    .lrm-guard-cell .g-value { font-weight: 700; font-size: 1.25rem; margin-top: 0.15rem; font-family: 'JetBrains Mono', monospace; }
+    .lrm-guard-cell .g-sub { color: var(--text-secondary); font-size: 0.72rem; margin-top: 0.15rem; }
+    .lrm-bar { display: block; width: 100%; height: 7px; border-radius: 4px; background: rgba(55,65,81,0.6); margin-top: 0.45rem; overflow: hidden; }
+    .lrm-bar-fill { display: block; height: 100%; background: var(--accent-primary); }
+    .lrm-bar-fill.warn { background: var(--accent-warning); }
+    .lrm-bar-fill.danger { background: #ef4444; }
+
+    .lrm-empty { color: var(--text-muted); font-size: 0.85rem; padding: 1.5rem 0; text-align: center; }
+    .lrm-pending { color: var(--accent-warning); font-size: 0.72rem; margin-top: 0.5rem; }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="lrm-header">
+    <div>
+        <h1>Live Risk Management</h1>
+        <div class="lrm-sub">How the stop-loss, profit-take, sizing caps and daily-loss cap are performing on real capital.</div>
+    </div>
+    <div class="lrm-updated" id="lrm-updated">—</div>
+</div>
+
+<div class="lrm-controls">
+    <div class="lrm-chiprow" id="lrm-range">
+        <span class="lrm-chiplabel">Range</span>
+        <button class="lrm-chip" data-range="7D">7D</button>
+        <button class="lrm-chip active" data-range="30D">30D</button>
+        <button class="lrm-chip" data-range="90D">90D</button>
+        <button class="lrm-chip" data-range="1Y">1Y</button>
+        <button class="lrm-chip" data-range="ALL">All</button>
+    </div>
+    <div class="lrm-chiprow" id="lrm-gran">
+        <span class="lrm-chiplabel">Granularity</span>
+        <button class="lrm-chip active" data-gran="day">Day</button>
+        <button class="lrm-chip" data-gran="week">Week</button>
+        <button class="lrm-chip" data-gran="month">Month</button>
+        <button class="lrm-chip" data-gran="year">Year</button>
+    </div>
+</div>
+
+<!-- Panel 1: KPI strip -->
+<div class="lrm-panel">
+    <h2>Performance — <span id="lrm-kpi-window" class="muted">real bets</span></h2>
+    <div class="lrm-kpis" id="lrm-kpis">
+        <div class="lrm-empty">Loading…</div>
+    </div>
+</div>
+
+<!-- Panel 2: Loss mitigation -->
+<div class="lrm-panel">
+    <h2>Loss mitigation — exits vs holding to settlement</h2>
+    <div class="lrm-mit-hero" id="lrm-mit-hero"></div>
+    <div class="lrm-breakdown" id="lrm-mit-breakdown"></div>
+    <div class="lrm-chart-wrap">
+        <canvas id="lrm-mit-chart"></canvas>
+        <div class="lrm-legend">
+            <span><span class="lrm-dot" style="background:#10b981"></span>Saved (loss mitigated / locked)</span>
+            <span><span class="lrm-dot" style="background:#f59e0b"></span>Left on table (sold winners early)</span>
+        </div>
+    </div>
+    <div class="lrm-pending" id="lrm-mit-pending"></div>
+</div>
+
+<!-- Panel 3: Guardrails -->
+<div class="lrm-panel">
+    <h2>Risk guardrails</h2>
+    <div class="lrm-guard" id="lrm-guard"></div>
+</div>
+
+<!-- Panel 4: Equity curve -->
+<div class="lrm-panel">
+    <h2>Equity curve — cumulative realised P&amp;L</h2>
+    <div class="lrm-chart-wrap">
+        <canvas id="lrm-equity-chart"></canvas>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+let lrmRange = '30D';
+let lrmGran = 'day';
+let lrmData = null;
+let lrmReqSeq = 0;
+
+const fmtMoney = (v, dp = 2) => {
+    if (v === null || v === undefined) return '—';
+    const s = v < 0 ? '-' : '';
+    return s + '$' + Math.abs(v).toLocaleString('en-US', { minimumFractionDigits: dp, maximumFractionDigits: dp });
+};
+const fmtSigned = (v, dp = 2) => {
+    if (v === null || v === undefined) return '—';
+    return (v >= 0 ? '+' : '') + fmtMoney(v, dp).replace('-', '-');
+};
+const fmtPct = (v) => (v === null || v === undefined) ? '—' : v.toFixed(1) + '%';
+const cls = (v) => v > 0 ? 'pos' : (v < 0 ? 'neg' : 'muted');
+
+function setupCanvas(canvas) {
+    const dpr = window.devicePixelRatio || 1;
+    const rect = canvas.getBoundingClientRect();
+    const w = rect.width || canvas.clientWidth || 600;
+    const h = rect.height || 240;
+    canvas.width = Math.round(w * dpr);
+    canvas.height = Math.round(h * dpr);
+    const ctx = canvas.getContext('2d');
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.clearRect(0, 0, w, h);
+    return { ctx, w, h };
+}
+
+async function loadRisk() {
+    const seq = ++lrmReqSeq;
+    const url = `/api/betting/risk-summary?range=${lrmRange}&granularity=${lrmGran}`;
+    const d = await fetchAPI(url);
+    if (seq !== lrmReqSeq) return;  // a newer request superseded this one
+    if (!d || !d.success) {
+        document.getElementById('lrm-kpis').innerHTML = `<div class="lrm-empty">Failed to load risk summary.</div>`;
+        return;
+    }
+    lrmData = d;
+    renderKpis(d);
+    renderMitigation(d);
+    renderGuardrails(d);
+    drawMitChart(d.equity || []);
+    drawEquityChart(d.equity || []);
+    const now = new Date();
+    document.getElementById('lrm-updated').textContent =
+        `${d.n_bets} settled real bets · updated ${now.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' })}`;
+    document.getElementById('lrm-kpi-window').textContent =
+        `real bets · ${d.range} · ${d.granularity}`;
+}
+
+function renderKpis(d) {
+    const k = d.kpis;
+    const el = document.getElementById('lrm-kpis');
+    if (!d.n_bets) { el.innerHTML = `<div class="lrm-empty">No settled real bets in this range.</div>`; return; }
+    el.innerHTML = `
+        <div class="lrm-kpi">
+            <div class="lrm-kpi-label">Net P&L</div>
+            <div class="lrm-kpi-value ${cls(k.net_pnl)}">${fmtSigned(k.net_pnl)}</div>
+            <div class="lrm-kpi-sub">on ${fmtMoney(k.total_staked, 0)} staked</div>
+        </div>
+        <div class="lrm-kpi">
+            <div class="lrm-kpi-label">ROI</div>
+            <div class="lrm-kpi-value ${cls(k.roi_pct)}">${fmtPct(k.roi_pct)}</div>
+        </div>
+        <div class="lrm-kpi">
+            <div class="lrm-kpi-label">Win rate</div>
+            <div class="lrm-kpi-value">${fmtPct(k.win_rate_pct)}</div>
+            <div class="lrm-kpi-sub">${d.n_bets} bets</div>
+        </div>
+        <div class="lrm-kpi">
+            <div class="lrm-kpi-label">Max drawdown</div>
+            <div class="lrm-kpi-value neg">${fmtMoney(k.max_drawdown_usd)}</div>
+            <div class="lrm-kpi-sub">${fmtPct(k.max_drawdown_pct)} of bankroll</div>
+        </div>
+        <div class="lrm-kpi">
+            <div class="lrm-kpi-label">Risk-mgmt value add</div>
+            <div class="lrm-kpi-value ${cls(k.risk_value_add)}">${fmtSigned(k.risk_value_add)}</div>
+            <div class="lrm-kpi-sub">exits vs hold-all</div>
+        </div>`;
+}
+
+function renderMitigation(d) {
+    const m = d.mitigation;
+    document.getElementById('lrm-mit-hero').innerHTML = `
+        <div class="lrm-hero-cell">
+            <div class="h-label">Net value of exiting</div>
+            <div class="h-value ${cls(m.combined_net)}">${fmtSigned(m.combined_net)}</div>
+            <div class="h-sub">saved minus left on table</div>
+        </div>
+        <div class="lrm-hero-cell">
+            <div class="h-label">Total saved</div>
+            <div class="h-value pos">${fmtMoney(m.total_saved)}</div>
+            <div class="h-sub">losses mitigated + gains locked</div>
+        </div>
+        <div class="lrm-hero-cell">
+            <div class="h-label">Left on the table</div>
+            <div class="h-value warn">${fmtMoney(m.total_left)}</div>
+            <div class="h-sub">winners sold early</div>
+        </div>`;
+    document.getElementById('lrm-mit-breakdown').innerHTML = `
+        <div class="lrm-bd-card">
+            <div class="bd-title">🛑 Stop-loss</div>
+            <div class="bd-row"><span>Fired</span><b>${m.stop.n}</b></div>
+            <div class="bd-row"><span>Loss mitigated</span><b class="pos">${fmtMoney(m.stop.saved)}</b></div>
+            <div class="bd-row"><span>False stops (side later won)</span><b class="${m.stop.false_stops ? 'warn' : 'muted'}">${m.stop.false_stops}</b></div>
+        </div>
+        <div class="lrm-bd-card">
+            <div class="bd-title">💰 Profit-take</div>
+            <div class="bd-row"><span>Fired</span><b>${m.profit.n}</b></div>
+            <div class="bd-row"><span>Saved (avoided reversal)</span><b class="pos">${fmtMoney(m.profit.saved)}</b></div>
+            <div class="bd-row"><span>Left on table</span><b class="warn">${fmtMoney(m.profit.left)}</b></div>
+            <div class="bd-row"><span>Net</span><b class="${cls(m.profit.net)}">${fmtSigned(m.profit.net)}</b></div>
+        </div>`;
+    const pend = document.getElementById('lrm-mit-pending');
+    pend.textContent = m.pending ? `${m.pending} cashed-out bet(s) awaiting market resolution — excluded from counterfactuals.` : '';
+}
+
+function renderGuardrails(d) {
+    const g = d.guardrails;
+    const c = g.current || {};
+    const capPct = g.worst_day_pct_of_cap;
+    const capCls = capPct == null ? '' : (capPct >= 90 ? 'danger' : (capPct >= 60 ? 'warn' : ''));
+    document.getElementById('lrm-guard').innerHTML = `
+        <div class="lrm-guard-cell">
+            <div class="g-label">Worst day vs loss cap</div>
+            <div class="g-value">${fmtMoney(g.worst_day_loss)}</div>
+            <div class="g-sub">cap ${fmtMoney(g.daily_loss_cap_usd, 0)} · ${fmtPct(capPct)} of cap · ${g.days_hit_cap} day(s) hit</div>
+            <span class="lrm-bar"><span class="lrm-bar-fill ${capCls}" style="width:${Math.min(100, capPct || 0)}%"></span></span>
+        </div>
+        <div class="lrm-guard-cell">
+            <div class="g-label">Risk trimmed by Kelly cap</div>
+            <div class="g-value">${fmtMoney(g.kelly_trimmed, 0)}</div>
+            <div class="g-sub">intended Kelly stake not deployed</div>
+        </div>
+        <div class="lrm-guard-cell">
+            <div class="g-label">Partial-fill shortfall</div>
+            <div class="g-value">${fmtMoney(g.partial_fill_shortfall, 0)}</div>
+            <div class="g-sub">requested but unfilled</div>
+        </div>
+        <div class="lrm-guard-cell">
+            <div class="g-label">Today (live)</div>
+            <div class="g-value">${fmtMoney(c.today_realised_loss_usdc)}</div>
+            <div class="g-sub">loss vs ${fmtMoney(c.max_loss_per_day_usdc, 0)} cap · mode ${c.mode || '—'}</div>
+        </div>`;
+}
+
+function drawMitChart(series) {
+    const canvas = document.getElementById('lrm-mit-chart');
+    const { ctx, w, h } = setupCanvas(canvas);
+    if (!series.length) { emptyChart(ctx, w, h); return; }
+    const padL = 50, padR = 14, padT = 14, padB = 34;
+    const plotW = w - padL - padR, plotH = h - padT - padB;
+    const maxV = Math.max(1, ...series.map(s => Math.max(s.saved, s.left)));
+    const n = series.length;
+    const slot = plotW / n;
+    const barW = Math.min(18, slot * 0.34);
+
+    // gridlines + y labels
+    ctx.font = '10px JetBrains Mono, monospace';
+    for (let i = 0; i <= 4; i++) {
+        const y = padT + (plotH / 4) * i;
+        ctx.strokeStyle = 'rgba(120,120,120,0.15)'; ctx.lineWidth = 1;
+        ctx.beginPath(); ctx.moveTo(padL, y); ctx.lineTo(w - padR, y); ctx.stroke();
+        ctx.fillStyle = 'rgba(150,150,150,0.7)';
+        ctx.fillText('$' + (maxV - (maxV / 4) * i).toFixed(0), 4, y + 3);
+    }
+    const labelEvery = Math.max(1, Math.ceil(n / 10));
+    series.forEach((s, i) => {
+        const cx = padL + slot * i + slot / 2;
+        const savedH = (s.saved / maxV) * plotH;
+        const leftH = (s.left / maxV) * plotH;
+        ctx.fillStyle = '#10b981';
+        ctx.fillRect(cx - barW - 1, padT + plotH - savedH, barW, savedH);
+        ctx.fillStyle = '#f59e0b';
+        ctx.fillRect(cx + 1, padT + plotH - leftH, barW, leftH);
+        if (i % labelEvery === 0) {
+            ctx.fillStyle = 'rgba(150,150,150,0.75)';
+            ctx.font = '9px JetBrains Mono, monospace';
+            ctx.save(); ctx.translate(cx, h - 6); ctx.fillText(shortLabel(s.bucket), -14, 0); ctx.restore();
+        }
+    });
+}
+
+function drawEquityChart(series) {
+    const canvas = document.getElementById('lrm-equity-chart');
+    const { ctx, w, h } = setupCanvas(canvas);
+    if (!series.length) { emptyChart(ctx, w, h); return; }
+    const padL = 56, padR = 16, padT = 14, padB = 34;
+    const plotW = w - padL - padR, plotH = h - padT - padB;
+    const vals = series.map(s => s.cumulative);
+    let yMin = Math.min(0, ...vals), yMax = Math.max(0, ...vals);
+    if (yMin === yMax) { yMin -= 10; yMax += 10; }
+    const pad = (yMax - yMin) * 0.12; yMin -= pad; yMax += pad;
+    const n = series.length;
+    const xOf = (i) => padL + (n === 1 ? plotW / 2 : (i / (n - 1)) * plotW);
+    const yOf = (v) => padT + plotH - ((v - yMin) / (yMax - yMin)) * plotH;
+
+    ctx.font = '10px JetBrains Mono, monospace';
+    for (let i = 0; i <= 4; i++) {
+        const y = padT + (plotH / 4) * i;
+        ctx.strokeStyle = 'rgba(120,120,120,0.15)'; ctx.lineWidth = 1;
+        ctx.beginPath(); ctx.moveTo(padL, y); ctx.lineTo(w - padR, y); ctx.stroke();
+        ctx.fillStyle = 'rgba(150,150,150,0.7)';
+        ctx.fillText('$' + (yMax - ((yMax - yMin) / 4) * i).toFixed(0), 4, y + 3);
+    }
+    // zero baseline
+    if (yMin < 0 && yMax > 0) {
+        const y0 = yOf(0);
+        ctx.strokeStyle = 'rgba(150,150,150,0.45)'; ctx.setLineDash([4, 4]);
+        ctx.beginPath(); ctx.moveTo(padL, y0); ctx.lineTo(w - padR, y0); ctx.stroke(); ctx.setLineDash([]);
+    }
+    // area fill
+    ctx.beginPath();
+    series.forEach((s, i) => { const x = xOf(i), y = yOf(s.cumulative); i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y); });
+    ctx.lineTo(xOf(n - 1), yOf(yMin)); ctx.lineTo(xOf(0), yOf(yMin)); ctx.closePath();
+    const grad = ctx.createLinearGradient(0, padT, 0, padT + plotH);
+    grad.addColorStop(0, 'rgba(16,185,129,0.28)'); grad.addColorStop(1, 'rgba(16,185,129,0.02)');
+    ctx.fillStyle = grad; ctx.fill();
+    // line
+    ctx.beginPath();
+    series.forEach((s, i) => { const x = xOf(i), y = yOf(s.cumulative); i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y); });
+    ctx.strokeStyle = '#10b981'; ctx.lineWidth = 2; ctx.stroke();
+    // last point label
+    const last = series[n - 1];
+    ctx.fillStyle = '#10b981'; ctx.beginPath(); ctx.arc(xOf(n - 1), yOf(last.cumulative), 3, 0, Math.PI * 2); ctx.fill();
+    // x labels
+    const labelEvery = Math.max(1, Math.ceil(n / 10));
+    ctx.font = '9px JetBrains Mono, monospace'; ctx.fillStyle = 'rgba(150,150,150,0.75)';
+    series.forEach((s, i) => { if (i % labelEvery === 0) ctx.fillText(shortLabel(s.bucket), xOf(i) - 14, h - 6); });
+}
+
+function shortLabel(bucket) {
+    // YYYY-MM-DD -> MM-DD; YYYY-Wnn -> Wnn; YYYY-MM -> MM 'YY; YYYY -> YYYY
+    if (/^\d{4}-\d{2}-\d{2}$/.test(bucket)) return bucket.slice(5);
+    if (/^\d{4}-W\d{2}$/.test(bucket)) return bucket.slice(5);
+    if (/^\d{4}-\d{2}$/.test(bucket)) return bucket.slice(5) + "/" + bucket.slice(2, 4);
+    return bucket;
+}
+
+function emptyChart(ctx, w, h) {
+    ctx.fillStyle = 'rgba(150,150,150,0.6)';
+    ctx.font = '12px Space Grotesk, sans-serif';
+    ctx.fillText('No data in this range', w / 2 - 60, h / 2);
+}
+
+function bindChips(containerId, attr, onPick) {
+    document.getElementById(containerId).addEventListener('click', (e) => {
+        const btn = e.target.closest('.lrm-chip');
+        if (!btn) return;
+        document.querySelectorAll(`#${containerId} .lrm-chip`).forEach(b => b.classList.remove('active'));
+        btn.classList.add('active');
+        onPick(btn.dataset[attr]);
+        loadRisk();
+    });
+}
+
+document.addEventListener('DOMContentLoaded', () => {
+    bindChips('lrm-range', 'range', v => lrmRange = v);
+    bindChips('lrm-gran', 'gran', v => lrmGran = v);
+    loadRisk();
+    setInterval(loadRisk, 60000);
+    window.addEventListener('resize', () => { if (lrmData) { drawMitChart(lrmData.equity || []); drawEquityChart(lrmData.equity || []); } });
+});
+</script>
+{% endblock %}

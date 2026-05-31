@@ -753,22 +753,22 @@ def _resize_plan_to_bankroll(
     """Re-size a TWAP plan's unfilled chunks if Kelly stake vs current bankroll
     has drifted more than resize_threshold (default 20%) from the locked-in size.
 
+    Uses the same wallet-driven bankroll and Kelly sizing as live_bet_scan
+    (get_strategy_bankroll + live_scaled_kelly_stake), not ledger starting_cap
+    + net_pnl - open_exposure — so Polymarket top-ups are reflected in resize.
+
     Flow:
-      1. Re-compute current bankroll (starting + net_pnl - open_exposure).
-      2. Re-run Kelly using stored model_prob and fresh market midpoint.
+      1. Re-compute bankroll via live_bankroll.get_strategy_bankroll.
+      2. Re-run live_scaled_kelly_stake with stored model_prob and fresh mid.
       3. If new_stake differs >20% from plan's total_size_usdc:
          - Cancel any 'placed' (unfilled) Polymarket orders.
          - Reset those chunks to 'pending' with the new size.
          - Update plan's total_size_usdc / chunk_size_usdc.
       4. Return True if a resize occurred.
     """
-    import os
-    from config import BETTING_CONFIG
+    from src.integrations.polymarket.live_bankroll import get_strategy_bankroll
     from src.integrations.polymarket.paper_strategies import STRATEGIES
-
-    LIVE_MIN_STAKE_FRACTION = 0.005
-    LIVE_MAX_STAKE_FRACTION = 0.25
-    POLYMARKET_MIN_ORDER_USDC = 1.0
+    from src.integrations.polymarket.sizing import live_scaled_kelly_stake
 
     strategy_label = plan["strategy_label"]
     strat = next((s for s in STRATEGIES if s.name == strategy_label), None)
@@ -786,38 +786,12 @@ def _resize_plan_to_bankroll(
     if not market_price or market_price <= 0 or market_price >= 1:
         return False
 
-    # Current bankroll for this strategy
-    default_cap = float(BETTING_CONFIG.get("max_deposit_per_strategy_usdc", 0))
-    env_key = f"BETTING_MAX_DEPOSIT_{strategy_label.upper().replace('-', '_')}"
-    starting = float(os.getenv(env_key) or default_cap)
-
-    cur.execute(
-        """
-        SELECT COALESCE(SUM(pnl_realised_usdc), 0) AS net_pnl,
-               COALESCE(SUM(CASE WHEN filled_at IS NOT NULL AND settled_at IS NULL
-                                 THEN fill_size_usdc ELSE 0 END), 0) AS open_exp
-        FROM bet_ledger
-        WHERE COALESCE(bet_kind, 'real') = 'real' AND strategy_label = ?
-        """,
-        (strategy_label,),
-    )
-    row = cur.fetchone()
-    net_pnl     = float(row["net_pnl"]  or 0)
-    open_exp    = float(row["open_exp"] or 0)
-    bankroll    = starting + net_pnl - open_exp
+    bankroll = get_strategy_bankroll(strategy_label, conn, pm=pm_client)
     if bankroll <= 0:
         return False
 
-    # Kelly stake
     model_prob = plan["model_prob"]
-    f_star  = (model_prob - market_price) / (1.0 - market_price)
-    f_star  = max(0.0, min(f_star, 1.0))
-    f_capped = min(f_star * strat.kelly_mult, strat.kelly_fraction_cap)
-    raw_stake = f_capped * bankroll
-    scaled_min = max(LIVE_MIN_STAKE_FRACTION * bankroll, POLYMARKET_MIN_ORDER_USDC)
-    scaled_max = LIVE_MAX_STAKE_FRACTION * bankroll
-
-    new_stake = 0.0 if raw_stake < scaled_min else min(raw_stake, scaled_max)
+    new_stake = live_scaled_kelly_stake(model_prob, market_price, bankroll, strat)
     current_stake = plan["total_size_usdc"] or 0
 
     if new_stake <= 0 or current_stake <= 0:

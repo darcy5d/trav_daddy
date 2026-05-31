@@ -204,6 +204,97 @@ def _resolve_via_gamma(
     return settle_outcome, resolved_price
 
 
+def _winner_label_from_gamma(market: Dict[str, Any]) -> Optional[str]:
+    """Return the winning outcome label (resolved price >= 0.5) for a closed
+    Gamma market, or None if it cannot be determined. Used to persist
+    match_winner for the risk dashboard."""
+    if not market or not market.get("closed"):
+        return None
+
+    def _parse(value: Any) -> List[Any]:
+        if isinstance(value, list):
+            return value
+        if isinstance(value, str):
+            try:
+                p = json.loads(value)
+                if isinstance(p, list):
+                    return p
+            except json.JSONDecodeError:
+                pass
+        return []
+
+    outcomes = _parse(market.get("outcomes"))
+    prices = _parse(market.get("outcomePrices"))
+    if not outcomes or not prices or len(outcomes) != len(prices):
+        return None
+    for label, price in zip(outcomes, prices):
+        try:
+            if float(price) >= 0.5:
+                return str(label)
+        except (TypeError, ValueError):
+            continue
+    return None
+
+
+def _resolve_cashout_match_outcomes(
+    conn: sqlite3.Connection,
+    limit: int = 200,
+) -> int:
+    """Persist match_settle_outcome / match_winner onto cashed-out rows.
+
+    Cashed-out bets are status='settled' with settle_outcome NULL (we exited
+    early), so the main settlement loop never revisits them. The risk
+    dashboard needs the *eventual* match result to compute the
+    hold-to-settlement counterfactual without a live Gamma call at render
+    time. This resolves any cashed-out row still missing match_settle_outcome
+    via Gamma (once the market is closed) and writes it to the ledger.
+
+    Returns the number of rows updated.
+    """
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            """
+            SELECT bet_id, polymarket_market_id, side_label
+            FROM bet_ledger
+            WHERE cashout_triggered_at IS NOT NULL
+              AND match_settle_outcome IS NULL
+              AND polymarket_market_id IS NOT NULL
+              AND side_label IS NOT NULL
+            ORDER BY cashout_triggered_at DESC
+            LIMIT ?
+            """,
+            (limit,),
+        )
+    except sqlite3.OperationalError:
+        # match_settle_outcome column not present yet (pre-migration); skip.
+        return 0
+    rows = cur.fetchall()
+    n_updated = 0
+    for row in rows:
+        gamma_market = _fetch_gamma_market(str(row["polymarket_market_id"]))
+        if gamma_market is None:
+            continue
+        resolved = _resolve_via_gamma(gamma_market, row["side_label"] or "")
+        if resolved is None:
+            continue  # not closed yet / unmatched — try again next pass
+        match_outcome, _price = resolved
+        winner = _winner_label_from_gamma(gamma_market)
+        conn.execute(
+            """
+            UPDATE bet_ledger
+            SET match_settle_outcome = ?, match_winner = ?
+            WHERE bet_id = ?
+            """,
+            (int(match_outcome), winner, row["bet_id"]),
+        )
+        n_updated += 1
+    if n_updated:
+        conn.commit()
+        logger.info(f"Resolved match outcome for {n_updated} cashed-out bet(s)")
+    return n_updated
+
+
 def _derive_kickoff_iso_from_fixture_key(fixture_key: Optional[str]) -> Optional[str]:
     """Best-effort kickoff ISO when the bet row's `kickoff_at` is NULL.
 
@@ -813,6 +904,16 @@ def reconcile_pending_bets(
                     starting = strat.starting_bankroll_usdc if strat else 1000.0
                     bankroll_after = starting + prior_pnl + float(pnl)
 
+            # For a held-to-settlement bet, settle_outcome IS the match result,
+            # so persist it as match_settle_outcome too (lets the risk dashboard
+            # treat held and cashed-out bets uniformly). match_winner comes from
+            # Gamma when available, else the side label when our side won.
+            match_winner = None
+            if gamma_market is not None:
+                match_winner = _winner_label_from_gamma(gamma_market)
+            if match_winner is None and settle_outcome == 1:
+                match_winner = side_label or None
+
             now_iso = _utc_now_iso()
             conn.execute(
                 """
@@ -820,12 +921,15 @@ def reconcile_pending_bets(
                 SET status = 'settled',
                     settled_at = ?,
                     settle_outcome = ?,
+                    match_settle_outcome = ?,
+                    match_winner = COALESCE(?, match_winner),
                     pnl_realised_usdc = ?,
                     bankroll_after_settle = COALESCE(?, bankroll_after_settle),
                     reconciled_at = ?
                 WHERE bet_id = ?
                 """,
-                (now_iso, int(settle_outcome), pnl, bankroll_after, now_iso, bet["bet_id"]),
+                (now_iso, int(settle_outcome), int(settle_outcome), match_winner,
+                 pnl, bankroll_after, now_iso, bet["bet_id"]),
             )
             conn.commit()
             n_settled += 1
@@ -838,6 +942,14 @@ def reconcile_pending_bets(
         except Exception as exc:
             errors.append((bet["bet_id"], f"DB update failed: {exc}"))
 
+    # Post-pass: resolve the eventual match outcome for cashed-out rows so the
+    # risk dashboard can compute hold-to-settlement counterfactuals from the DB.
+    n_cashout_resolved = 0
+    try:
+        n_cashout_resolved = _resolve_cashout_match_outcomes(conn)
+    except Exception as exc:
+        logger.warning(f"Cashout match-outcome resolution failed: {exc}")
+
     if own_conn:
         conn.close()
 
@@ -848,5 +960,6 @@ def reconcile_pending_bets(
         "n_twap_finalized": n_twap_finalized,
         "n_maker_resynced": n_maker_resynced,
         "n_stale_proposed_finalized": n_stale_proposed,
+        "n_cashout_match_resolved": n_cashout_resolved,
         "errors": errors,
     }

@@ -93,6 +93,22 @@ try:
 except Exception as _exc:  # pragma: no cover - logged but non-fatal at import time
     logger.warning(f"Order history schema init failed at startup: {_exc}")
 
+# Live Risk Management: persisted match-outcome + uncapped-Kelly columns.
+try:
+    from src.data.database import init_risk_columns as _init_risk_columns
+
+    _init_risk_columns()
+except Exception as _exc:  # pragma: no cover - logged but non-fatal at import time
+    logger.warning(f"Risk columns schema init failed at startup: {_exc}")
+
+# XI-aware re-evaluation: rolling per-scan model view table.
+try:
+    from src.data.database import init_live_model_snapshots as _init_live_model_snapshots
+
+    _init_live_model_snapshots()
+except Exception as _exc:  # pragma: no cover - logged but non-fatal at import time
+    logger.warning(f"Live model snapshots schema init failed at startup: {_exc}")
+
 # Lazy load simulators (they take time to initialize)
 # Cache per gender to avoid re-initializing
 _fast_simulators = {}  # {'male': simulator, 'female': simulator}
@@ -4768,6 +4784,12 @@ def live_betting_page():
     return render_template('live_betting.html')
 
 
+@app.route('/live-risk')
+def live_risk_page():
+    """Live Risk Management dashboard."""
+    return render_template('live_risk_management.html')
+
+
 @app.route('/api/betting/config', methods=['GET'])
 def betting_config():
     """Current betting risk-gate state + caps + remaining-cap snapshot."""
@@ -4793,6 +4815,290 @@ def betting_strategies():
     except Exception as e:
         logger.error(f"Error getting betting strategies: {e}")
         return jsonify({'success': False, 'error': str(e)}), 500
+
+
+# Live Risk Management: range x granularity aggregation for the risk dashboard.
+_RISK_RANGE_DAYS = {"7D": 7, "30D": 30, "90D": 90, "1Y": 365, "ALL": None}
+_RISK_GRANULARITY = {"day", "week", "month", "year"}
+
+# get_risk_status() does an on-chain portfolio lookup (~10s). The dashboard
+# polls and only needs a near-current snapshot, so cache it briefly here. The
+# risk-gate WRITE path (can_place_bet) is unaffected and still reads fresh.
+_RISK_STATUS_CACHE: dict = {"ts": 0.0, "val": None}
+_RISK_STATUS_TTL = 120.0
+
+
+def _cached_risk_status() -> dict:
+    import time
+    from src.integrations.polymarket.risk_gate import get_risk_status
+    now = time.time()
+    cached = _RISK_STATUS_CACHE.get("val")
+    if cached is not None and (now - _RISK_STATUS_CACHE["ts"]) < _RISK_STATUS_TTL:
+        return cached
+    val = get_risk_status()
+    _RISK_STATUS_CACHE["ts"] = now
+    _RISK_STATUS_CACHE["val"] = val
+    return val
+
+
+def _risk_bucket_key(settled_iso: str, granularity: str) -> str:
+    """Map an ISO timestamp to a bucket label for the chosen granularity."""
+    d = settled_iso[:10]  # YYYY-MM-DD
+    if granularity == "day":
+        return d
+    if granularity == "month":
+        return settled_iso[:7]  # YYYY-MM
+    if granularity == "year":
+        return settled_iso[:4]  # YYYY
+    # week: ISO year-week
+    try:
+        dt = datetime.fromisoformat(settled_iso.replace("Z", "+00:00"))
+        iso = dt.isocalendar()
+        return f"{iso[0]}-W{iso[1]:02d}"
+    except (ValueError, AttributeError):
+        return d
+
+
+def _hold_pnl_from_row(fill_price, fill_size_usdc, match_outcome, fee):
+    """Counterfactual P&L had the position been held to settlement."""
+    if fill_price is None or fill_size_usdc is None or match_outcome is None:
+        return None
+    if fill_price <= 0:
+        return None
+    shares = fill_size_usdc / fill_price
+    gross = shares * float(match_outcome)
+    return round(gross - fill_size_usdc - gross * fee, 4)
+
+
+@app.route('/api/betting/risk-summary', methods=['GET'])
+def betting_risk_summary():
+    """Live Risk Management dashboard aggregation (real bets only).
+
+    Query: ?range=7D|30D|90D|1Y|ALL  &granularity=day|week|month|year
+
+    Returns KPIs, loss-mitigation decomposition (stop-loss vs profit-take,
+    saved vs left-on-table vs hold-all), risk guardrail stats, and a
+    granularity-bucketed equity / mitigation series. All counterfactuals are
+    computed from persisted columns (match_settle_outcome, kelly_uncapped_stake)
+    so no live Polymarket calls fire at render time.
+    """
+    try:
+        from src.integrations.odds.polymarket_compare import POLYMARKET_TAKER_FEE
+
+        rng = (request.args.get("range") or "30D").upper()
+        gran = (request.args.get("granularity") or "day").lower()
+        if rng not in _RISK_RANGE_DAYS:
+            rng = "30D"
+        if gran not in _RISK_GRANULARITY:
+            gran = "day"
+        days = _RISK_RANGE_DAYS[rng]
+        fee = POLYMARKET_TAKER_FEE
+
+        # One live status lookup (wallet/portfolio/cap); reused for caps,
+        # drawdown base, and the "current limits" panel. Cached ~120s.
+        status = _cached_risk_status()
+        max_loss_cap = float(status.get("max_loss_per_day_usdc") or 0.0)
+        portfolio_value = status.get("portfolio_value_usdc")
+
+        where = ["COALESCE(bet_kind,'real') = 'real'", "status = 'settled'",
+                 "settled_at IS NOT NULL"]
+        params: list = []
+        window_start = None
+        if days is not None:
+            window_start = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+            where.append("settled_at >= ?")
+            params.append(window_start)
+
+        with get_db_connection() as conn:
+            cur = conn.cursor()
+            cur.execute(
+                f"""
+                SELECT settled_at, pnl_realised_usdc, fill_price, fill_size_usdc,
+                       size_usdc, settle_outcome, match_settle_outcome,
+                       cashout_triggered_at, cashout_reason, kelly_uncapped_stake,
+                       bankroll_at_proposal
+                FROM bet_ledger
+                WHERE {' AND '.join(where)}
+                ORDER BY settled_at ASC
+                """,
+                params,
+            )
+            rows = cur.fetchall()
+
+        # ---- aggregate ----
+        net_pnl = total_staked = 0.0
+        wins = 0
+        kelly_trimmed = partial_shortfall = 0.0
+        stop_n = stop_saved = stop_false = 0
+        stop_saved_f = 0.0
+        prof_n = 0
+        prof_saved = prof_left = 0.0
+        pending = 0
+        buckets: dict = {}            # label -> {pnl, saved, left}
+        daily_loss: dict = {}         # YYYY-MM-DD -> realised loss (positive number)
+        equity_points = []            # per-bet cumulative for drawdown
+        cum = 0.0
+        first_bankroll = None
+
+        for r in rows:
+            pnl = float(r["pnl_realised_usdc"] or 0.0)
+            filled = float(r["fill_size_usdc"] or 0.0)
+            net_pnl += pnl
+            total_staked += filled
+            if pnl > 0:
+                wins += 1
+            if first_bankroll is None and r["bankroll_at_proposal"]:
+                first_bankroll = float(r["bankroll_at_proposal"])
+
+            # Guardrails decompose cleanly: kelly_trimmed measures the Kelly cap's
+            # effect on the *intended* stake (uncapped - size_usdc), while
+            # partial_shortfall measures execution slippage (size_usdc - filled).
+            # Using size_usdc (not filled) for the cap term keeps them additive.
+            intended = float(r["size_usdc"]) if r["size_usdc"] is not None else None
+            if r["kelly_uncapped_stake"] is not None and intended is not None:
+                kelly_trimmed += max(0.0, float(r["kelly_uncapped_stake"]) - intended)
+            if intended is not None and filled > 0:
+                partial_shortfall += max(0.0, intended - filled)
+
+            day = (r["settled_at"] or "")[:10]
+            if pnl < 0:
+                daily_loss[day] = daily_loss.get(day, 0.0) + (-pnl)
+
+            cum += pnl
+            equity_points.append(cum)
+
+            label = _risk_bucket_key(r["settled_at"], gran)
+            b = buckets.setdefault(label, {"pnl": 0.0, "saved": 0.0, "left": 0.0})
+            b["pnl"] += pnl
+
+            # mitigation only for cashed-out bets
+            if r["cashout_triggered_at"]:
+                hold = _hold_pnl_from_row(
+                    r["fill_price"], filled, r["match_settle_outcome"], fee
+                )
+                if hold is None:
+                    pending += 1
+                    continue
+                benefit = pnl - hold  # +saved / -left
+                reason = r["cashout_reason"] or "profit"
+                if benefit >= 0:
+                    b["saved"] += benefit
+                else:
+                    b["left"] += -benefit
+                if reason == "stop":
+                    stop_n += 1
+                    if benefit >= 0:
+                        stop_saved_f += benefit
+                    # a stop on a side that ultimately WON is a false stop
+                    if r["match_settle_outcome"] == 1:
+                        stop_false += 1
+                else:
+                    prof_n += 1
+                    if benefit >= 0:
+                        prof_saved += benefit
+                    else:
+                        prof_left += -benefit
+
+        # max drawdown from per-bet cumulative curve
+        peak = 0.0
+        max_dd = 0.0
+        for v in equity_points:
+            peak = max(peak, v)
+            max_dd = max(max_dd, peak - v)
+        # Drawdown as a % of total bankroll (portfolio value is the most
+        # interpretable base; bankroll_at_proposal is a per-strategy slice).
+        dd_base = portfolio_value or first_bankroll or total_staked or 0.0
+        dd_pct = round(max_dd / dd_base * 100, 1) if dd_base else None
+
+        total_saved = sum(b["saved"] for b in buckets.values())
+        total_left = sum(b["left"] for b in buckets.values())
+
+        # worst day vs daily-loss cap
+        worst_day_loss = max(daily_loss.values()) if daily_loss else 0.0
+        days_hit = sum(1 for v in daily_loss.values() if max_loss_cap > 0 and v >= max_loss_cap)
+        worst_pct = round(worst_day_loss / max_loss_cap * 100, 1) if max_loss_cap > 0 else None
+
+        equity_series = []
+        running = 0.0
+        for label in sorted(buckets.keys()):
+            b = buckets[label]
+            running += b["pnl"]
+            equity_series.append({
+                "bucket": label,
+                "pnl": round(b["pnl"], 2),
+                "cumulative": round(running, 2),
+                "saved": round(b["saved"], 2),
+                "left": round(b["left"], 2),
+            })
+
+        return jsonify({
+            "success": True,
+            "range": rng,
+            "granularity": gran,
+            "kind": "real",
+            "window_start": window_start,
+            "n_bets": len(rows),
+            "kpis": {
+                "net_pnl": round(net_pnl, 2),
+                "total_staked": round(total_staked, 2),
+                "roi_pct": round(net_pnl / total_staked * 100, 1) if total_staked > 0 else None,
+                "win_rate_pct": round(wins / len(rows) * 100, 1) if rows else None,
+                "max_drawdown_usd": round(max_dd, 2),
+                "max_drawdown_pct": dd_pct,
+                "risk_value_add": round(total_saved - total_left, 2),
+            },
+            "mitigation": {
+                "stop": {"n": stop_n, "saved": round(stop_saved_f, 2), "false_stops": stop_false},
+                "profit": {"n": prof_n, "saved": round(prof_saved, 2),
+                           "left": round(prof_left, 2), "net": round(prof_saved - prof_left, 2)},
+                "total_saved": round(total_saved, 2),
+                "total_left": round(total_left, 2),
+                "combined_net": round(total_saved - total_left, 2),
+                "pending": pending,
+            },
+            "guardrails": {
+                "kelly_trimmed": round(kelly_trimmed, 2),
+                "partial_fill_shortfall": round(partial_shortfall, 2),
+                "daily_loss_cap_usd": round(max_loss_cap, 2) if max_loss_cap else None,
+                "worst_day_loss": round(worst_day_loss, 2),
+                "worst_day_pct_of_cap": worst_pct,
+                "days_hit_cap": days_hit,
+                "current": {
+                    "today_realised_loss_usdc": status.get("today_realised_loss_usdc"),
+                    "max_loss_per_day_usdc": status.get("max_loss_per_day_usdc"),
+                    "today_remaining_cap_usdc": status.get("today_remaining_cap_usdc"),
+                    "portfolio_value_usdc": status.get("portfolio_value_usdc"),
+                    "mode": status.get("mode"),
+                },
+            },
+            "equity": equity_series,
+        })
+    except Exception as e:
+        logger.error(f"Error building risk summary: {e}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/betting/geoblock', methods=['GET'])
+def betting_geoblock():
+    """Polymarket CLOB geoblock for this server's egress IP (VPN must be up)."""
+    try:
+        from src.integrations.polymarket.geoblock import check_geoblock
+        force = request.args.get('force', '').lower() in ('1', 'true', 'yes')
+        info = check_geoblock(force=force)
+        info['success'] = bool(info.get('success'))
+        return jsonify(info)
+    except Exception as e:
+        logger.error(f"Geoblock check failed: {e}")
+        return jsonify({
+            'success': False,
+            'blocked': None,
+            'trading_ok': False,
+            'check_failed': True,
+            'error': str(e),
+            'message': f'Geoblock check error: {e}',
+        }), 500
 
 
 @app.route('/api/betting/wallet', methods=['GET'])
@@ -4942,18 +5248,16 @@ def betting_bankroll_history():
 
 @app.route('/api/betting/portfolio', methods=['GET'])
 def betting_portfolio():
-    """Wave 5.8: total portfolio value = wallet USDC + mark-to-market open positions.
+    """Wave 5.8: total portfolio value = wallet USDC + open MTM + redeemable tokens.
 
-    For each real + filled + not-settled bet in bet_ledger we compute the
-    shares held (= fill_size_usdc / fill_price) and multiply by the current
-    CLOB midpoint to get the present market value of those tokens.
-    Portfolio value = wallet balance + sum of (shares * current midpoint).
+    Open positions come from unsettled bet_ledger rows marked to CLOB midpoints.
+    Redeemable tokens are resolved winners still held on-chain (Polymarket data-api).
     """
     try:
         from src.integrations.polymarket import PolymarketClient
         from config import POLYMARKET_CONFIG
+        from src.integrations.polymarket.live_bankroll import get_portfolio_breakdown
 
-        pm = PolymarketClient()
         if not POLYMARKET_CONFIG.get('private_key'):
             return jsonify({
                 'success': False,
@@ -4961,83 +5265,14 @@ def betting_portfolio():
                 'configured': False,
             })
 
-        # 1. Wallet cash
-        wallet = pm.get_usdc_balance()
-        wallet_cash = float(wallet.get('balance_usdc', 0.0))
-
-        # 2. Open positions with their cost basis + token id
+        pm = PolymarketClient()
         with get_db_connection() as conn:
-            cur = conn.cursor()
-            cur.execute(
-                """
-                SELECT bet_id, polymarket_token_id AS token_id,
-                       fill_size_usdc, fill_price, side_label, strategy_label
-                FROM bet_ledger
-                WHERE COALESCE(bet_kind, 'real') = 'real'
-                  AND status = 'filled'
-                  AND settled_at IS NULL
-                  AND fill_price IS NOT NULL
-                  AND fill_price > 0
-                  AND polymarket_token_id IS NOT NULL
-                  AND polymarket_token_id != ''
-                """
-            )
-            positions = [dict(r) for r in cur.fetchall()]
-
-        # 3. Batched midpoint query for all unique tokens
-        unique_tokens = sorted({p['token_id'] for p in positions})
-        midpoints: dict = {}
-        if unique_tokens:
-            try:
-                midpoints = pm.get_token_midpoints(unique_tokens)
-            except Exception as exc:
-                logger.warning(f"portfolio: get_token_midpoints failed, falling back to cost basis: {exc}")
-                midpoints = {}
-
-        # 4. Mark each position to market; fallback to cost basis when
-        #    the CLOB didn't quote a midpoint for that token.
-        total_cost_basis = 0.0
-        total_market_value = 0.0
-        position_rows = []
-        for p in positions:
-            fill_price = float(p['fill_price'])
-            cost_basis = float(p['fill_size_usdc'] or 0.0)
-            shares = cost_basis / fill_price if fill_price > 0 else 0.0
-            mid = midpoints.get(str(p['token_id']))
-            if mid is None or mid <= 0:
-                market_value = cost_basis  # fallback
-                marked = False
-            else:
-                market_value = shares * mid
-                marked = True
-            total_cost_basis += cost_basis
-            total_market_value += market_value
-            position_rows.append({
-                'bet_id': p['bet_id'],
-                'strategy_label': p['strategy_label'],
-                'side_label': p['side_label'],
-                'shares': round(shares, 4),
-                'fill_price': round(fill_price, 4),
-                'cost_basis_usdc': round(cost_basis, 4),
-                'mid_price': round(mid, 4) if mid is not None else None,
-                'market_value_usdc': round(market_value, 4),
-                'unrealised_pnl_usdc': round(market_value - cost_basis, 4),
-                'marked_to_market': marked,
-            })
-
-        portfolio_value = wallet_cash + total_market_value
-        unrealised_pnl = total_market_value - total_cost_basis
+            breakdown = get_portfolio_breakdown(conn, pm=pm)
 
         return jsonify({
             'success': True,
             'configured': True,
-            'wallet_cash_usdc': round(wallet_cash, 2),
-            'open_positions_count': len(positions),
-            'open_positions_cost_basis_usdc': round(total_cost_basis, 2),
-            'open_positions_market_value_usdc': round(total_market_value, 2),
-            'unrealised_pnl_usdc': round(unrealised_pnl, 2),
-            'portfolio_value_usdc': round(portfolio_value, 2),
-            'positions': position_rows,
+            **breakdown,
         })
     except Exception as e:
         logger.error(f"Error fetching betting portfolio: {e}")
@@ -5743,6 +5978,10 @@ def betting_upcoming():
         # faster than N round-trips when there are many fixtures.
         fixture_keys = [ev["fixture_key"] for ev in mapped]
         bet_counts: dict = {}
+        # XI-aware re-evaluation: latest model view (live_model_snapshots) and
+        # the values stored on the placed bet (bet_ledger) so the UI can show
+        # drift + an "XI changed" flag per fixture.
+        live_model_by_fixture: dict = {}
         if fixture_keys:
             placeholders = ",".join(["?"] * len(fixture_keys))
             with get_db_connection() as conn:
@@ -5766,6 +6005,95 @@ def betting_upcoming():
                         bet_counts[fk] = {"pre_toss": 0, "post_toss": 0}
                     bet_counts[fk][r["phase"]] = int(r["n"])
 
+                # Latest re-sim snapshot per (strategy, fixture). Pick the most
+                # actionable (max edge) snapshot per fixture for the UI summary.
+                best_snap: dict = {}
+                try:
+                    cur.execute(
+                        f"""
+                        SELECT strategy_label, fixture_key, side_label, model_prob,
+                               market_price, edge_pp, xi_signature, model_version,
+                               last_resim_at
+                        FROM live_model_snapshots
+                        WHERE fixture_key IN ({placeholders})
+                        """,
+                        fixture_keys,
+                    )
+                    for r in cur.fetchall():
+                        fk = r["fixture_key"]
+                        edge = r["edge_pp"] if r["edge_pp"] is not None else -999.0
+                        prev = best_snap.get(fk)
+                        if prev is None or edge > prev["_edge"]:
+                            best_snap[fk] = {
+                                "_edge": edge,
+                                "strategy_label": r["strategy_label"],
+                                "side_label": r["side_label"],
+                                "model_prob": r["model_prob"],
+                                "market_price": r["market_price"],
+                                "edge_pp": r["edge_pp"],
+                                "xi_signature": r["xi_signature"],
+                                "model_version": r["model_version"],
+                                "last_resim_at": r["last_resim_at"],
+                            }
+                except Exception as snap_exc:
+                    logger.warning(f"live_model_snapshots query failed: {snap_exc}")
+                    best_snap = {}
+
+                # Bet-time values for the snapshot's strategy (so the comparison
+                # is apples-to-apples between current view and the placed bet).
+                bet_time: dict = {}
+                if best_snap:
+                    cur.execute(
+                        f"""
+                        SELECT fixture_key, strategy_label, model_prob,
+                               xi_signature, side_label, proposed_at
+                        FROM bet_ledger
+                        WHERE bet_kind = 'real'
+                          AND status != 'errored'
+                          AND COALESCE(phase, 'pre_toss') = 'pre_toss'
+                          AND fixture_key IN ({placeholders})
+                        ORDER BY proposed_at ASC
+                        """,
+                        fixture_keys,
+                    )
+                    for r in cur.fetchall():
+                        # Keep the latest pre-toss bet per (fixture, strategy).
+                        bet_time[(r["fixture_key"], r["strategy_label"])] = {
+                            "model_prob": r["model_prob"],
+                            "xi_signature": r["xi_signature"],
+                            "side_label": r["side_label"],
+                        }
+
+                for fk, snap in best_snap.items():
+                    placed = bet_time.get((fk, snap["strategy_label"]))
+                    bet_prob = placed["model_prob"] if placed else None
+                    bet_xi = placed["xi_signature"] if placed else None
+                    xi_changed = bool(
+                        placed is not None
+                        and bet_xi is not None
+                        and snap["xi_signature"] is not None
+                        and bet_xi != snap["xi_signature"]
+                    )
+                    prob_delta_pp = None
+                    if bet_prob is not None and snap["model_prob"] is not None:
+                        prob_delta_pp = round((snap["model_prob"] - bet_prob) * 100.0, 1)
+                    live_model_by_fixture[fk] = {
+                        "strategy_label": snap["strategy_label"],
+                        "model_version": snap["model_version"],
+                        "side_label": snap["side_label"],
+                        "current_model_prob": snap["model_prob"],
+                        "current_edge_pp": snap["edge_pp"],
+                        "current_xi_signature": snap["xi_signature"],
+                        "last_resim_at": snap["last_resim_at"],
+                        "bet_model_prob": bet_prob,
+                        "bet_xi_signature": bet_xi,
+                        "has_bet": placed is not None,
+                        "xi_changed": xi_changed,
+                        "prob_delta_pp": prob_delta_pp,
+                    }
+
+        from src.integrations.polymarket.upcoming import _classify_slug
+
         out = []
         for ev in mapped:
             ml = ev.get("moneyline") or {}
@@ -5788,8 +6116,22 @@ def betting_upcoming():
                 ] if ml else [],
                 "pre_toss_real_bets": counts["pre_toss"],
                 "post_toss_real_bets": counts["post_toss"],
+                "live_model": live_model_by_fixture.get(ev["fixture_key"]),
             })
-        return jsonify({"success": True, "fixtures": out, "n": len(out)})
+        n_intl = sum(
+            1 for row in out
+            if (row.get("tournament_prefix") or "").startswith("crint")
+        )
+        return jsonify({
+            "success": True,
+            "fixtures": out,
+            "n": len(out),
+            "n_international": n_intl,
+            "hours_ahead": hours_ahead,
+            "meta": {
+                "intl_digit_slugs_ok": _classify_slug("crint-bgd3-nld4-2026-05-31") is not None,
+            },
+        })
     except Exception as e:
         logger.error(f"Error in /api/betting/upcoming: {e}")
         return jsonify({"success": False, "error": str(e)}), 500

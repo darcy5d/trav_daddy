@@ -39,6 +39,26 @@ class TestPolymarketClient(unittest.TestCase):
         self.assertEqual(mock_get.call_args[0][0], "https://clob.polymarket.com/ok")
 
 
+    @patch("src.integrations.polymarket.client.requests.get")
+    def test_get_data_api_positions(self, mock_get):
+        mock_response = Mock()
+        mock_response.json.return_value = [
+            {"asset": "123", "redeemable": True, "currentValue": 10.0},
+        ]
+        mock_response.raise_for_status.return_value = None
+        mock_get.return_value = mock_response
+
+        client = PolymarketClient()
+        with patch.object(client, "get_wallet_address", return_value="0xabc"):
+            data = client.get_data_api_positions()
+
+        self.assertEqual(len(data), 1)
+        called_url = mock_get.call_args[0][0]
+        called_params = mock_get.call_args[1]["params"]
+        self.assertEqual(called_url, "https://data-api.polymarket.com/positions")
+        self.assertEqual(called_params["user"], "0xabc")
+
+
 if __name__ == "__main__":
     unittest.main()
 

@@ -55,6 +55,13 @@
     .pt-table th, .pt-table td { padding: 0.4rem 0.5rem; border-bottom: 1px solid rgba(55,65,81,0.4); text-align: left; vertical-align: top; }
     .pt-table th { color: var(--text-muted); font-weight: 600; text-transform: uppercase; letter-spacing: 0.4px; font-size: 0.65rem; }
     .pt-table tr.disabled { opacity: 0.5; }
+    .pt-gender-badge {
+        display: inline-block; padding: 0.12rem 0.5rem; border-radius: 999px;
+        font-size: 0.65rem; font-weight: 700; letter-spacing: 0.3px; margin-left: 0.25rem;
+    }
+    .pt-gender-badge.male   { background: rgba(59, 130, 246, 0.2); color: #93c5fd; border: 1px solid rgba(59, 130, 246, 0.35); }
+    .pt-gender-badge.female { background: rgba(236, 72, 153, 0.18); color: #f9a8d4; border: 1px solid rgba(236, 72, 153, 0.4); }
+    .pt-format-tag { font-weight: 600; color: var(--text-secondary); }
     .pt-pl-positive { color: var(--accent-primary); }
     .pt-pl-negative { color: #ef4444; }
 
@@ -1085,6 +1092,13 @@
     // ----- Upcoming Fixtures (post-toss re-scan) -----
     let upcomingFixtures = [];
 
+    function ptGenderBadge(gender) {
+        const g = (gender || '').toLowerCase();
+        if (g === 'female') return '<span class="pt-gender-badge female" title="Women\'s match">WOMEN</span>';
+        if (g === 'male') return '<span class="pt-gender-badge male" title="Men\'s match">MEN</span>';
+        return `<span class="pt-gender-badge">${gender || '?'}</span>`;
+    }
+
     async function loadUpcomingFixtures() {
         const r = await fetch(upcomingUrl);
         const d = await r.json();
@@ -1120,7 +1134,7 @@
             tr.innerHTML = `
                 <td><strong>${fx.team1}</strong> vs <strong>${fx.team2}</strong>
                     <br><span style="color:var(--text-muted);font-size:0.7rem">${fx.tournament_name}</span></td>
-                <td>${fx.format} ${fx.gender}</td>
+                <td><span class="pt-format-tag">${fx.format || '?'}</span> ${ptGenderBadge(fx.gender)}</td>
                 <td>${start}</td>
                 <td>${typeof t1Px === 'number' ? (t1Px*100).toFixed(1)+'c' : '--'} / ${typeof t2Px === 'number' ? (t2Px*100).toFixed(1)+'c' : '--'}</td>
                 <td>${c.pre}</td>

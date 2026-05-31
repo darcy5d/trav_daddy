@@ -43,11 +43,14 @@ logger = logging.getLogger(__name__)
 #   "crint"  for ALL internationals (men ODI, women T20, U19, etc.)
 # Both share the same team-team-date suffix shape; differentiate format/gender
 # downstream from the event title.
+# Team tokens are usually 3-letter abbrevs (luc, kkr) but internationals often
+# add a digit for duplicate ISO codes in the same series (wst2, lka2, bgd3).
+_TEAM_SLUG = r"[a-z0-9]{2,8}"
 SLUG_MONEYLINE_RE = re.compile(
-    r"^(?P<prefix>cr[a-z0-9]{2,14})-(?P<t1>[a-z]{2,5})-(?P<t2>[a-z]{2,5})-(?P<date>\d{4}-\d{2}-\d{2})$"
+    rf"^(?P<prefix>cr[a-z0-9]{{2,14}})-(?P<t1>{_TEAM_SLUG})-(?P<t2>{_TEAM_SLUG})-(?P<date>\d{{4}}-\d{{2}}-\d{{2}})$"
 )
 SLUG_SUBMARKET_RE = re.compile(
-    r"^(?P<prefix>cr[a-z0-9]{2,14})-(?P<t1>[a-z]{2,5})-(?P<t2>[a-z]{2,5})-(?P<date>\d{4}-\d{2}-\d{2})-(?P<suffix>.+)$"
+    rf"^(?P<prefix>cr[a-z0-9]{{2,14}})-(?P<t1>{_TEAM_SLUG})-(?P<t2>{_TEAM_SLUG})-(?P<date>\d{{4}}-\d{{2}}-\d{{2}})-(?P<suffix>.+)$"
 )
 
 # Static prefix -> (cricket_format, gender, human_name) for unambiguous prefixes.
@@ -174,6 +177,8 @@ def _classify_slug(slug: str) -> Optional[Dict[str, str]]:
             kind = "moneyline"  # alternate moneyline name
         elif "toss-winner" in suffix:
             kind = "toss_winner"
+        elif suffix in ("more-markets", "more-markets-winner"):
+            kind = "other"
         else:
             kind = "other"
         d["kind"] = kind

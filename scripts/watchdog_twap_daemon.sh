@@ -70,7 +70,9 @@ cd "${REPO_ROOT}" || {
 }
 
 AUTO_INSTALL_PLAYWRIGHT_CHROMIUM=false \
-nohup "${PYTHON}" "${SCRIPT}" >> "${LOG}" 2>&1 < /dev/null &
+nohup "${PYTHON}" "${SCRIPT}" \
+  --poll-interval 90 --lookback-min 45 --lookahead-min 30 --also-live \
+  >> "${LOG}" 2>&1 < /dev/null &
 disown 2>/dev/null || true
 
 sleep 3

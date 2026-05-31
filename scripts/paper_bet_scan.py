@@ -43,6 +43,7 @@ from src.integrations.polymarket.paper_inputs import (
     get_recent_xi,
     get_cached_xi,
     get_default_venue_for_team,
+    compute_xi_signature,
 )
 from src.integrations.polymarket.paper_strategies import (
     STRATEGIES,
@@ -263,6 +264,8 @@ def _sim_team1_win_prob(simulator, fixture: Dict[str, Any], conn) -> Optional[fl
         )
         return None
 
+    fixture["_xi_signature"] = compute_xi_signature(t1_bat, t1_bowl, t2_bat, t2_bowl)
+
     result = simulator.simulate_matches(
         300, t1_bat, t1_bowl, t2_bat, t2_bowl,
         venue_id=venue_id, team1_id=t1, team2_id=t2,
@@ -345,29 +348,10 @@ def scan_and_place_paper_bets(
             continue
         summary["fixtures_in_window"] += 1
 
-        # OPTIMIZATION: skip the (expensive) sim if every eligible strategy
-        # has already placed a bet on this fixture. Each strategy can place
-        # exactly one bet per fixture (idempotent), and the simulator is
-        # deterministic given the same XI/venue inputs - so a re-sim would
-        # just produce the same probs and the same bets we already have.
-        # Trade-off: we miss the rare case where a strategy that previously
-        # had edge < threshold now has edge >= threshold due to market price
-        # drift. That's a small price for a 5x-10x speedup on re-scans.
-        with get_db_connection() as conn:
-            all_eligible_have_bets = all(
-                _strategy_has_any_bet_on_fixture(conn, s.name, fix["fixture_key"])
-                for s in eligible
-            )
-        if all_eligible_have_bets:
-            logger.info(
-                f"  [skip-resim] {fix['team1_db_name']} vs {fix['team2_db_name']} "
-                f"(T-{hours_to_kickoff:.1f}h) - all {len(eligible)} eligible strategies "
-                f"already placed bets, no need to re-simulate"
-            )
-            summary["fixtures_in_window"] -= 1  # didn't actually exercise sim path
-            summary.setdefault("fixtures_skipped_resim", 0)
-            summary["fixtures_skipped_resim"] += 1
-            continue
+        # XI-aware re-evaluation: re-sim every scan (no skip-resim short-circuit)
+        # so updated CREX lineups and market drift are reflected each tick, in
+        # parity with the live scanner. Dedup still prevents duplicate paper
+        # bets in the placement loop below.
 
         # Run sims - regardless of dry-run, we want to log what the model said.
         # Only the DB-write at the end is gated by dry_run.
@@ -541,6 +525,7 @@ def scan_and_place_paper_bets(
                     bet_id = _insert_paper_bet(
                         conn, strat, fix, ml, side_label, side_token_id,
                         model_prob, market_price, edge_pp, stake, bankroll_now,
+                        xi_signature=fix.get("_xi_signature"),
                         model_snapshot=model_snapshot,
                     )
                     conn.commit()

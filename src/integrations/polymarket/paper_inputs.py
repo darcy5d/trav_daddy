@@ -10,6 +10,7 @@ Wave 5.11 adds:
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 from collections import defaultdict
@@ -24,6 +25,31 @@ CREX_XI_MIN_MATCH = 7  # out of 11
 
 # Maximum age of a crex_xi_cache row before we consider it stale.
 CREX_XI_MAX_AGE_HOURS = 3.0
+
+
+def compute_xi_signature(
+    t1_bat: List[int],
+    t1_bowl: List[int],
+    t2_bat: List[int],
+    t2_bowl: List[int],
+) -> str:
+    """Stable 12-char hash of the four lineup arrays.
+
+    Shared by the pre-toss live/paper scanners and the post-toss scan
+    scripts so the signature comparison is apples-to-apples across phases.
+    A change in this value between scans means the lineup the model used
+    has changed (e.g. CREX published a confirmed XI, or a late swap).
+    """
+    payload = json.dumps(
+        {
+            "t1_bat": list(t1_bat),
+            "t1_bowl": list(t1_bowl),
+            "t2_bat": list(t2_bat),
+            "t2_bowl": list(t2_bowl),
+        },
+        sort_keys=True,
+    )
+    return hashlib.sha1(payload.encode()).hexdigest()[:12]
 
 
 def get_recent_xi(

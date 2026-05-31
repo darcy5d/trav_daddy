@@ -339,10 +339,70 @@
             padding: 0.5rem 0.75rem;
             font-size: 0.875rem;
         }
+
+        /* Polymarket geoblock / VPN status (all pages) */
+        .pm-geoblock-banner {
+            display: none;
+            align-items: center;
+            justify-content: center;
+            gap: 0.85rem;
+            flex-wrap: wrap;
+            padding: 0.65rem 1.25rem;
+            border-bottom: 2px solid transparent;
+            text-align: center;
+            font-weight: 600;
+            font-size: 0.9rem;
+            line-height: 1.35;
+        }
+        .pm-geoblock-banner.visible { display: flex; }
+        .pm-geoblock-banner .pm-geo-icon {
+            font-size: 1.35rem;
+            line-height: 1;
+            flex-shrink: 0;
+        }
+        .pm-geoblock-banner .pm-geo-title {
+            font-weight: 700;
+            letter-spacing: 0.02em;
+        }
+        .pm-geoblock-banner .pm-geo-detail {
+            font-weight: 500;
+            opacity: 0.92;
+            font-size: 0.82rem;
+        }
+        .pm-geoblock-banner.blocked {
+            background: linear-gradient(90deg, rgba(127, 29, 29, 0.95) 0%, rgba(185, 28, 28, 0.92) 50%, rgba(127, 29, 29, 0.95) 100%);
+            border-bottom-color: #fca5a5;
+            color: #fff;
+            box-shadow: 0 0 24px rgba(239, 68, 68, 0.45);
+            animation: pm-geo-pulse 2s ease-in-out infinite;
+        }
+        .pm-geoblock-banner.ok {
+            background: rgba(6, 78, 59, 0.35);
+            border-bottom-color: rgba(16, 185, 129, 0.45);
+            color: #6ee7b7;
+        }
+        .pm-geoblock-banner.unknown {
+            background: rgba(120, 53, 15, 0.35);
+            border-bottom-color: rgba(245, 158, 11, 0.5);
+            color: #fcd34d;
+        }
+        @keyframes pm-geo-pulse {
+            0%, 100% { box-shadow: 0 0 18px rgba(239, 68, 68, 0.35); }
+            50% { box-shadow: 0 0 32px rgba(239, 68, 68, 0.65); }
+        }
+        body.page-live-trading .pm-geoblock-banner.blocked {
+            padding: 1rem 1.5rem;
+            font-size: 1.05rem;
+        }
+        body.page-live-trading .pm-geoblock-banner.blocked .pm-geo-icon { font-size: 1.75rem; }
+        body.page-live-trading .pm-geoblock-banner.blocked .pm-geo-title { font-size: 1.15rem; }
+        body.page-live-trading .pm-geoblock-banner.ok {
+            padding: 0.75rem 1.25rem;
+        }
     </style>
     {% block head %}{% endblock %}
 </head>
-<body>
+<body class="{% if request.path in ['/live-betting', '/live-risk'] %}page-live-trading{% endif %}">
     <nav class="navbar">
         <a href="/" class="logo">Cricket Predictor</a>
         <ul class="nav-links">
@@ -359,6 +419,7 @@
             </li>
             <li><a href="/rankings" class="{% if request.path == '/rankings' %}active{% endif %}">Rankings</a></li>
             <li><a href="/live-betting" class="{% if request.path == '/live-betting' %}active{% endif %}">Live Betting</a></li>
+            <li><a href="/live-risk" class="{% if request.path == '/live-risk' %}active{% endif %}">Live Risk</a></li>
             <li><a href="/paper-trades" class="{% if request.path == '/paper-trades' %}active{% endif %}">Paper Trades</a></li>
         </ul>
         <div class="timezone-selector">
@@ -376,6 +437,14 @@
             </select>
         </div>
     </nav>
+
+    <div id="pm-geoblock-banner" class="pm-geoblock-banner" role="alert" aria-live="polite" hidden>
+        <span class="pm-geo-icon" id="pm-geo-icon" aria-hidden="true"></span>
+        <div>
+            <div class="pm-geo-title" id="pm-geo-title"></div>
+            <div class="pm-geo-detail" id="pm-geo-detail"></div>
+        </div>
+    </div>
     
     <main class="container">
         {% block content %}{% endblock %}
@@ -423,7 +492,80 @@
             if (tzSelect) {
                 tzSelect.value = currentTimezone;
             }
+            pmRefreshGeoblock();
+            setInterval(pmRefreshGeoblock, 45000);
         });
+
+        async function pmRefreshGeoblock() {
+            const banner = document.getElementById('pm-geoblock-banner');
+            const icon = document.getElementById('pm-geo-icon');
+            const title = document.getElementById('pm-geo-title');
+            const detail = document.getElementById('pm-geo-detail');
+            if (!banner || !icon || !title || !detail) return;
+
+            let data;
+            try {
+                const r = await fetch('/api/betting/geoblock');
+                const ct = (r.headers.get('content-type') || '').toLowerCase();
+                if (!r.ok) {
+                    let errText = '';
+                    if (ct.includes('application/json')) {
+                        const j = await r.json();
+                        errText = j.error || j.message || JSON.stringify(j);
+                    } else {
+                        errText = (await r.text()).slice(0, 120) || r.statusText;
+                    }
+                    if (r.status === 404) {
+                        data = {
+                            check_failed: true,
+                            message: 'Geoblock API not found — restart the Flask app to load the new route.',
+                            error: errText,
+                        };
+                    } else {
+                        data = { check_failed: true, message: `Geoblock API HTTP ${r.status}`, error: errText };
+                    }
+                } else {
+                    data = ct.includes('application/json') ? await r.json() : { check_failed: true, message: 'Invalid geoblock response' };
+                }
+            } catch (err) {
+                data = { success: false, check_failed: true, message: 'Geoblock check failed: ' + err.message };
+            }
+
+            banner.classList.remove('blocked', 'ok', 'unknown', 'visible');
+            banner.hidden = false;
+
+            if (data.trading_ok) {
+                const isLivePage = document.body.classList.contains('page-live-trading');
+                if (!isLivePage) {
+                    banner.hidden = true;
+                    return;
+                }
+                banner.classList.add('ok', 'visible');
+                icon.textContent = '✓';
+                title.textContent = 'Polymarket CLOB — all clear';
+                const loc = [data.country, data.region].filter(Boolean).join(' / ');
+                detail.textContent = loc
+                    ? `Trading available from ${loc}${data.ip ? ' (' + data.ip + ')' : ''}`
+                    : (data.message || 'VPN / region looks good');
+                banner.title = detail.textContent;
+                return;
+            }
+
+            if (data.blocked === true) {
+                banner.classList.add('blocked', 'visible');
+                icon.textContent = '⛔';
+                title.textContent = 'GEO BLOCKED — live orders will NOT place';
+                detail.textContent = data.message || 'Reconnect VPN to an allowed region';
+                banner.title = detail.textContent;
+                return;
+            }
+
+            banner.classList.add('unknown', 'visible');
+            icon.textContent = '?';
+            title.textContent = 'Could not verify Polymarket region';
+            detail.textContent = data.message || data.error || 'Check network / VPN';
+            banner.title = detail.textContent;
+        }
     </script>
     {% block scripts %}{% endblock %}
 </body>

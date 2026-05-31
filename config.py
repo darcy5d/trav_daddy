@@ -116,6 +116,27 @@ BETTING_CONFIG = {
     "live_strategies": [
         s.strip() for s in os.getenv("BETTING_LIVE_STRATEGIES", "").split(",") if s.strip()
     ],
+    # XI-aware rebalancing: continuously re-size live exposure toward the
+    # fresh Kelly target as updated CREX lineups move the model. Ships OFF;
+    # when off, the scanner only places a first bet per fixture/strategy and
+    # never sells. Full rebalance (add / reduce-by-sell / exit-and-flip) only
+    # runs when this is enabled.
+    "rebalance_enabled": os.getenv("BETTING_REBALANCE_ENABLED", "0").strip()
+    in ("1", "true", "True", "TRUE"),
+    # Only act when the model edge has moved at least this many pp since the
+    # bet we hold (cheap guard against churning on simulator noise).
+    "rebalance_edge_delta_pp": float(os.getenv("BETTING_REBALANCE_EDGE_DELTA_PP", "1.5")),
+    # Minimum |target - current| as a fraction of the target (or current)
+    # exposure before we add/reduce. Mirrors the TWAP resize threshold.
+    "rebalance_min_delta_frac": float(os.getenv("BETTING_REBALANCE_MIN_DELTA_FRAC", "0.20")),
+    # Hard cap on the number of rebalance adjustments per fixture/strategy
+    # across the pre-toss life of the bet (prevents runaway churn).
+    "rebalance_max_per_fixture": int(os.getenv("BETTING_REBALANCE_MAX_PER_FIXTURE", "6")),
+    # Freeze SELLs (de-risking / exits) inside this many minutes before
+    # kickoff — by then the lineup is locked and exiting just pays spread.
+    "rebalance_freeze_min_before_toss": float(
+        os.getenv("BETTING_REBALANCE_FREEZE_MIN_BEFORE_TOSS", "20")
+    ),
 }
 
 BETFAIR_CONFIG = {

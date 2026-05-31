@@ -1,8 +1,8 @@
 """Wallet-aware live bankroll — single source of truth for Kelly sizing and risk caps.
 
 When the Polymarket wallet is configured, portfolio value (USDC cash + open
-positions marked to market) drives all limits. Top-ups increase portfolio
-value automatically; losses shrink it.
+positions marked to market + unredeemed winning tokens) drives all limits.
+Top-ups increase portfolio value automatically; losses shrink it.
 
 Per-strategy bankroll = portfolio_value × allocation_weight[strategy].
 Weights come from BETTING_MAX_DEPOSIT_<STRATEGY> env vars (relative shares)
@@ -64,8 +64,8 @@ def _open_positions_from_db(conn: sqlite3.Connection) -> List[Dict[str, Any]]:
     cur = conn.cursor()
     cur.execute(
         """
-        SELECT polymarket_token_id AS token_id,
-               fill_size_usdc, fill_price
+        SELECT bet_id, polymarket_token_id AS token_id,
+               fill_size_usdc, fill_price, side_label, strategy_label
         FROM bet_ledger
         WHERE COALESCE(bet_kind, 'real') = 'real'
           AND status = 'filled'
@@ -84,8 +84,18 @@ def _mark_open_positions(
     pm: Any,
 ) -> float:
     """Sum MTM value of open positions; cost basis fallback when no mid."""
+    _, market_value, _ = _mark_open_positions_detail(positions, pm)
+    return market_value
+
+
+def _mark_open_positions_detail(
+    positions: List[Dict[str, Any]],
+    pm: Any,
+) -> tuple[float, float, List[Dict[str, Any]]]:
+    """Return (cost_basis, market_value, per-bet rows) for open positions."""
     if not positions:
-        return 0.0
+        return 0.0, 0.0, []
+
     unique_tokens = sorted({str(p["token_id"]) for p in positions})
     midpoints: Dict[str, float] = {}
     try:
@@ -93,7 +103,9 @@ def _mark_open_positions(
     except Exception as exc:
         logger.debug(f"Midpoint fetch failed, using cost basis: {exc}")
 
-    total = 0.0
+    total_cost = 0.0
+    total_market = 0.0
+    rows: List[Dict[str, Any]] = []
     for p in positions:
         cost = float(p["fill_size_usdc"] or 0.0)
         fill_price = float(p["fill_price"] or 0.0)
@@ -102,23 +114,73 @@ def _mark_open_positions(
         shares = cost / fill_price
         mid = midpoints.get(str(p["token_id"]))
         if mid is not None and mid > 0:
-            total += shares * float(mid)
+            market_value = shares * float(mid)
+            marked = True
         else:
-            total += cost
-    return total
+            market_value = cost
+            marked = False
+        total_cost += cost
+        total_market += market_value
+        rows.append({
+            "bet_id": p.get("bet_id"),
+            "strategy_label": p.get("strategy_label"),
+            "side_label": p.get("side_label"),
+            "token_id": str(p["token_id"]),
+            "shares": round(shares, 4),
+            "fill_price": round(fill_price, 4),
+            "cost_basis_usdc": round(cost, 4),
+            "mid_price": round(mid, 4) if mid is not None else None,
+            "market_value_usdc": round(market_value, 4),
+            "unrealised_pnl_usdc": round(market_value - cost, 4),
+            "marked_to_market": marked,
+        })
+    return total_cost, total_market, rows
 
 
-def get_portfolio_value(
+def _redeemable_positions_from_pm(
+    pm: Any,
+    exclude_token_ids: Optional[set] = None,
+) -> tuple[float, List[Dict[str, Any]]]:
+    """Sum redeemable winning tokens still held on-chain (settled in ledger)."""
+    exclude = exclude_token_ids or set()
+    try:
+        raw_positions = pm.get_data_api_positions()
+    except Exception as exc:
+        logger.debug(f"Redeemable position fetch failed: {exc}")
+        return 0.0, []
+
+    total = 0.0
+    rows: List[Dict[str, Any]] = []
+    for p in raw_positions:
+        if not p.get("redeemable"):
+            continue
+        token_id = str(p.get("asset") or p.get("asset_id") or "")
+        if not token_id or token_id in exclude:
+            continue
+        value = float(p.get("currentValue") or 0.0)
+        if value <= 0:
+            continue
+        total += value
+        rows.append({
+            "token_id": token_id,
+            "title": p.get("title") or p.get("question") or "",
+            "outcome": p.get("outcome") or "",
+            "shares": round(float(p.get("size") or 0.0), 4),
+            "current_value_usdc": round(value, 4),
+            "initial_value_usdc": round(float(p.get("initialValue") or 0.0), 4),
+            "redeemable": True,
+        })
+    return total, rows
+
+
+def get_portfolio_breakdown(
     conn: sqlite3.Connection,
     pm: Optional[Any] = None,
-) -> float:
-    """Total live capital: wallet USDC + MTM open positions.
-
-    Falls back to BETTING_MAX_DEPOSIT when wallet is not configured.
-    """
+) -> Dict[str, Any]:
+    """Portfolio components: cash + open MTM + unredeemed winning tokens."""
     cfg = _betting_config()
     positions = _open_positions_from_db(conn)
-    positions_mtm = 0.0
+    open_token_ids = {str(p["token_id"]) for p in positions}
 
     from config import POLYMARKET_CONFIG
     if POLYMARKET_CONFIG.get("private_key"):
@@ -127,16 +189,56 @@ def get_portfolio_value(
                 from src.integrations.polymarket import PolymarketClient
                 pm = PolymarketClient()
             cash = float(pm.get_usdc_balance().get("balance_usdc") or 0.0)
-            positions_mtm = _mark_open_positions(positions, pm)
-            return max(0.0, cash + positions_mtm)
+            cost_basis, open_mtm, position_rows = _mark_open_positions_detail(
+                positions, pm
+            )
+            redeemable_usdc, redeemable_rows = _redeemable_positions_from_pm(
+                pm, exclude_token_ids=open_token_ids
+            )
+            portfolio = max(0.0, cash + open_mtm + redeemable_usdc)
+            return {
+                "wallet_cash_usdc": round(cash, 2),
+                "open_positions_count": len(positions),
+                "open_positions_cost_basis_usdc": round(cost_basis, 2),
+                "open_positions_market_value_usdc": round(open_mtm, 2),
+                "unrealised_pnl_usdc": round(open_mtm - cost_basis, 2),
+                "redeemable_usdc": round(redeemable_usdc, 2),
+                "redeemable_count": len(redeemable_rows),
+                "portfolio_value_usdc": round(portfolio, 2),
+                "positions": position_rows,
+                "redeemable_positions": redeemable_rows,
+                "wallet_driven": True,
+            }
         except Exception as exc:
             logger.warning(f"Wallet portfolio read failed, using config fallback: {exc}")
 
-    # No wallet: use open cost basis + configured envelope minus deployed
-    # (approximation for tests / dry environments).
     open_cost = sum(float(p["fill_size_usdc"] or 0.0) for p in positions)
     fallback = float(cfg.get("max_deposit_usdc") or 200.0)
-    return max(fallback, open_cost)
+    portfolio = max(fallback, open_cost)
+    return {
+        "wallet_cash_usdc": None,
+        "open_positions_count": len(positions),
+        "open_positions_cost_basis_usdc": round(open_cost, 2),
+        "open_positions_market_value_usdc": round(open_cost, 2),
+        "unrealised_pnl_usdc": 0.0,
+        "redeemable_usdc": 0.0,
+        "redeemable_count": 0,
+        "portfolio_value_usdc": round(portfolio, 2),
+        "positions": [],
+        "redeemable_positions": [],
+        "wallet_driven": False,
+    }
+
+
+def get_portfolio_value(
+    conn: sqlite3.Connection,
+    pm: Optional[Any] = None,
+) -> float:
+    """Total live capital: wallet USDC + MTM open positions + redeemable tokens.
+
+    Falls back to BETTING_MAX_DEPOSIT when wallet is not configured.
+    """
+    return float(get_portfolio_breakdown(conn, pm=pm)["portfolio_value_usdc"])
 
 
 def get_strategy_bankroll(
@@ -305,7 +407,8 @@ def get_max_per_bet_usdc(
 
 def bankroll_snapshot(conn: sqlite3.Connection, pm: Optional[Any] = None) -> Dict[str, Any]:
     """Debug / API payload describing current bankroll math."""
-    portfolio = get_portfolio_value(conn, pm=pm)
+    breakdown = get_portfolio_breakdown(conn, pm=pm)
+    portfolio = float(breakdown["portfolio_value_usdc"])
     weights = strategy_allocation_weights()
     kickoff_day_mode = uses_kickoff_day_open_cap()
     strategies = {
@@ -324,7 +427,11 @@ def bankroll_snapshot(conn: sqlite3.Connection, pm: Optional[Any] = None) -> Dic
     }
     return {
         "portfolio_value_usdc": round(portfolio, 2),
-        "wallet_driven": bool(__import__("config").POLYMARKET_CONFIG.get("private_key")),
+        "wallet_cash_usdc": breakdown.get("wallet_cash_usdc"),
+        "open_positions_market_value_usdc": breakdown.get("open_positions_market_value_usdc"),
+        "redeemable_usdc": breakdown.get("redeemable_usdc"),
+        "redeemable_count": breakdown.get("redeemable_count"),
+        "wallet_driven": breakdown.get("wallet_driven"),
         "kickoff_day_open_cap_mode": kickoff_day_mode,
         "max_open_fraction_per_kickoff_day": float(
             _betting_config().get("max_open_fraction_per_kickoff_day") or 0.0

@@ -6,6 +6,7 @@ Handles SQLite database setup and provides connection utilities.
 
 import sqlite3
 import logging
+from datetime import datetime, timezone
 from pathlib import Path
 from contextlib import contextmanager
 from typing import Optional, Generator
@@ -566,6 +567,45 @@ def init_cashout_columns(db_path: Optional[Path] = None) -> bool:
         return False
 
 
+def init_risk_columns(db_path: Optional[Path] = None) -> bool:
+    """Live Risk Management: add persisted risk-analytics columns to bet_ledger.
+
+    Idempotent. Safe to call on every app startup. Adds:
+      - match_settle_outcome: eventual market result for the bet's side (1 win /
+        0 loss). Distinct from settle_outcome, which is NULL on cashed-out rows;
+        this lets the risk dashboard compute hold-to-settlement counterfactuals
+        straight from the DB with no live Polymarket calls at render time.
+      - match_winner: winning team label (display / audit).
+      - kelly_uncapped_stake: numeric uncapped Kelly stake (before the
+        kelly_fraction_cap), so "risk trimmed by the cap" is summable without
+        parsing the human-readable sizing_notes string.
+    """
+    if db_path is None:
+        db_path = DATABASE_PATH
+
+    risk_columns = [
+        ("match_settle_outcome", "INTEGER"),
+        ("match_winner",         "TEXT"),
+        ("kelly_uncapped_stake", "REAL"),
+    ]
+
+    try:
+        with get_db_connection(db_path) as conn:
+            for col_name, col_type in risk_columns:
+                if not _column_exists(conn, "bet_ledger", col_name):
+                    conn.execute(
+                        f"ALTER TABLE bet_ledger ADD COLUMN {col_name} {col_type}"
+                    )
+                    logger.info(f"Added bet_ledger.{col_name} column")
+            logger.info("Risk-analytics columns initialized")
+        return True
+    except Exception as e:
+        logger.error(f"Failed to initialize risk columns: {e}")
+        import traceback
+        traceback.print_exc()
+        return False
+
+
 def init_crex_xi_cache(db_path: Optional[Path] = None) -> bool:
     """Wave 5.11: create crex_xi_cache table + index.
 
@@ -590,6 +630,86 @@ def init_crex_xi_cache(db_path: Optional[Path] = None) -> bool:
         import traceback
         traceback.print_exc()
         return False
+
+
+def init_live_model_snapshots(db_path: Optional[Path] = None) -> bool:
+    """XI-aware re-evaluation: rolling per-scan model view table.
+
+    Idempotent. Safe to call on every app startup. Stores the latest
+    re-simulated model prob / edge / XI signature per (strategy, fixture)
+    so the rebalancer and UI can detect when an updated lineup has moved
+    our edge relative to the bet we actually placed.
+    """
+    if db_path is None:
+        db_path = DATABASE_PATH
+
+    schema_path = Path(__file__).parent / "schema_v11_live_model_snapshots.sql"
+    if not schema_path.exists():
+        logger.error(f"Schema file not found: {schema_path}")
+        return False
+
+    try:
+        schema_sql = schema_path.read_text()
+        with get_db_connection(db_path) as conn:
+            conn.executescript(schema_sql)
+            logger.info("Live model snapshots (V11) initialized")
+        return True
+    except Exception as e:
+        logger.error(f"Failed to initialize live_model_snapshots schema: {e}")
+        import traceback
+        traceback.print_exc()
+        return False
+
+
+def upsert_live_model_snapshot(
+    conn,
+    *,
+    strategy_label: str,
+    fixture_key: str,
+    side_label: Optional[str],
+    model_prob: Optional[float],
+    market_price: Optional[float],
+    edge_pp: Optional[float],
+    xi_signature: Optional[str],
+    model_version: Optional[str] = None,
+    kickoff_at: Optional[str] = None,
+    last_resim_at: Optional[str] = None,
+) -> None:
+    """Insert/update the latest model view for a (strategy, fixture).
+
+    Best-effort: the table is created on app startup, but if it is missing
+    (e.g. a script ran before init), we create it on demand so callers never
+    crash a scan over telemetry.
+    """
+    if last_resim_at is None:
+        last_resim_at = datetime.now(timezone.utc).isoformat()
+    try:
+        conn.execute(
+            """
+            INSERT INTO live_model_snapshots (
+                strategy_label, fixture_key, side_label, model_prob,
+                market_price, edge_pp, xi_signature, model_version,
+                kickoff_at, last_resim_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(strategy_label, fixture_key) DO UPDATE SET
+                side_label    = excluded.side_label,
+                model_prob    = excluded.model_prob,
+                market_price  = excluded.market_price,
+                edge_pp       = excluded.edge_pp,
+                xi_signature  = excluded.xi_signature,
+                model_version = excluded.model_version,
+                kickoff_at    = excluded.kickoff_at,
+                last_resim_at = excluded.last_resim_at
+            """,
+            (
+                strategy_label, fixture_key, side_label, model_prob,
+                market_price, edge_pp, xi_signature, model_version,
+                kickoff_at, last_resim_at,
+            ),
+        )
+        conn.commit()
+    except Exception as exc:
+        logger.warning(f"upsert_live_model_snapshot failed ({strategy_label}/{fixture_key}): {exc}")
 
 
 def init_twap_tables(db_path: Optional[Path] = None) -> bool:
