@@ -774,6 +774,7 @@
         const cash = data.wallet_cash_usdc;
         const positions = data.open_positions_market_value_usdc;
         const redeemable = data.redeemable_usdc || 0;
+        const pending = data.pending_redemption_usdc || 0;
         const n = data.open_positions_count;
         const unrealised = data.unrealised_pnl_usdc;
         const unrealisedStr = unrealised !== 0
@@ -783,6 +784,9 @@
         const parts = [`${fmtUsd(cash)} cash`, `${fmtUsd(positions)} in ${n} open`];
         if (redeemable > 0) {
             parts.push(`${fmtUsd(redeemable)} redeemable`);
+        }
+        if (pending > 0) {
+            parts.push(`${fmtUsd(pending)} pending redemption`);
         }
         sub.textContent = parts.join(' + ') + unrealisedStr;
         sub.className = 'lb-sub ' + (unrealised !== 0 ? plClass(unrealised) : '');
@@ -1175,24 +1179,43 @@
             ? `<span class="num ${pnl >= 0 ? 'lb-pl-positive' : 'lb-pl-negative'}">${fmtUsd(pnl)}</span>`
             : (b.fill_price ? `<span class="num" style="color:var(--text-muted)">${Number(b.fill_price).toFixed(3)}</span>` : `<span class="num" style="color:var(--text-muted)">--</span>`);
 
+        // Cashout entry→exit prices and multiplier. Partial-cashout SELL
+        // adjustment rows store the SELL price in fill_price (so fill/cashout
+        // are identical → a meaningless 1.00×). Prefer the stored return ratio
+        // (cashout_threshold_used) and reconstruct the true entry from it.
+        let coEntryPx = null, coExitPx = null, coMult = null;
+        if (isCashout) {
+            const ret = Number(b.cashout_threshold_used);
+            coExitPx = (b.cashout_price != null) ? Number(b.cashout_price)
+                     : (b.fill_price != null ? Number(b.fill_price) : null);
+            if (ret && ret > 0 && coExitPx != null) {
+                coMult = ret;
+                coEntryPx = coExitPx / ret;
+            } else if (b.cashout_price && b.fill_price) {
+                coMult = Number(b.cashout_price) / Number(b.fill_price);
+                coEntryPx = Number(b.fill_price);
+                coExitPx = Number(b.cashout_price);
+            }
+        }
+
         let outcome = '';
         if (settled) {
             if (isCashout) {
-                const mult = (b.cashout_price && b.fill_price)
-                    ? (Number(b.cashout_price) / Number(b.fill_price)).toFixed(2) + '×'
-                    : '';
-                outcome = `<span class="lb-outcome-pill lb-outcome-cashed" title="Cashed out — entry ${(Number(b.fill_price)*100).toFixed(1)}¢ → exit ${(Number(b.cashout_price)*100).toFixed(1)}¢">CASHED ${mult}</span>`;
+                const multStr = (coMult != null) ? coMult.toFixed(2) + '×' : '';
+                const title = (coEntryPx != null && coExitPx != null)
+                    ? `Cashed out — entry ${(coEntryPx*100).toFixed(1)}¢ → exit ${(coExitPx*100).toFixed(1)}¢`
+                    : 'Cashed out';
+                outcome = `<span class="lb-outcome-pill lb-outcome-cashed" title="${title}">CASHED ${multStr}</span>`;
             } else {
                 outcome = `<span class="lb-outcome-pill ${won ? 'lb-outcome-won' : 'lb-outcome-lost'}">${won ? 'WON' : 'LOST'}</span>`;
             }
         }
 
         let cashoutDetail = '';
-        if (isCashout && b.fill_price && b.cashout_price) {
-            const entryPct = (Number(b.fill_price) * 100).toFixed(1);
-            const exitPct  = (Number(b.cashout_price) * 100).toFixed(1);
-            const mult     = (Number(b.cashout_price) / Number(b.fill_price)).toFixed(2);
-            cashoutDetail = `<div class="lb-cashout-detail">${entryPct}¢ <span style="color:#22d3ee">→</span> ${exitPct}¢ · <strong style="color:#22d3ee">${mult}×</strong></div>`;
+        if (isCashout && coEntryPx != null && coExitPx != null && coMult != null) {
+            const entryPct = (coEntryPx * 100).toFixed(1);
+            const exitPct  = (coExitPx * 100).toFixed(1);
+            cashoutDetail = `<div class="lb-cashout-detail">${entryPct}¢ <span style="color:#22d3ee">→</span> ${exitPct}¢ · <strong style="color:#22d3ee">${coMult.toFixed(2)}×</strong></div>`;
         }
 
         const timestamp = (settled ? b.settled_at : b.proposed_at || '').slice(5, 16).replace('T', ' ');

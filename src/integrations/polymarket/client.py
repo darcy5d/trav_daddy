@@ -458,6 +458,20 @@ class PolymarketClient:
             return client.get_orders()
         return []
 
+    def get_order(self, order_id: str) -> Any:
+        """Fetch a single order by id from the CLOB.
+
+        Returns the order dict (with `size_matched`, `original_size`, `status`,
+        ...) or None if the exchange has no record of it (e.g. fully matched
+        and pruned, or never accepted).
+        """
+        if not order_id:
+            return None
+        client = self._get_clob_sdk_client()
+        if hasattr(client, "get_order"):
+            return client.get_order(order_id)
+        return None
+
     def get_positions(self) -> Any:
         """Return current positions (token holdings) for this wallet."""
         client = self._get_clob_sdk_client()

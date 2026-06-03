@@ -23,6 +23,14 @@ from typing import Any, Dict, List, Optional, Union
 
 logger = logging.getLogger(__name__)
 
+# A resolved-winner token still held on-chain is only counted as "pending
+# redemption" when BOTH hold: (1) we have a settled-won real BUY ledger row for
+# it (our reconcile confirmed the match actually resolved), and (2) its on-chain
+# mid has converged to ~$1. The ledger gate is the real protection against the
+# "team comes back from 1%" edge case (a live position is never settled-won);
+# the price gate is a secondary sanity check against data inconsistencies.
+PENDING_REDEMPTION_MIN_PRICE = 0.99
+
 
 def _betting_config() -> Dict[str, Any]:
     from config import BETTING_CONFIG
@@ -77,6 +85,30 @@ def _open_positions_from_db(conn: sqlite3.Connection) -> List[Dict[str, Any]]:
         """
     )
     return [dict(r) for r in cur.fetchall()]
+
+
+def _settled_won_token_ids(conn: sqlite3.Connection) -> set:
+    """Token ids of real BUY bets we settled as winners (settle_outcome=1).
+
+    Settlement is driven by reconcile, which only marks a bet settled once the
+    match has actually resolved (Gamma closed / price gates past kickoff). So a
+    token in this set is a genuine winner — used to recognise winning tokens we
+    still hold on-chain before Polymarket flips their `redeemable` flag to True.
+    """
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT DISTINCT polymarket_token_id
+        FROM bet_ledger
+        WHERE COALESCE(bet_kind, 'real') = 'real'
+          AND side = 'BUY'
+          AND status = 'settled'
+          AND settle_outcome = 1
+          AND polymarket_token_id IS NOT NULL
+          AND polymarket_token_id != ''
+        """
+    )
+    return {str(r[0]) for r in cur.fetchall()}
 
 
 def _mark_open_positions(
@@ -139,38 +171,61 @@ def _mark_open_positions_detail(
 
 def _redeemable_positions_from_pm(
     pm: Any,
+    settled_won_token_ids: Optional[set] = None,
     exclude_token_ids: Optional[set] = None,
-) -> tuple[float, List[Dict[str, Any]]]:
-    """Sum redeemable winning tokens still held on-chain (settled in ledger)."""
+) -> tuple[float, float, List[Dict[str, Any]]]:
+    """Value winning tokens still held on-chain, split by claim status.
+
+    Returns ``(redeemable_now_usdc, pending_redemption_usdc, rows)``:
+
+      * redeemable_now    -> Polymarket flagged ``redeemable=True``; claimable now.
+      * pending_redemption-> we settled this token as a winner in the ledger and
+                             its on-chain mid has converged to ~$1, but the
+                             ``redeemable`` flag has not flipped yet (on-chain
+                             resolution lags). Real winnings; not yet claimable.
+
+    Open-ledger tokens are excluded to avoid double-counting against open MTM.
+    """
     exclude = exclude_token_ids or set()
+    won_tokens = settled_won_token_ids or set()
     try:
         raw_positions = pm.get_data_api_positions()
     except Exception as exc:
         logger.debug(f"Redeemable position fetch failed: {exc}")
-        return 0.0, []
+        return 0.0, 0.0, []
 
-    total = 0.0
+    redeemable_now = 0.0
+    pending = 0.0
     rows: List[Dict[str, Any]] = []
     for p in raw_positions:
-        if not p.get("redeemable"):
-            continue
         token_id = str(p.get("asset") or p.get("asset_id") or "")
         if not token_id or token_id in exclude:
             continue
         value = float(p.get("currentValue") or 0.0)
         if value <= 0:
             continue
-        total += value
+        cur_price = float(p.get("curPrice") or 0.0)
+        is_redeemable = bool(p.get("redeemable"))
+        if is_redeemable:
+            claim_status = "redeemable"
+            redeemable_now += value
+        elif token_id in won_tokens and cur_price >= PENDING_REDEMPTION_MIN_PRICE:
+            claim_status = "pending_redemption"
+            pending += value
+        else:
+            continue
         rows.append({
             "token_id": token_id,
             "title": p.get("title") or p.get("question") or "",
             "outcome": p.get("outcome") or "",
             "shares": round(float(p.get("size") or 0.0), 4),
+            "cur_price": round(cur_price, 4),
             "current_value_usdc": round(value, 4),
             "initial_value_usdc": round(float(p.get("initialValue") or 0.0), 4),
-            "redeemable": True,
+            "redeemable": is_redeemable,
+            "claim_status": claim_status,
         })
-    return total, rows
+    return redeemable_now, pending, rows
 
 
 def get_portfolio_breakdown(
@@ -181,6 +236,7 @@ def get_portfolio_breakdown(
     cfg = _betting_config()
     positions = _open_positions_from_db(conn)
     open_token_ids = {str(p["token_id"]) for p in positions}
+    settled_won_token_ids = _settled_won_token_ids(conn)
 
     from config import POLYMARKET_CONFIG
     if POLYMARKET_CONFIG.get("private_key"):
@@ -192,10 +248,18 @@ def get_portfolio_breakdown(
             cost_basis, open_mtm, position_rows = _mark_open_positions_detail(
                 positions, pm
             )
-            redeemable_usdc, redeemable_rows = _redeemable_positions_from_pm(
-                pm, exclude_token_ids=open_token_ids
+            redeemable_usdc, pending_usdc, redeemable_rows = _redeemable_positions_from_pm(
+                pm,
+                settled_won_token_ids=settled_won_token_ids,
+                exclude_token_ids=open_token_ids,
             )
-            portfolio = max(0.0, cash + open_mtm + redeemable_usdc)
+            redeemable_count = sum(
+                1 for r in redeemable_rows if r["claim_status"] == "redeemable"
+            )
+            pending_count = sum(
+                1 for r in redeemable_rows if r["claim_status"] == "pending_redemption"
+            )
+            portfolio = max(0.0, cash + open_mtm + redeemable_usdc + pending_usdc)
             return {
                 "wallet_cash_usdc": round(cash, 2),
                 "open_positions_count": len(positions),
@@ -203,7 +267,9 @@ def get_portfolio_breakdown(
                 "open_positions_market_value_usdc": round(open_mtm, 2),
                 "unrealised_pnl_usdc": round(open_mtm - cost_basis, 2),
                 "redeemable_usdc": round(redeemable_usdc, 2),
-                "redeemable_count": len(redeemable_rows),
+                "redeemable_count": redeemable_count,
+                "pending_redemption_usdc": round(pending_usdc, 2),
+                "pending_redemption_count": pending_count,
                 "portfolio_value_usdc": round(portfolio, 2),
                 "positions": position_rows,
                 "redeemable_positions": redeemable_rows,
@@ -223,6 +289,8 @@ def get_portfolio_breakdown(
         "unrealised_pnl_usdc": 0.0,
         "redeemable_usdc": 0.0,
         "redeemable_count": 0,
+        "pending_redemption_usdc": 0.0,
+        "pending_redemption_count": 0,
         "portfolio_value_usdc": round(portfolio, 2),
         "positions": [],
         "redeemable_positions": [],
@@ -431,6 +499,8 @@ def bankroll_snapshot(conn: sqlite3.Connection, pm: Optional[Any] = None) -> Dic
         "open_positions_market_value_usdc": breakdown.get("open_positions_market_value_usdc"),
         "redeemable_usdc": breakdown.get("redeemable_usdc"),
         "redeemable_count": breakdown.get("redeemable_count"),
+        "pending_redemption_usdc": breakdown.get("pending_redemption_usdc"),
+        "pending_redemption_count": breakdown.get("pending_redemption_count"),
         "wallet_driven": breakdown.get("wallet_driven"),
         "kickoff_day_open_cap_mode": kickoff_day_mode,
         "max_open_fraction_per_kickoff_day": float(

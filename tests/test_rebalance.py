@@ -23,14 +23,43 @@ FK = "crint-aaa-bbb-2026-06-01"
 
 
 class _FakeClient:
-    """Stand-in PolymarketClient: records SELLs, never hits the network."""
+    """Stand-in PolymarketClient for the marketable-sell path.
 
-    def __init__(self):
+    Serves a deep order book at `bid_price`, fills `fill_fraction` of each SELL,
+    and confirms cancels. Records every SELL so tests can assert on placement.
+    """
+
+    def __init__(self, *, bid_price=0.60, depth=100000.0, fill_fraction=1.0):
         self.sells = []
+        self.cancels = []
+        self.bid_price = bid_price
+        self.depth = depth
+        self.fill_fraction = fill_fraction
+        self._last_size = 0.0
+
+    def get_clob_order_book(self, token_id):
+        return {
+            "bids": [{"price": str(self.bid_price), "size": str(self.depth)}],
+            "asks": [{"price": str(self.bid_price + 0.02), "size": str(self.depth)}],
+            "tick_size": "0.01",
+        }
 
     def place_limit_order(self, *, token_id, side, price, size_shares):
         self.sells.append((token_id, side, price, size_shares))
-        return {"orderID": "fake-sell-1"}
+        self._last_size = size_shares
+        status = "matched" if self.fill_fraction >= 1.0 else "live"
+        return {"orderID": f"fake-sell-{len(self.sells)}", "status": status}
+
+    def get_order(self, order_id):
+        return {
+            "size_matched": self._last_size * self.fill_fraction,
+            "original_size": self._last_size,
+            "status": "matched" if self.fill_fraction >= 1.0 else "live",
+        }
+
+    def cancel_order(self, order_id):
+        self.cancels.append(order_id)
+        return {"canceled": [order_id]}
 
 
 def _now() -> str:
@@ -239,6 +268,31 @@ def test_freeze_blocks_exit_flip(ledger):
     assert "frozen" in action.reason
 
 
+def test_no_average_down_blocks_add_when_underwater(ledger):
+    """The market has crashed below our entry — refuse to top up (would be
+    averaging down into a losing position, the Bahrain 0.54 -> 0.26 behaviour)."""
+    _insert_filled_buy(ledger, side_label="TeamB", fill_size_usdc=20.0, edge_pp=30.0, fill_price=0.54)
+    action = rebalance.decide_rebalance(
+        ledger, strat=STRAT, fixture_key=FK, chosen_side_label="TeamB",
+        model_prob=0.90, market_price=0.26, edge_pp=64.0, bankroll=1000.0,
+        minutes_to_kickoff=300.0,
+    )
+    assert action.action == "hold"
+    assert "average down" in action.reason
+
+
+def test_add_allowed_when_price_holds_above_entry(ledger):
+    """A position still trading above entry can still scale up on a growing edge."""
+    _insert_filled_buy(ledger, side_label="TeamB", fill_size_usdc=20.0, edge_pp=30.0, fill_price=0.50)
+    action = rebalance.decide_rebalance(
+        ledger, strat=STRAT, fixture_key=FK, chosen_side_label="TeamB",
+        model_prob=0.75, market_price=0.60, edge_pp=15.0, bankroll=1000.0,
+        minutes_to_kickoff=300.0,
+    )
+    assert action.action == "add"
+    assert action.size_usdc > 0
+
+
 def test_max_per_fixture_churn_guard(ledger):
     _insert_filled_buy(ledger, side_label="TeamB", fill_size_usdc=120.0, edge_pp=20.0)
     for _ in range(6):
@@ -346,6 +400,64 @@ def test_full_exit_settles_buy_row(ledger):
     row = cur.fetchone()
     assert row["status"] == "settled"
     assert row["fill_size_usdc"] == pytest.approx(0.0, abs=1e-6)
+
+
+def test_reduce_position_books_only_actual_partial_fill(ledger):
+    """When the book only fills part of the SELL, the ledger must shrink by the
+    ACTUAL filled fraction (not the requested size) and leave the rest open."""
+    _insert_filled_buy(ledger, side_label="TeamB", fill_size_usdc=100.0, edge_pp=10.0, fill_price=0.50)
+    fake = _FakeClient(bid_price=0.60, fill_fraction=0.5)
+    res = reduce_position(
+        strategy_label=STRAT.name,
+        fixture_key=FK,
+        side_label="TeamB",
+        polymarket_token_id="TOK",
+        reduce_usdc=100.0,   # request the whole 200 shares
+        current_price=0.60,
+        conn=ledger,
+        poly_client=fake,
+        dry_run=False,
+    )
+    assert res["success"] is True
+    assert res["partial"] is True
+    # Only half (100 of 200 shares) filled -> entry cost removed = $50.
+    assert res["shares_sold"] == pytest.approx(100.0, rel=1e-3)
+    assert res["entry_cost_removed"] == pytest.approx(50.0, rel=1e-3)
+    # Resting remainder was cancelled (no orphan).
+    assert len(fake.cancels) == 1
+    cur = ledger.cursor()
+    cur.execute("SELECT fill_size_usdc, status FROM bet_ledger WHERE side='BUY'")
+    row = cur.fetchone()
+    assert row["fill_size_usdc"] == pytest.approx(50.0, rel=1e-3)
+    assert row["status"] == "filled"  # remainder stays open to retry
+
+
+def test_reduce_position_no_fill_when_spread_too_wide(ledger):
+    """If the best bid is below the slippage floor, nothing fills and the
+    ledger is untouched (no phantom de-risk)."""
+    _insert_filled_buy(ledger, side_label="TeamB", fill_size_usdc=100.0, edge_pp=10.0, fill_price=0.50)
+    fake = _FakeClient(bid_price=0.50)  # best bid 0.50 < floor (0.60-0.03=0.57)
+    res = reduce_position(
+        strategy_label=STRAT.name,
+        fixture_key=FK,
+        side_label="TeamB",
+        polymarket_token_id="TOK",
+        reduce_usdc=50.0,
+        current_price=0.60,
+        conn=ledger,
+        poly_client=fake,
+        dry_run=False,
+    )
+    assert res["success"] is False
+    assert "sell-not-filled" in res["reason"]
+    assert fake.sells == []  # never even placed
+    cur = ledger.cursor()
+    cur.execute("SELECT fill_size_usdc, status FROM bet_ledger WHERE side='BUY'")
+    row = cur.fetchone()
+    assert row["fill_size_usdc"] == pytest.approx(100.0, rel=1e-9)
+    assert row["status"] == "filled"
+    cur.execute("SELECT COUNT(*) n FROM bet_ledger WHERE side='SELL'")
+    assert cur.fetchone()["n"] == 0
 
 
 def test_dry_run_is_preview_only_no_db_or_order(ledger):

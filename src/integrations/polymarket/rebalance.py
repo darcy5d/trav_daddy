@@ -180,6 +180,50 @@ def bet_time_edge_pp(
     return float(row["edge_pp"])
 
 
+def avg_entry_price(
+    conn: sqlite3.Connection,
+    strategy_label: str,
+    fixture_key: str,
+    side_label: str,
+    phase: str = "pre_toss",
+) -> Optional[float]:
+    """Fill-size-weighted average entry price across filled BUY rows we still
+    hold on this side. Returns None when there's no measurable position.
+
+    Used by the anti-averaging-down guard: if the current market price has
+    fallen well below this, the market has moved against the model and we
+    should not top up.
+    """
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT COALESCE(SUM(fill_size_usdc), 0.0) AS cost,
+               COALESCE(SUM(fill_size_usdc / fill_price), 0.0) AS shares
+        FROM bet_ledger
+        WHERE COALESCE(bet_kind, 'real') = 'real'
+          AND side = 'BUY'
+          AND status = 'filled'
+          AND strategy_label = ?
+          AND fixture_key = ?
+          AND side_label = ?
+          AND COALESCE(phase, 'pre_toss') = ?
+          AND fill_size_usdc IS NOT NULL
+          AND fill_price IS NOT NULL
+          AND fill_price > 0
+          AND fill_size_usdc > 0
+        """,
+        (strategy_label, fixture_key, side_label, phase),
+    )
+    row = cur.fetchone()
+    if row is None:
+        return None
+    shares = float(row["shares"] or 0.0)
+    cost = float(row["cost"] or 0.0)
+    if shares <= 0 or cost <= 0:
+        return None
+    return cost / shares
+
+
 def count_adjustments(
     conn: sqlite3.Connection,
     strategy_label: str,
@@ -221,8 +265,14 @@ def target_exposure(
     bankroll: float,
     strat: PaperStrategy,
     edge_pp: Optional[float] = None,
+    kelly_mult_override: Optional[float] = None,
 ) -> float:
-    """Fresh Kelly target for this side; 0 when the edge no longer qualifies."""
+    """Fresh Kelly target for this side; 0 when the edge no longer qualifies.
+
+    ``kelly_mult_override`` (e.g. the associate-league 5% throttle) is forwarded
+    to the sizing so rebalance top-ups are sized with the same fraction as the
+    initial entry for that fixture.
+    """
     if edge_pp is None:
         edge_pp = (model_prob - market_price) * 100.0
     if edge_pp < strat.min_edge_pp:
@@ -233,7 +283,9 @@ def target_exposure(
         return 0.0
     if strat.max_model_prob is not None and model_prob > strat.max_model_prob:
         return 0.0
-    return live_scaled_kelly_stake(model_prob, market_price, bankroll, strat)
+    return live_scaled_kelly_stake(
+        model_prob, market_price, bankroll, strat, kelly_mult_override
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -263,23 +315,32 @@ def decide_rebalance(
     bankroll: float,
     minutes_to_kickoff: Optional[float],
     phase: str = "pre_toss",
+    kelly_mult_override: Optional[float] = None,
 ) -> RebalanceAction:
     """Decide the rebalance action for one (strategy, fixture, chosen side).
 
     Pure read-only decision: measures current exposure, computes the fresh
-    Kelly target, applies edge-delta / dollar-delta / churn / freeze guards,
-    and returns a structured action for the caller to execute.
+    Kelly target, applies edge-delta / dollar-delta / churn / freeze /
+    anti-averaging-down guards, and returns a structured action for the caller
+    to execute.
+
+    ``kelly_mult_override`` (e.g. the associate-league throttle) is forwarded to
+    the target sizing so adds match the initial entry's fraction.
     """
     cfg = _rebalance_config()
     edge_delta_pp = float(cfg.get("rebalance_edge_delta_pp", 1.5))
     min_delta_frac = float(cfg.get("rebalance_min_delta_frac", 0.20))
     max_per_fixture = int(cfg.get("rebalance_max_per_fixture", 6))
     freeze_min = float(cfg.get("rebalance_freeze_min_before_toss", 20))
+    no_average_down = bool(cfg.get("rebalance_no_average_down", True))
+    max_drawdown_frac = float(cfg.get("rebalance_max_drawdown_frac", 0.10))
 
     frozen = minutes_to_kickoff is not None and minutes_to_kickoff <= freeze_min
 
     current = current_exposure(conn, strat.name, fixture_key, chosen_side_label, phase)
-    target = target_exposure(model_prob, market_price, bankroll, strat, edge_pp)
+    target = target_exposure(
+        model_prob, market_price, bankroll, strat, edge_pp, kelly_mult_override
+    )
 
     # Churn guard.
     if count_adjustments(conn, strat.name, fixture_key, phase) >= max_per_fixture:
@@ -342,6 +403,22 @@ def decide_rebalance(
         )
 
     if delta > 0:
+        # Anti-averaging-down: refuse to top up a position the market has moved
+        # against (price fallen materially below our average entry). This stops
+        # the "buy it all the way down" behaviour while still allowing the model
+        # to scale UP into a position that is in profit / holding above entry.
+        if no_average_down:
+            avg_entry = avg_entry_price(conn, strat.name, fixture_key, chosen_side_label, phase)
+            if avg_entry is not None and market_price < avg_entry * (1.0 - max_drawdown_frac):
+                drawdown_pct = (1.0 - market_price / avg_entry) * 100.0
+                return RebalanceAction(
+                    action="hold",
+                    reason=(
+                        f"refusing to average down; market {market_price:.3f} is "
+                        f"{drawdown_pct:.0f}% below entry {avg_entry:.3f}"
+                    ),
+                    current_exposure=current, target_exposure=target,
+                )
         return RebalanceAction(
             action="add",
             reason=f"edge grew; top up ${delta:.2f} (cur ${current:.2f} -> tgt ${target:.2f})",

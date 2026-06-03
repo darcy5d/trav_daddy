@@ -68,6 +68,7 @@ from scripts.live_bet_scan import (
     get_live_strategy_bankroll,
     live_scaled_kelly_stake,
 )
+from src.integrations.polymarket.sizing import effective_kelly_mult, get_team_tier
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger(__name__)
@@ -495,7 +496,17 @@ def post_toss_live_scan(
             if bankroll_now <= 0:
                 summary["bets_skipped"].append({"strategy": strat.name, "reason": "bankroll-exhausted"})
                 continue
-            stake = live_scaled_kelly_stake(model_prob, market_price, bankroll_now, strat)
+            # Low-data-league throttle: associate-nation internationals are
+            # sized at the (smaller) associate Kelly multiplier.
+            kelly_override = effective_kelly_mult(
+                strat.kelly_mult,
+                fix.get("tournament_prefix"),
+                get_team_tier(conn, fix.get("team1_id")),
+                get_team_tier(conn, fix.get("team2_id")),
+            )
+            stake = live_scaled_kelly_stake(
+                model_prob, market_price, bankroll_now, strat, kelly_override
+            )
             if stake <= 0:
                 summary["bets_skipped"].append({"strategy": strat.name, "reason": "kelly-stake-zero"})
                 continue

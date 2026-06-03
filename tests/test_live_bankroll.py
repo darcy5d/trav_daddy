@@ -22,6 +22,8 @@ class TestLiveBankrollPortfolio(unittest.TestCase):
                 fill_price REAL,
                 polymarket_token_id TEXT,
                 side_label TEXT,
+                side TEXT,
+                settle_outcome INTEGER,
                 strategy_label TEXT
             )
             """
@@ -51,20 +53,23 @@ class TestLiveBankrollPortfolio(unittest.TestCase):
                 "currentValue": 0,
             },
         ]
-        total, rows = live_bankroll._redeemable_positions_from_pm(pm)
-        self.assertAlmostEqual(total, 134.54)
+        redeemable_now, pending, rows = live_bankroll._redeemable_positions_from_pm(pm)
+        self.assertAlmostEqual(redeemable_now, 134.54)
+        self.assertAlmostEqual(pending, 0.0)
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0]["token_id"], "token-win")
+        self.assertEqual(rows[0]["claim_status"], "redeemable")
 
     def test_redeemable_excludes_open_ledger_tokens(self):
         pm = MagicMock()
         pm.get_data_api_positions.return_value = [
             {"asset": "token-open", "redeemable": True, "currentValue": 50.0},
         ]
-        total, rows = live_bankroll._redeemable_positions_from_pm(
+        redeemable_now, pending, rows = live_bankroll._redeemable_positions_from_pm(
             pm, exclude_token_ids={"token-open"}
         )
-        self.assertEqual(total, 0.0)
+        self.assertEqual(redeemable_now, 0.0)
+        self.assertEqual(pending, 0.0)
         self.assertEqual(rows, [])
 
     @patch("config.POLYMARKET_CONFIG", {"private_key": "0xabc"})

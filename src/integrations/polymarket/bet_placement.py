@@ -32,6 +32,7 @@ from src.integrations.polymarket.order_audit import (
     record_order_filled,
     record_order_placed,
 )
+from src.integrations.polymarket.sell_execution import marketable_sell
 from src.integrations.odds.polymarket_compare import POLYMARKET_TAKER_FEE
 
 logger = logging.getLogger(__name__)
@@ -429,31 +430,50 @@ def reduce_position(
                 "reason": reason,
             }
 
-        # --- Place the SELL order ---
-        order_response: Optional[Dict[str, Any]] = None
+        # --- Place a marketable SELL and read back the ACTUAL fill ---
         if poly_client is None:
             poly_client = PolymarketClient()
-        try:
-            order_response = poly_client.place_limit_order(
-                token_id=polymarket_token_id,
-                side="SELL",
-                price=round(current_price, 4),
-                size_shares=shares_to_sell,
-            )
+        sell = marketable_sell(
+            poly_client,
+            polymarket_token_id,
+            shares_to_sell,
+            reference_price=round(current_price, 4),
+        )
+        if not sell.get("success"):
             logger.info(
-                f"Rebalance SELL placed: {strategy_label} {fixture_key} {side_label} "
-                f"shares={shares_to_sell:.4f} @ {current_price:.4f} "
-                f"entry_removed=${reduce_usdc:.2f} pnl=${realized_pnl:+.2f}"
+                f"Rebalance SELL did not fill ({strategy_label}/{fixture_key} "
+                f"{side_label}): {sell.get('reason')} (holding)"
             )
-        except Exception as exc:
-            logger.error(f"Rebalance SELL failed ({strategy_label}/{fixture_key}): {exc}")
-            return {"success": False, "reason": f"SELL order failed: {exc}"}
+            return {
+                "success": False,
+                "reason": f"sell-not-filled: {sell.get('reason')}",
+                "shares_sold": 0.0,
+            }
+
+        order_response = sell.get("order_response")
+        filled_shares = float(sell["filled_shares"])
+        avg_price = float(sell["avg_fill_price"])
+        proceeds = float(sell["proceeds_usdc"])
+
+        # Re-derive the entry-cost fraction off the ACTUAL filled shares so the
+        # ledger only shrinks by what truly sold.
+        f_actual = min(1.0, filled_shares / total_shares) if total_shares > 0 else 0.0
+        entry_cost_removed = total_entry * f_actual
+        fee = proceeds * POLYMARKET_TAKER_FEE
+        realized_pnl = round(proceeds - entry_cost_removed - fee, 4)
+
+        logger.info(
+            f"Rebalance SELL filled: {strategy_label} {fixture_key} {side_label} "
+            f"shares={filled_shares:.4f}/{shares_to_sell:.4f} @ {avg_price:.4f} "
+            f"entry_removed=${entry_cost_removed:.2f} pnl=${realized_pnl:+.2f} "
+            f"(remainder_cancelled={sell.get('remainder_cancelled')})"
+        )
 
         now = _utc_now_iso()
 
-        # --- Decrement BUY rows' open stake pro-rata ---
+        # --- Decrement BUY rows' open stake pro-rata by the ACTUAL fill ---
         for r in rows:
-            row_cut = float(r["fill_size_usdc"]) * f
+            row_cut = float(r["fill_size_usdc"]) * f_actual
             new_fill = round(float(r["fill_size_usdc"]) - row_cut, 6)
             if new_fill <= 1e-6:
                 cur.execute(
@@ -494,9 +514,9 @@ def reduce_position(
                 now, now, now, now,
                 fixture_key, "moneyline",
                 "", polymarket_token_id,
-                side_label, current_price, current_price, 0.0,
-                reduce_usdc, round(fee, 4),
-                current_price, proceeds,
+                side_label, avg_price, avg_price, 0.0,
+                round(entry_cost_removed, 4), round(fee, 4),
+                avg_price, round(proceeds, 6),
                 strategy_label, phase,
                 realized_pnl,
             ),
@@ -504,7 +524,7 @@ def reduce_position(
         sell_bet_id = cur.lastrowid
         conn.commit()
 
-        order_id = (order_response or {}).get("orderID") or (order_response or {}).get("orderId")
+        order_id = sell.get("order_id")
         if order_id:
             try:
                 record_order_placed(
@@ -513,16 +533,16 @@ def reduce_position(
                     token_id=polymarket_token_id,
                     side="SELL",
                     order_kind="rebalance_sell",
-                    limit_price=round(current_price, 4),
+                    limit_price=avg_price,
                     size_usdc=proceeds,
-                    size_shares=shares_to_sell,
+                    size_shares=filled_shares,
                     posted_at=now,
                     conn=conn,
                 )
                 record_order_filled(
                     order_id,
                     fill_usdc=proceeds,
-                    fill_price=current_price,
+                    fill_price=avg_price,
                     filled_at=now,
                     conn=conn,
                 )
@@ -531,14 +551,15 @@ def reduce_position(
 
         return {
             "success": True,
-            "shares_sold": shares_to_sell,
+            "shares_sold": round(filled_shares, 4),
             "proceeds_usdc": round(proceeds, 4),
-            "entry_cost_removed": round(reduce_usdc, 4),
+            "entry_cost_removed": round(entry_cost_removed, 4),
             "realized_pnl_usdc": realized_pnl,
             "sell_bet_id": sell_bet_id,
             "order_response": order_response,
             "is_simulated": False,
             "dry_run": False,
+            "partial": f_actual < 1.0 - 1e-6,
             "reason": reason,
         }
     finally:

@@ -54,6 +54,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 
 from src.integrations.polymarket import PolymarketClient
+from src.integrations.polymarket.sell_execution import marketable_sell
 from src.integrations.odds.polymarket_compare import POLYMARKET_TAKER_FEE
 
 logger = logging.getLogger(__name__)
@@ -151,11 +152,12 @@ def stop_loss_config() -> Dict[str, Any]:
     try:
         from config import BETTING_CONFIG
     except Exception:  # pragma: no cover - config always present in practice
-        return {"enabled": False, "floor": 0.20, "gate_min": 105.0}
+        return {"enabled": False, "floor": 0.20, "gate_min": 105.0, "min_exit_price": 0.01}
     return {
         "enabled": bool(BETTING_CONFIG.get("stop_loss_enabled", False)),
         "floor": float(BETTING_CONFIG.get("stop_loss_floor", 0.20)),
         "gate_min": float(BETTING_CONFIG.get("stop_loss_gate_min", 105.0)),
+        "min_exit_price": float(BETTING_CONFIG.get("stop_loss_min_exit_price", 0.01)),
     }
 
 
@@ -209,6 +211,103 @@ def _compute_cashout_pnl(
 # Execution
 # ---------------------------------------------------------------------------
 
+def _record_sell_audit(
+    order_id: Optional[str],
+    *,
+    bet_id: Optional[int],
+    token_id: str,
+    reason: str,
+    avg_price: float,
+    proceeds: float,
+    shares: float,
+    conn: sqlite3.Connection,
+) -> None:
+    """Append the cashout SELL to the order-history audit log (best-effort)."""
+    if not order_id:
+        return
+    try:
+        from src.integrations.polymarket.order_audit import (
+            record_order_filled, record_order_placed,
+        )
+        record_order_placed(
+            order_id,
+            bet_id=bet_id,
+            token_id=token_id,
+            side="SELL",
+            order_kind="cashout" if reason == "profit" else "stop_loss",
+            limit_price=avg_price,
+            size_usdc=proceeds,
+            size_shares=shares,
+            conn=conn,
+        )
+        record_order_filled(
+            order_id,
+            fill_usdc=proceeds,
+            fill_price=avg_price,
+            conn=conn,
+        )
+    except Exception as exc:
+        logger.warning(f"Audit record_order failed for cashout {order_id}: {exc}")
+
+
+def _insert_partial_cashout_sell_row(
+    bet_row: sqlite3.Row,
+    *,
+    avg_price: float,
+    entry_cost_sold: float,
+    proceeds: float,
+    fee: float,
+    cashout_pnl: float,
+    return_ratio: float,
+    cashout_oid: Optional[str],
+    reason: str,
+    now: str,
+    conn: sqlite3.Connection,
+) -> int:
+    """Insert a settled SELL adjustment row for a PARTIAL cashout fill.
+
+    The realized PnL of the filled tranche lives on this row; the originating
+    BUY row stays `filled` with its open stake decremented so the next scan
+    tick retries the remainder. Cashout SELL rows are identified by
+    side='SELL' AND cashout_triggered_at IS NOT NULL (rebalance sells leave
+    cashout_triggered_at NULL).
+    """
+    def _g(key: str, default: Any = None) -> Any:
+        return bet_row[key] if key in bet_row.keys() else default
+
+    cur = conn.cursor()
+    cur.execute(
+        """
+        INSERT INTO bet_ledger (
+            proposed_at, placed_at, filled_at, settled_at,
+            fixture_key, market_type,
+            polymarket_market_id, polymarket_token_id,
+            side_label, model_prob, market_price_at_proposal, edge_pp,
+            side, size_usdc, fees_estimated_usdc,
+            fill_price, fill_size_usdc,
+            status, mode, bet_kind, strategy_label, phase,
+            pnl_realised_usdc,
+            cashout_triggered_at, cashout_price, cashout_pnl_usdc,
+            cashout_threshold_used, cashout_order_id, cashout_reason
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'SELL', ?, ?, ?, ?,
+                  'settled', 'auto', 'real', ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            now, now, now, now,
+            _g("fixture_key"), _g("market_type", "moneyline"),
+            _g("polymarket_market_id", ""), _g("polymarket_token_id"),
+            _g("side_label"), avg_price, avg_price, 0.0,
+            round(entry_cost_sold, 4), round(fee, 4),
+            avg_price, round(entry_cost_sold, 6),
+            _g("strategy_label"), _g("phase"),
+            cashout_pnl,
+            now, avg_price, cashout_pnl,
+            return_ratio, cashout_oid, reason,
+        ),
+    )
+    return int(cur.lastrowid)
+
+
 def execute_cashout(
     bet_row: sqlite3.Row,
     cashout_price: float,
@@ -217,19 +316,30 @@ def execute_cashout(
     dry_run: bool = False,
     reason: str = "profit",
 ) -> Dict[str, Any]:
-    """Sell the position at cashout_price and update bet_ledger.
+    """Sell the position and update bet_ledger, booking ONLY what actually fills.
 
-    For paper bets (bet_kind='paper') or dry_run=True the CLOB call is
-    skipped and only the DB is updated.
+    Real bets are exited with a marketable SELL (`marketable_sell`) priced to
+    cross the book; the matched size is read back from the exchange. We never
+    assume the requested size filled:
+      * Zero / dust fill  -> nothing booked, row stays 'filled' (retry next tick).
+      * Partial fill       -> a settled SELL adjustment row carries the realized
+                              PnL; the BUY row's open stake is decremented and it
+                              stays 'filled' so the remainder is retried.
+      * Full fill          -> the BUY row is marked 'settled' with the actual
+                              avg fill price and PnL.
+
+    For paper bets (bet_kind='paper') or dry_run=True the CLOB is skipped and a
+    full fill at `cashout_price` is simulated in-DB only.
 
     Args:
+        cashout_price: Current CLOB midpoint — the reference for the marketable
+                       SELL floor (real) or the simulated fill price (paper).
         reason: 'profit' for a tiered profit-take, 'stop' for a guarded
-                stop-loss. Recorded in bet_ledger.cashout_reason. For a stop
-                the return_ratio is < 1 and cashout_pnl is negative-but-mitigated.
+                stop-loss. Recorded in bet_ledger.cashout_reason.
 
     Returns a result dict with keys:
         success, bet_id, cashout_price, cashout_pnl, return_ratio,
-        is_simulated, reason, order_response (None if simulated)
+        is_simulated, reason, filled_shares, partial, order_response
     """
     bet_id = bet_row["bet_id"]
     fill_price = bet_row["fill_price"]
@@ -245,129 +355,157 @@ def execute_cashout(
             "error": "fill_price or fill_size_usdc is NULL — cannot cashout",
         }
 
-    shares_to_sell = fill_size_usdc / fill_price
-    cashout_pnl = _compute_cashout_pnl(fill_price, fill_size_usdc, cashout_price)
-    return_ratio = cashout_price / fill_price
+    total_shares = fill_size_usdc / fill_price
     now = _utc_now_iso()
     is_simulated = dry_run or (bet_kind == "paper")
 
-    # --- Place SELL order (real bets only) ---
+    # --- Determine the ACTUAL fill ---
     order_response: Optional[Dict[str, Any]] = None
-    if not is_simulated:
+    cashout_oid: Optional[str] = None
+    if is_simulated:
+        # Paper / dry-run: simulate a full fill at the current midpoint.
+        filled_shares = total_shares
+        avg_price = float(cashout_price)
+        proceeds = total_shares * avg_price
+        logger.info(
+            f"Cashout SIMULATED: bet_id={bet_id} side={bet_kind} "
+            f"return_ratio={avg_price / fill_price:.3f}x"
+        )
+    else:
         if poly_client is None:
             poly_client = PolymarketClient()
-        try:
-            order_response = poly_client.place_limit_order(
-                token_id=token_id,
-                side="SELL",
-                price=cashout_price,
-                size_shares=shares_to_sell,
-            )
+        # A stop-loss is a forced exit: liquidate progressively into whatever
+        # bids exist down to the ruin floor instead of holding for the tight
+        # profit-take slippage (which rotted collapsing positions to ~0).
+        is_stop = reason == "stop"
+        stop_min_exit = stop_loss_config().get("min_exit_price", 0.01) if is_stop else None
+        sell = marketable_sell(
+            poly_client,
+            token_id,
+            total_shares,
+            reference_price=float(cashout_price),
+            liquidate=is_stop,
+            min_exit_price=stop_min_exit,
+        )
+        if not sell.get("success"):
             logger.info(
-                f"Cashout SELL placed: bet_id={bet_id} token={token_id} "
-                f"shares={shares_to_sell:.4f} @ {cashout_price:.4f} "
-                f"pnl=${cashout_pnl:+.2f}"
+                f"Cashout SELL did not fill for bet_id={bet_id}: "
+                f"{sell.get('reason')} (holding, will retry)"
             )
-        except Exception as exc:
-            logger.error(f"Cashout SELL order failed for bet_id={bet_id}: {exc}")
             return {
                 "success": False,
                 "bet_id": bet_id,
-                "error": str(exc),
+                "error": f"sell-not-filled: {sell.get('reason')}",
+                "is_simulated": False,
+                "filled_shares": 0.0,
             }
-    else:
+        filled_shares = float(sell["filled_shares"])
+        avg_price = float(sell["avg_fill_price"])
+        proceeds = float(sell["proceeds_usdc"])
+        order_response = sell.get("order_response")
+        cashout_oid = sell.get("order_id")
         logger.info(
-            f"Cashout SIMULATED: bet_id={bet_id} side={bet_kind} "
-            f"return_ratio={return_ratio:.3f}x pnl=${cashout_pnl:+.2f}"
+            f"Cashout SELL filled: bet_id={bet_id} shares={filled_shares:.4f}/"
+            f"{total_shares:.4f} @ {avg_price:.4f} (remainder_cancelled="
+            f"{sell.get('remainder_cancelled')})"
         )
 
-    # --- Bankroll update for paper bets ---
-    bankroll_after = None
-    if bet_kind == "paper" and strategy_label:
-        try:
-            from src.integrations.polymarket.paper_strategies import get_strategy
-            cur2 = conn.cursor()
-            cur2.execute(
-                """
-                SELECT COALESCE(SUM(pnl_realised_usdc), 0.0)
-                FROM bet_ledger
-                WHERE bet_kind = 'paper'
-                  AND strategy_label = ?
-                  AND status = 'settled'
-                  AND bet_id != ?
-                """,
-                (strategy_label, bet_id),
-            )
-            prior_pnl = float(cur2.fetchone()[0] or 0.0)
-            strat = get_strategy(strategy_label)
-            starting = strat.starting_bankroll_usdc if strat else 1000.0
-            bankroll_after = starting + prior_pnl + float(cashout_pnl)
-        except Exception as exc:
-            logger.warning(f"Could not compute bankroll_after for cashout: {exc}")
+    # --- Book only the filled tranche ---
+    filled_fraction = min(1.0, filled_shares / total_shares) if total_shares > 0 else 0.0
+    entry_cost_sold = fill_size_usdc * filled_fraction
+    fee = proceeds * POLYMARKET_TAKER_FEE
+    cashout_pnl = round(proceeds - entry_cost_sold - fee, 4)
+    return_ratio = avg_price / fill_price if fill_price else 0.0
+    is_full = filled_fraction >= 1.0 - 1e-6
 
-    cashout_oid = None
-    if order_response:
-        cashout_oid = order_response.get("orderID") or order_response.get("orderId")
-        if cashout_oid:
+    if is_full:
+        # --- Full exit: settle the BUY row with the real fill ---
+        bankroll_after = None
+        if bet_kind == "paper" and strategy_label:
             try:
-                from src.integrations.polymarket.order_audit import (
-                    record_order_filled, record_order_placed,
+                from src.integrations.polymarket.paper_strategies import get_strategy
+                cur2 = conn.cursor()
+                cur2.execute(
+                    """
+                    SELECT COALESCE(SUM(pnl_realised_usdc), 0.0)
+                    FROM bet_ledger
+                    WHERE bet_kind = 'paper'
+                      AND strategy_label = ?
+                      AND status = 'settled'
+                      AND bet_id != ?
+                    """,
+                    (strategy_label, bet_id),
                 )
-                record_order_placed(
-                    cashout_oid,
-                    bet_id=bet_id,
-                    token_id=token_id,
-                    side="SELL",
-                    order_kind="cashout" if reason == "profit" else "stop_loss",
-                    limit_price=cashout_price,
-                    size_usdc=cashout_price * shares_to_sell,
-                    size_shares=shares_to_sell,
-                    conn=conn,
-                )
-                # SELL crossed the book — record as filled at the cashout price.
-                record_order_filled(
-                    cashout_oid,
-                    fill_usdc=cashout_price * shares_to_sell,
-                    fill_price=cashout_price,
-                    conn=conn,
-                )
+                prior_pnl = float(cur2.fetchone()[0] or 0.0)
+                strat = get_strategy(strategy_label)
+                starting = strat.starting_bankroll_usdc if strat else 1000.0
+                bankroll_after = starting + prior_pnl + float(cashout_pnl)
             except Exception as exc:
-                logger.warning(f"Audit record_order failed for cashout {cashout_oid}: {exc}")
+                logger.warning(f"Could not compute bankroll_after for cashout: {exc}")
 
-    # --- Update bet_ledger ---
-    conn.execute(
-        """
-        UPDATE bet_ledger
-        SET status                 = 'settled',
-            settled_at             = ?,
-            settle_outcome         = NULL,
-            pnl_realised_usdc      = ?,
-            bankroll_after_settle  = COALESCE(?, bankroll_after_settle),
-            cashout_triggered_at   = ?,
-            cashout_price          = ?,
-            cashout_pnl_usdc       = ?,
-            cashout_threshold_used = ?,
-            cashout_order_id       = ?,
-            cashout_reason         = ?
-        WHERE bet_id = ?
-        """,
-        (
-            now, cashout_pnl, bankroll_after,
-            now, cashout_price, cashout_pnl, return_ratio,
-            cashout_oid, reason,
-            bet_id,
-        ),
-    )
-    conn.commit()
+        _record_sell_audit(
+            cashout_oid, bet_id=bet_id, token_id=token_id, reason=reason,
+            avg_price=avg_price, proceeds=proceeds, shares=filled_shares, conn=conn,
+        )
+
+        conn.execute(
+            """
+            UPDATE bet_ledger
+            SET status                 = 'settled',
+                settled_at             = ?,
+                settle_outcome         = NULL,
+                fill_size_usdc         = 0,
+                pnl_realised_usdc      = ?,
+                bankroll_after_settle  = COALESCE(?, bankroll_after_settle),
+                cashout_triggered_at   = ?,
+                cashout_price          = ?,
+                cashout_pnl_usdc       = ?,
+                cashout_threshold_used = ?,
+                cashout_order_id       = ?,
+                cashout_reason         = ?
+            WHERE bet_id = ?
+            """,
+            (
+                now, cashout_pnl, bankroll_after,
+                now, avg_price, cashout_pnl, return_ratio,
+                cashout_oid, reason,
+                bet_id,
+            ),
+        )
+        conn.commit()
+        partial = False
+    else:
+        # --- Partial exit (real only): book the tranche on a SELL row, keep
+        #     the BUY row open with its stake decremented for the next retry ---
+        _record_sell_audit(
+            cashout_oid, bet_id=bet_id, token_id=token_id, reason=reason,
+            avg_price=avg_price, proceeds=proceeds, shares=filled_shares, conn=conn,
+        )
+        _insert_partial_cashout_sell_row(
+            bet_row,
+            avg_price=avg_price, entry_cost_sold=entry_cost_sold,
+            proceeds=proceeds, fee=fee, cashout_pnl=cashout_pnl,
+            return_ratio=return_ratio, cashout_oid=cashout_oid,
+            reason=reason, now=now, conn=conn,
+        )
+        new_fill = round(float(fill_size_usdc) - entry_cost_sold, 6)
+        conn.execute(
+            "UPDATE bet_ledger SET fill_size_usdc = ? WHERE bet_id = ?",
+            (max(0.0, new_fill), bet_id),
+        )
+        conn.commit()
+        partial = True
 
     return {
         "success": True,
         "bet_id": bet_id,
-        "cashout_price": cashout_price,
+        "cashout_price": avg_price,
         "cashout_pnl": cashout_pnl,
         "return_ratio": return_ratio,
         "is_simulated": is_simulated,
         "reason": reason,
+        "filled_shares": round(filled_shares, 6),
+        "partial": partial,
         "order_response": order_response,
     }
 

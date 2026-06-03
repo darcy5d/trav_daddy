@@ -96,7 +96,26 @@ BETTING_CONFIG = {
     in ("1", "true", "True", "TRUE"),
     "stop_loss_floor": float(os.getenv("BETTING_STOP_LOSS_FLOOR", "0.20")),
     "stop_loss_gate_min": float(os.getenv("BETTING_STOP_LOSS_GATE_MIN", "105")),
+    # Stop-loss exits liquidate progressively: instead of holding for the tight
+    # profit-take slippage, a forced stop sweeps every resting bid down to
+    # stop_loss_min_exit_price (a hard ruin floor). On a collapsing, thin county
+    # book the bid side empties just below mid, so the tight 3c profit floor
+    # would refuse to sell ("best-bid-below-floor") and the position rotted to
+    # ~0 at settlement. A wide stop slippage takes whatever liquidity exists.
+    "stop_loss_min_exit_price": float(
+        os.getenv("BETTING_STOP_LOSS_MIN_EXIT_PRICE", "0.01")
+    ),
     "auto_min_edge_pp": float(os.getenv("BETTING_AUTO_MIN_EDGE", "5.0")),
+    # Low-data-league throttle: associate-nation internationals (crint fixtures
+    # where either side is not a Tier-1 Full Member) are sized at this fractional
+    # Kelly instead of the strategy's normal kelly_mult. 0.05 = one-twentieth
+    # Kelly (~1/10th of the live half-Kelly). County / franchise leagues are
+    # unaffected; they keep the strategy's normal kelly_mult.
+    "associate_kelly_mult": float(os.getenv("BETTING_ASSOCIATE_KELLY_MULT", "0.05")),
+    # Hard ceiling on model_prob used for stake sizing. Prevents a simulator
+    # "certainty" (e.g. 1.00 on a thin-data associate game) from driving a
+    # full-Kelly stake. Sizing only; the edge gate is computed separately.
+    "model_prob_cap": float(os.getenv("BETTING_MODEL_PROB_CAP", "0.95")),
     # Comma-separated list (e.g. "moneyline,most_sixes"). Default to moneyline only;
     # the Wave 5 Phase 5 EV report should expand this list per-tournament.
     "auto_enabled_markets": [
@@ -136,6 +155,36 @@ BETTING_CONFIG = {
     # kickoff — by then the lineup is locked and exiting just pays spread.
     "rebalance_freeze_min_before_toss": float(
         os.getenv("BETTING_REBALANCE_FREEZE_MIN_BEFORE_TOSS", "20")
+    ),
+    # Anti-averaging-down guard. When on, the rebalancer refuses to ADD to a
+    # position whose current market price has fallen materially below our
+    # average entry price — i.e. the market has moved against the model. This
+    # stops the "buy it all the way down" behaviour (Bahrain 0.54 -> 0.26).
+    # Reduces / exits / side-flips are unaffected.
+    "rebalance_no_average_down": os.getenv(
+        "BETTING_REBALANCE_NO_AVERAGE_DOWN", "1"
+    ).strip() in ("1", "true", "True", "TRUE"),
+    # Block an add when market_price < avg_entry * (1 - this). 0.10 = 10% below.
+    "rebalance_max_drawdown_frac": float(
+        os.getenv("BETTING_REBALANCE_MAX_DRAWDOWN_FRAC", "0.10")
+    ),
+    # SELL execution (cashout / stop-loss / rebalance de-risk). The exit is a
+    # marketable limit priced this many cents BELOW the reference midpoint so it
+    # actually crosses the book; fills are read back and only the matched size
+    # is booked. A wider cap exits more reliably into a thin book at the cost of
+    # more slippage.
+    "cashout_sell_max_slippage_cents": float(
+        os.getenv("CASHOUT_SELL_MAX_SLIPPAGE_CENTS", "0.03")
+    ),
+    # Cancel any resting unfilled remainder after the marketable sweep so we
+    # never leave an orphan SELL on the book (retried next scan tick).
+    "cashout_sell_cancel_remainder": os.getenv(
+        "CASHOUT_SELL_CANCEL_REMAINDER", "1"
+    ).strip() in ("1", "true", "True", "TRUE"),
+    # Treat fills below this many shares as no-fill (dust / sub-minimum); do not
+    # book a cashout and leave the position open to retry.
+    "cashout_sell_min_fill_shares": float(
+        os.getenv("CASHOUT_SELL_MIN_FILL_SHARES", "5.0")
     ),
 }
 

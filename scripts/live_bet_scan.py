@@ -67,7 +67,11 @@ from src.integrations.polymarket.paper_strategies import (
     get_enabled_strategies,
 )
 
-from src.integrations.polymarket.sizing import live_scaled_kelly_stake
+from src.integrations.polymarket.sizing import (
+    effective_kelly_mult,
+    get_team_tier,
+    live_scaled_kelly_stake,
+)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -539,6 +543,15 @@ def scan_and_place_live_bets(
                     })
                     continue
 
+                # Low-data-league throttle: associate-nation internationals are
+                # sized at the (smaller) associate Kelly multiplier.
+                kelly_override = effective_kelly_mult(
+                    strat.kelly_mult,
+                    fix.get("tournament_prefix"),
+                    get_team_tier(conn, fix.get("team1_id")),
+                    get_team_tier(conn, fix.get("team2_id")),
+                )
+
                 if rebalance_enabled():
                     # XI-aware path: re-size toward the fresh Kelly target.
                     action = decide_rebalance(
@@ -551,6 +564,7 @@ def scan_and_place_live_bets(
                         edge_pp=edge_pp,
                         bankroll=bankroll_now,
                         minutes_to_kickoff=hours_to_kickoff * 60.0,
+                        kelly_mult_override=kelly_override,
                     )
                 else:
                     # Legacy path: one bet per fixture/strategy/side, no resize.
@@ -562,7 +576,9 @@ def scan_and_place_live_bets(
                             "reason": "already-placed",
                         })
                         continue
-                    stake = live_scaled_kelly_stake(model_prob, market_price, bankroll_now, strat)
+                    stake = live_scaled_kelly_stake(
+                        model_prob, market_price, bankroll_now, strat, kelly_override
+                    )
                     if stake <= 0:
                         summary["bets_skipped"].append({
                             "strategy": strat.name, "fixture": fix["fixture_key"],
