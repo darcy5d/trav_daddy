@@ -112,6 +112,35 @@ BETTING_CONFIG = {
     # Kelly (~1/10th of the live half-Kelly). County / franchise leagues are
     # unaffected; they keep the strategy's normal kelly_mult.
     "associate_kelly_mult": float(os.getenv("BETTING_ASSOCIATE_KELLY_MULT", "0.05")),
+    # Master switch for the associate-league Kelly throttle above. When OFF
+    # (default), effective_kelly_mult() is a no-op and associate-nation
+    # internationals are sized at the strategy's normal kelly_mult. 60-day
+    # ledger review (2026-06-27) showed associate crint fixtures were the most
+    # profitable live segment in the clean window (+25% ROI / +$300 held-edge),
+    # so the throttle is disabled. Flip to 1 to re-arm the down-sizing.
+    "associate_throttle_enabled": os.getenv(
+        "BETTING_ASSOCIATE_THROTTLE_ENABLED", "0"
+    ).strip() in ("1", "true", "True", "TRUE"),
+    # Live-only tournament-prefix exclusion. Comma-separated fixture-key
+    # prefixes (e.g. "crict20blast,crict20blastw") that are blocked from LIVE
+    # placement only; paper scanners ignore this list so the excluded leagues
+    # keep accruing paper bets for confirmation. County T20 Blast was the
+    # worst stable-window segment (-18% ROI / -$108 held-edge over 48 bets);
+    # excluded from live pending a paper-confirmation window.
+    "live_exclude_prefixes": [
+        p.strip().lower()
+        for p in os.getenv("BETTING_LIVE_EXCLUDE_PREFIXES", "").split(",")
+        if p.strip()
+    ],
+    # Exit-health circuit breaker (2026-06-27, post-outage). New LIVE bets are
+    # blocked when there are open positions AND the in-play cashout scanner's
+    # heartbeat (data/paper_trading/cashout_scan_status.json) is older than this
+    # many minutes or reports the CLOB unreachable. "Don't open risk you can't
+    # close." 0 disables the gate. The Jun 1-6 outage rode positions to zero
+    # because exits were frozen while live_bet_scan kept opening new exposure.
+    "exit_health_max_stale_min": float(
+        os.getenv("BETTING_EXIT_HEALTH_MAX_STALE_MIN", "15")
+    ),
     # Hard ceiling on model_prob used for stake sizing. Prevents a simulator
     # "certainty" (e.g. 1.00 on a thin-data associate game) from driving a
     # full-Kelly stake. Sizing only; the edge gate is computed separately.
@@ -244,7 +273,10 @@ PARALLELISM_CONFIG = {
 # Flask Configuration
 class FlaskConfig:
     SECRET_KEY = os.getenv("SECRET_KEY", "dev-secret-key-change-in-production")
-    DEBUG = os.getenv("FLASK_DEBUG", "True").lower() == "true"
+    # Secure by default: the Werkzeug debugger allows arbitrary code execution,
+    # so debug mode must be explicitly opted into (FLASK_DEBUG=True) for local
+    # development. It defaults OFF so an unset/missing .env is never debug.
+    DEBUG = os.getenv("FLASK_DEBUG", "False").lower() == "true"
     HOST = os.getenv("FLASK_HOST", "127.0.0.1")
     PORT = int(os.getenv("FLASK_PORT", 5000))
 

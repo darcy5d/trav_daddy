@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import sqlite3
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Generator
 from unittest.mock import patch
 
@@ -382,6 +382,115 @@ def test_paper_bets_excluded_from_live_caps(in_memory_ledger):
             conn=in_memory_ledger, strategy_label="v2_odi_3pp",
         )
     assert decision.allowed is True, f"expected pass; got rejected: {decision.reason}"
+
+
+# ---- Exit-health breaker (post-outage 2026-06-27) ----
+
+def _open_real_position(conn, usdc=40.0):
+    """Insert a filled, unsettled REAL bet so open exposure > 0."""
+    now = datetime.now(timezone.utc).isoformat()
+    _insert_bet(
+        conn, status="filled",
+        placed_at=now, filled_at=now,
+        fill_price=0.5, fill_size_usdc=usdc,
+        bet_kind="real",
+    )
+
+
+def _hb(*, reachable=True, age_min=1.0):
+    ts = (datetime.now(timezone.utc) - timedelta(minutes=age_min)).isoformat()
+    return {
+        "last_run_utc": ts,
+        "last_success_utc": ts,
+        "clob_reachable": reachable,
+        "n_checked": 3,
+        "clob_attempts": 3,
+        "clob_successes": 3 if reachable else 0,
+        "n_errors": 0 if reachable else 3,
+        "dry_run": False,
+    }
+
+
+def test_exit_health_blocks_when_heartbeat_stale(in_memory_ledger):
+    _open_real_position(in_memory_ledger)
+    with patch("config.BETTING_CONFIG", _make_betting_config(
+        exit_health_max_stale_min=15.0,
+        max_deposit_usdc=500.0, max_per_day_usdc=500.0, max_loss_per_day_usdc=500.0,
+    )), patch(
+        "src.integrations.polymarket.cashout.read_cashout_heartbeat",
+        return_value=_hb(age_min=60.0),
+    ):
+        decision = can_place_bet(25.0, "moneyline", 5.0, "manual", conn=in_memory_ledger)
+    assert decision.allowed is False
+    assert "Exit-health breaker" in decision.reason
+
+
+def test_exit_health_blocks_when_clob_unreachable(in_memory_ledger):
+    _open_real_position(in_memory_ledger)
+    with patch("config.BETTING_CONFIG", _make_betting_config(
+        exit_health_max_stale_min=15.0,
+        max_deposit_usdc=500.0, max_per_day_usdc=500.0, max_loss_per_day_usdc=500.0,
+    )), patch(
+        "src.integrations.polymarket.cashout.read_cashout_heartbeat",
+        return_value=_hb(reachable=False, age_min=1.0),
+    ):
+        decision = can_place_bet(25.0, "moneyline", 5.0, "manual", conn=in_memory_ledger)
+    assert decision.allowed is False
+    assert "unreachable" in decision.reason.lower()
+
+
+def test_exit_health_blocks_when_no_heartbeat(in_memory_ledger):
+    _open_real_position(in_memory_ledger)
+    with patch("config.BETTING_CONFIG", _make_betting_config(
+        exit_health_max_stale_min=15.0,
+        max_deposit_usdc=500.0, max_per_day_usdc=500.0, max_loss_per_day_usdc=500.0,
+    )), patch(
+        "src.integrations.polymarket.cashout.read_cashout_heartbeat",
+        return_value=None,
+    ):
+        decision = can_place_bet(25.0, "moneyline", 5.0, "manual", conn=in_memory_ledger)
+    assert decision.allowed is False
+    assert "no cashout-scanner heartbeat" in decision.reason.lower()
+
+
+def test_exit_health_allows_when_fresh_and_reachable(in_memory_ledger):
+    _open_real_position(in_memory_ledger)
+    with patch("config.BETTING_CONFIG", _make_betting_config(
+        exit_health_max_stale_min=15.0,
+        max_deposit_usdc=500.0, max_per_day_usdc=500.0, max_loss_per_day_usdc=500.0,
+    )), patch(
+        "src.integrations.polymarket.cashout.read_cashout_heartbeat",
+        return_value=_hb(reachable=True, age_min=2.0),
+    ):
+        decision = can_place_bet(25.0, "moneyline", 5.0, "manual", conn=in_memory_ledger)
+    assert decision.allowed is True
+    assert decision.reason == "OK"
+
+
+def test_exit_health_allows_when_no_open_positions(in_memory_ledger):
+    # No open positions -> breaker is irrelevant even with a stale heartbeat.
+    with patch("config.BETTING_CONFIG", _make_betting_config(
+        exit_health_max_stale_min=15.0,
+    )), patch(
+        "src.integrations.polymarket.cashout.read_cashout_heartbeat",
+        return_value=_hb(age_min=120.0),
+    ):
+        decision = can_place_bet(25.0, "moneyline", 5.0, "manual", conn=in_memory_ledger)
+    assert decision.allowed is True
+
+
+def test_exit_health_disabled_allows_despite_stale(in_memory_ledger):
+    # Breaker disabled (threshold 0) -> a stale heartbeat does not block.
+    _open_real_position(in_memory_ledger)
+    with patch("config.BETTING_CONFIG", _make_betting_config(
+        exit_health_max_stale_min=0.0,
+        max_deposit_usdc=500.0, max_per_day_usdc=500.0, max_loss_per_day_usdc=500.0,
+    )), patch(
+        "src.integrations.polymarket.cashout.read_cashout_heartbeat",
+        return_value=_hb(age_min=600.0),
+    ):
+        decision = can_place_bet(25.0, "moneyline", 5.0, "manual", conn=in_memory_ledger)
+    assert decision.allowed is True
 
 
 def test_untagged_bet_bypasses_strategy_whitelist(in_memory_ledger):

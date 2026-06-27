@@ -67,7 +67,19 @@ def test_is_low_data_fixture_non_internationals():
     assert sizing.is_low_data_fixture(None, 5, 5) is False
 
 
-def test_effective_kelly_mult_throttles_associates_only():
+def test_effective_kelly_mult_noop_when_throttle_disabled(monkeypatch):
+    """Default posture (2026-06-27): the associate throttle is OFF, so
+    effective_kelly_mult always returns the strategy's base mult — including
+    for associate internationals — i.e. associates are back at half-Kelly."""
+    monkeypatch.setattr(sizing, "_associate_throttle_enabled", lambda: False)
+    assert sizing.effective_kelly_mult(0.5, "crint", 5, 2) == pytest.approx(0.5)
+    assert sizing.effective_kelly_mult(0.5, "crint", None, None) == pytest.approx(0.5)
+    assert sizing.effective_kelly_mult(0.5, "crint", 1, 1) == pytest.approx(0.5)
+    assert sizing.effective_kelly_mult(0.5, "crict20blast", 4, 4) == pytest.approx(0.5)
+
+
+def test_effective_kelly_mult_throttles_associates_only_when_enabled(monkeypatch):
+    monkeypatch.setattr(sizing, "_associate_throttle_enabled", lambda: True)
     assoc = sizing._associate_kelly_mult()
     assert assoc == pytest.approx(0.05)
     # Associate internationals -> throttled to the associate mult.
@@ -79,9 +91,11 @@ def test_effective_kelly_mult_throttles_associates_only():
     assert sizing.effective_kelly_mult(0.5, "cricipl", 5, 5) == pytest.approx(0.5)
 
 
-def test_associate_stake_is_one_tenth_of_full():
-    """Sanity: the 5% throttle yields ~1/10th the half-Kelly stake at a price
-    where neither the fraction cap nor the 25% bankroll cap binds."""
+def test_associate_stake_is_one_tenth_of_full_when_enabled(monkeypatch):
+    """Sanity: with the throttle armed, the 5% mult yields ~1/10th the
+    half-Kelly stake at a price where neither the fraction cap nor the 25%
+    bankroll cap binds."""
+    monkeypatch.setattr(sizing, "_associate_throttle_enabled", lambda: True)
     half_kelly = next(s for s in STRATEGIES if s.name == "v3_marg_3pp")  # kelly_mult=0.5
     full = sizing.live_scaled_kelly_stake(0.60, 0.50, 1000.0, half_kelly)
     assoc = sizing.live_scaled_kelly_stake(

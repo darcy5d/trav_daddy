@@ -38,6 +38,20 @@ def _associate_kelly_mult() -> float:
         return 0.05
 
 
+def _associate_throttle_enabled() -> bool:
+    """Master switch for the associate-league Kelly throttle.
+
+    Defaults OFF: the 60-day ledger review found associate-nation internationals
+    were the most profitable live segment in the clean window, so they are sized
+    at the strategy's normal kelly_mult unless this flag is explicitly armed.
+    """
+    try:
+        from config import BETTING_CONFIG
+        return bool(BETTING_CONFIG.get("associate_throttle_enabled", False))
+    except Exception:  # pragma: no cover
+        return False
+
+
 def get_team_tier(conn: sqlite3.Connection, team_id: Optional[int]) -> Optional[int]:
     """Read teams.tier for a team_id; None if unknown/unmatched."""
     if team_id is None:
@@ -85,9 +99,12 @@ def effective_kelly_mult(
 ) -> float:
     """Return the Kelly multiplier to use for a fixture.
 
-    Associate-nation internationals get the (smaller) associate multiplier;
-    everything else keeps the strategy's base ``kelly_mult``.
+    When the associate throttle is armed, associate-nation internationals get
+    the (smaller) associate multiplier; everything else (and everything when the
+    throttle is disabled) keeps the strategy's base ``kelly_mult``.
     """
+    if not _associate_throttle_enabled():
+        return base_mult
     if is_low_data_fixture(tournament_prefix, team1_tier, team2_tier):
         return _associate_kelly_mult() if assoc_mult is None else assoc_mult
     return base_mult

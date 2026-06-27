@@ -100,6 +100,69 @@ def _open_exposure_usdc(conn: sqlite3.Connection) -> float:
     return float(row["exposure"] or 0.0)
 
 
+def _parse_heartbeat_ts(iso: Optional[str]) -> Optional[datetime]:
+    """Parse an ISO8601 heartbeat timestamp to an aware UTC datetime; None on failure."""
+    if not iso:
+        return None
+    try:
+        d = datetime.fromisoformat(str(iso).replace("Z", "+00:00"))
+        if d.tzinfo is None:
+            d = d.replace(tzinfo=timezone.utc)
+        return d
+    except (ValueError, AttributeError):
+        return None
+
+
+def _exit_health_block(conn: sqlite3.Connection) -> Optional[str]:
+    """Return a block reason if new LIVE risk should be refused because the
+    in-play exit scanner is unhealthy, else None. ("Don't open risk you can't
+    close.")
+
+    Post-outage breaker (Jun 1-6): the cashout/stop scanner could not run
+    (disk/iCloud hang), so open positions rode to settlement while
+    live_bet_scan kept opening new exposure and the realised-loss cap stayed
+    at ~$0. We refuse new live exposure when there are open positions AND the
+    cashout scanner is stale (not running) or reports the CLOB unreachable.
+    """
+    from config import BETTING_CONFIG
+
+    max_stale_min = float(BETTING_CONFIG.get("exit_health_max_stale_min", 0) or 0)
+    if max_stale_min <= 0:
+        return None  # breaker disabled
+
+    # Only relevant when we actually hold open positions that need exits.
+    if _open_exposure_usdc(conn) <= 0:
+        return None
+
+    from src.integrations.polymarket.cashout import read_cashout_heartbeat
+
+    hb = read_cashout_heartbeat()
+    if not hb:
+        return (
+            "Exit-health breaker: no cashout-scanner heartbeat found while live "
+            "positions are open — not opening new risk that can't be closed."
+        )
+    if hb.get("clob_reachable") is False:
+        return (
+            "Exit-health breaker: cashout scanner reports the CLOB unreachable "
+            "— not opening new risk while exits cannot execute."
+        )
+    last_ok = _parse_heartbeat_ts(hb.get("last_success_utc") or hb.get("last_run_utc"))
+    if last_ok is None:
+        return (
+            "Exit-health breaker: cashout heartbeat has no usable timestamp "
+            "— not opening new risk until exits are confirmed running."
+        )
+    age_min = (datetime.now(timezone.utc) - last_ok).total_seconds() / 60.0
+    if age_min > max_stale_min:
+        return (
+            f"Exit-health breaker: cashout scanner last succeeded {age_min:.0f}m "
+            f"ago (> {max_stale_min:.0f}m threshold) while live positions are "
+            f"open — not opening new risk while exits may be stalled."
+        )
+    return None
+
+
 def _strategy_open_exposure_usdc(conn: sqlite3.Connection, strategy_label: str) -> float:
     """Sum of fill_size_usdc for real (not paper) bets under this strategy
     that are filled but not yet settled.
@@ -227,6 +290,19 @@ def can_place_bet(
                     cap_remaining_today=0.0,
                     cap_remaining_deposit=0.0,
                 )
+
+        # 2c. Exit-health breaker (post-outage). Refuse to open new live risk
+        # when positions are open but the in-play exit scanner is stale or the
+        # CLOB is unreachable. This is the primary fix for the Jun 1-6 failure
+        # mode, where unrealised losses never tripped the realised-loss cap.
+        exit_block_reason = _exit_health_block(conn)
+        if exit_block_reason is not None:
+            return RiskGateDecision(
+                allowed=False,
+                reason=exit_block_reason,
+                cap_remaining_today=0.0,
+                cap_remaining_deposit=0.0,
+            )
 
         # 3. Per-bet cap — fraction × strategy bankroll (wallet-driven).
         from src.integrations.polymarket.live_bankroll import get_max_per_bet_usdc
@@ -404,6 +480,39 @@ def can_place_bet(
             conn.close()
 
 
+def _exit_health_snapshot(open_exposure: float) -> Dict[str, Any]:
+    """Read-only view of the exit-scanner heartbeat for the UI/verification."""
+    from config import BETTING_CONFIG
+    from src.integrations.polymarket.cashout import read_cashout_heartbeat
+
+    max_stale_min = float(BETTING_CONFIG.get("exit_health_max_stale_min", 0) or 0)
+    hb = read_cashout_heartbeat()
+    age_min = None
+    if hb:
+        last_ok = _parse_heartbeat_ts(hb.get("last_success_utc") or hb.get("last_run_utc"))
+        if last_ok is not None:
+            age_min = round((datetime.now(timezone.utc) - last_ok).total_seconds() / 60.0, 1)
+    return {
+        "enabled": max_stale_min > 0,
+        "max_stale_min": max_stale_min,
+        "heartbeat_present": hb is not None,
+        "last_run_utc": (hb or {}).get("last_run_utc"),
+        "last_success_utc": (hb or {}).get("last_success_utc"),
+        "clob_reachable": (hb or {}).get("clob_reachable"),
+        "age_min": age_min,
+        # True when the breaker would currently block a new live bet.
+        "would_block_new_live": bool(
+            max_stale_min > 0
+            and open_exposure > 0
+            and (
+                hb is None
+                or (hb.get("clob_reachable") is False)
+                or (age_min is not None and age_min > max_stale_min)
+            )
+        ),
+    }
+
+
 def get_risk_status() -> Dict[str, Any]:
     """Return a snapshot of current risk-gate state for the UI."""
     from config import BETTING_CONFIG
@@ -454,6 +563,22 @@ def get_risk_status() -> Dict[str, Any]:
         "deposit_remaining_cap_usdc": max(0.0, max_deposit - open_exposure) if max_deposit > 0 else None,
         "settled_bets_total": settled_bets_total,
         "scale_up_eligible": _is_scale_up_eligible(settled_bets_total),
+        # Operational controls (additive; surfaced for the dashboard + ops checks).
+        "risk_controls": {
+            "stop_loss_enabled": bool(BETTING_CONFIG.get("stop_loss_enabled", False)),
+            "associate_throttle_enabled": bool(
+                BETTING_CONFIG.get("associate_throttle_enabled", False)
+            ),
+            "associate_kelly_mult": float(BETTING_CONFIG.get("associate_kelly_mult", 0)),
+            "model_prob_cap": float(BETTING_CONFIG.get("model_prob_cap", 0)),
+            "live_exclude_prefixes": list(
+                BETTING_CONFIG.get("live_exclude_prefixes", []) or []
+            ),
+            "rebalance_no_average_down": bool(
+                BETTING_CONFIG.get("rebalance_no_average_down", False)
+            ),
+        },
+        "exit_health": _exit_health_snapshot(open_exposure),
     }
 
 

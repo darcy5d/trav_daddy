@@ -48,9 +48,11 @@ Public API:
 
 from __future__ import annotations
 
+import json
 import logging
 import sqlite3
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Dict, Optional
 
 from src.integrations.polymarket import PolymarketClient
@@ -59,9 +61,68 @@ from src.integrations.odds.polymarket_compare import POLYMARKET_TAKER_FEE
 
 logger = logging.getLogger(__name__)
 
+# Exit-scanner heartbeat. scan_for_cashouts() writes this every run so the risk
+# gate can refuse to open new live exposure when exits are not running or the
+# CLOB is unreachable ("don't open risk you can't close"). See
+# risk_gate._exit_health_block(). Mirrors the daily_data_refresh status file.
+CASHOUT_HEARTBEAT_FILE = (
+    Path(__file__).resolve().parents[3] / "data" / "paper_trading" / "cashout_scan_status.json"
+)
+
 
 def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def read_cashout_heartbeat() -> Optional[Dict[str, Any]]:
+    """Return the parsed cashout-scanner heartbeat, or None if absent/unreadable."""
+    try:
+        with CASHOUT_HEARTBEAT_FILE.open("r") as f:
+            return json.load(f)
+    except Exception:
+        return None
+
+
+def _write_cashout_heartbeat(
+    *,
+    n_checked: int,
+    clob_attempts: int,
+    clob_successes: int,
+    n_errors: int,
+    dry_run: bool,
+) -> None:
+    """Persist a heartbeat after each cashout scan.
+
+    ``clob_reachable`` is False only when we actually probed the CLOB and every
+    probe failed (the outage signature); an idle scan with no probes is treated
+    as reachable so the breaker never trips just because nothing was open.
+    ``last_success_utc`` advances only on reachable runs and is otherwise
+    carried forward, giving the gate a clean "exits last definitely worked" age.
+    """
+    now_iso = _utc_now_iso()
+    clob_reachable = (clob_attempts == 0) or (clob_successes > 0)
+
+    last_success = now_iso if clob_reachable else None
+    if last_success is None:
+        prev = read_cashout_heartbeat() or {}
+        last_success = prev.get("last_success_utc")
+
+    state = {
+        "last_run_utc": now_iso,
+        "last_success_utc": last_success,
+        "clob_reachable": clob_reachable,
+        "n_checked": n_checked,
+        "clob_attempts": clob_attempts,
+        "clob_successes": clob_successes,
+        "n_errors": n_errors,
+        "dry_run": bool(dry_run),
+    }
+    try:
+        CASHOUT_HEARTBEAT_FILE.parent.mkdir(parents=True, exist_ok=True)
+        with CASHOUT_HEARTBEAT_FILE.open("w") as f:
+            json.dump(state, f, indent=2, default=str)
+    except Exception as exc:  # pragma: no cover - best-effort heartbeat
+        logger.warning(f"Failed to write cashout heartbeat: {exc}")
 
 
 def _parse_iso_ts(iso: Optional[str]) -> Optional[datetime]:
@@ -574,6 +635,8 @@ def scan_for_cashouts(
     n_triggered = 0
     n_executed = 0
     n_stops = 0
+    clob_attempts = 0
+    clob_successes = 0
     cashouts: list = []
     errors: list = []
 
@@ -594,6 +657,7 @@ def scan_for_cashouts(
             continue
 
         # Fetch current price (needed for either trigger).
+        clob_attempts += 1
         try:
             mid_resp = poly_client.get_clob_midpoint(token_id)
             current_price_raw = (
@@ -602,8 +666,10 @@ def scan_for_cashouts(
             )
             if current_price_raw is None:
                 logger.debug(f"  bet_id={bet_id}: no midpoint in response {mid_resp!r}")
+                clob_successes += 1  # reachable, just no actionable midpoint
                 continue
             current_price = float(current_price_raw)
+            clob_successes += 1
         except Exception as exc:
             errors.append((bet_id, f"midpoint fetch failed: {exc}"))
             continue
@@ -657,11 +723,23 @@ def scan_for_cashouts(
     if own_conn:
         conn.close()
 
+    # Heartbeat so the risk gate knows exits are running and the CLOB is
+    # reachable before it opens any new live exposure.
+    _write_cashout_heartbeat(
+        n_checked=n_checked,
+        clob_attempts=clob_attempts,
+        clob_successes=clob_successes,
+        n_errors=len(errors),
+        dry_run=dry_run,
+    )
+
     return {
         "n_checked":   n_checked,
         "n_triggered": n_triggered,
         "n_executed":  n_executed,
         "n_stops":     n_stops,
+        "clob_attempts": clob_attempts,
+        "clob_successes": clob_successes,
         "cashouts":    cashouts,
         "errors":      errors,
     }

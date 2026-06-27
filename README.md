@@ -208,16 +208,23 @@ Three processes need to be running for live trading to operate. All commands
 below assume your shell is already in the repo root — either `cd` there once
 or set `REPO_ROOT` to the absolute path of your clone.
 
+Commands reference the virtualenv via `$VENV`. Set it once to match the
+environment you created in Quickstart: `venv311` for Apple Silicon, or `venv`
+for the generic Linux/Intel path.
+
 ```bash
 # Anchor on the repo (works from anywhere)
 REPO_ROOT="$(git rev-parse --show-toplevel)"
 cd "$REPO_ROOT"
 
+# Point at your virtualenv: venv311 (Apple Silicon) or venv (generic Linux/Intel)
+VENV=venv311
+
 # 1. Flask web app (port 5001) — dashboard + API
-FLASK_PORT=5001 venv311/bin/python -m flask --app app.main run --port 5001 --host 127.0.0.1
+FLASK_PORT=5001 "$VENV"/bin/python -m flask --app app.main run --port 5001 --host 127.0.0.1
 
 # 2. Post-toss daemon — detects toss, spawns paper+live scans, executes TWAP plans
-venv311/bin/python scripts/paper_bet_auto_post_toss.py \
+"$VENV"/bin/python scripts/paper_bet_auto_post_toss.py \
     --poll-interval 90 --lookback-min 45 --lookahead-min 30 --also-live
 
 # 3. Cron jobs (already installed, verify with `crontab -l`):
@@ -234,13 +241,16 @@ Run Flask and the daemon as background processes:
 REPO_ROOT="$(git rev-parse --show-toplevel)"
 cd "$REPO_ROOT"
 
+# Point at your virtualenv: venv311 (Apple Silicon) or venv (generic Linux/Intel)
+VENV=venv311
+
 # Start daemon (backgrounded, logs to logs/paper_auto_post_toss.log)
-nohup venv311/bin/python scripts/paper_bet_auto_post_toss.py \
+nohup "$VENV"/bin/python scripts/paper_bet_auto_post_toss.py \
     --poll-interval 90 --lookback-min 45 --lookahead-min 30 --also-live \
     >> logs/paper_auto_post_toss.log 2>&1 &
 
 # Start Flask (backgrounded, logs to logs/flask.log)
-FLASK_PORT=5001 nohup venv311/bin/python -m flask --app app.main run \
+FLASK_PORT=5001 nohup "$VENV"/bin/python -m flask --app app.main run \
     --port 5001 --host 127.0.0.1 >> logs/flask.log 2>&1 &
 ```
 
@@ -267,8 +277,8 @@ sqlite3 cricket.db "SELECT plan_id, fixture_key, status, chunks_placed, chunks_f
 | Flask hangs on startup (>30s) | TensorFlow rebuilding .pyc cache after pip changes | Wait 60s for first startup; subsequent starts are fast |
 | Daemon won't start ("already running") | Stale PID file | `rm logs/paper_auto_post_toss.pid` then restart |
 | Port 5001 in use | Old Flask process | `lsof -ti :5001 \| xargs kill -9` then restart |
-| `py-clob-client-v2` import error | Package uninstalled | `venv311/bin/pip install py-clob-client-v2` |
-| Playwright not found | Binary missing | `venv311/bin/python -m playwright install chromium` |
+| `py-clob-client-v2` import error | Package uninstalled | `$VENV/bin/pip install py-clob-client-v2` (`$VENV` = `venv311` or `venv`) |
+| Playwright not found | Binary missing | `$VENV/bin/python -m playwright install chromium` |
 
 ### Process architecture
 
@@ -313,31 +323,38 @@ is about capturing the spike when it comes, not managing downside.
 **Running manually:**
 
 ```bash
+# Point at your virtualenv: venv311 (Apple Silicon) or venv (generic Linux/Intel)
+VENV=venv311
+
 # Dry-run — shows what would fire without placing real orders
-venv311/bin/python scripts/inplay_cashout_scan.py --dry-run
+"$VENV"/bin/python scripts/inplay_cashout_scan.py --dry-run
 
 # Live — executes SELL orders for real bets, simulates for paper
-venv311/bin/python scripts/inplay_cashout_scan.py
+"$VENV"/bin/python scripts/inplay_cashout_scan.py
 ```
 
 **Cron entry (every 3 minutes):**
 
-Cron does not expand `$REPO_ROOT`; substitute the absolute path of your repo
-clone for `<REPO_ROOT>` below before installing (`crontab -e`).
+Cron does not expand shell variables; substitute the absolute path of your repo
+clone for `<REPO_ROOT>` and your virtualenv dir (`venv311` on Apple Silicon, or
+`venv` on generic Linux/Intel) for `<VENV>` below before installing (`crontab -e`).
 
 ```cron
 */3 * * * * cd <REPO_ROOT> && \
-    venv311/bin/python scripts/inplay_cashout_scan.py >> logs/cashout_scan.log 2>&1
+    <VENV>/bin/python scripts/inplay_cashout_scan.py >> logs/cashout_scan.log 2>&1
 ```
 
 **Backtesting the cashout strategy:**
 
 ```bash
+# Point at your virtualenv: venv311 (Apple Silicon) or venv (generic Linux/Intel)
+VENV=venv311
+
 # Simulate all flat thresholds + the live tiered config against recent bets
-venv311/bin/python scripts/backtest_inplay_cashout.py --days 14
+"$VENV"/bin/python scripts/backtest_inplay_cashout.py --days 14
 
 # Paper bets only, last 30 days
-venv311/bin/python scripts/backtest_inplay_cashout.py --days 30 --bet-kind paper
+"$VENV"/bin/python scripts/backtest_inplay_cashout.py --days 30 --bet-kind paper
 ```
 
 **Key files:**

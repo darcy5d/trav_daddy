@@ -64,6 +64,7 @@ from src.integrations.polymarket.upcoming import (
 # Reuse the live-bet-scan helpers so sizing / dedup behaviour stays
 # identical between the pre-toss scan and the post-toss scan.
 from scripts.live_bet_scan import (
+    _live_excluded_prefix,
     _moneyline_outcome_for_team,
     get_live_strategy_bankroll,
     live_scaled_kelly_stake,
@@ -510,6 +511,16 @@ def post_toss_live_scan(
             if stake <= 0:
                 summary["bets_skipped"].append({"strategy": strat.name, "reason": "kelly-stake-zero"})
                 continue
+
+        # Live-only league exclusion (e.g. county T20 Blast under paper-confirm):
+        # block new real placement; paper scanners never call this.
+        if _live_excluded_prefix(fix):
+            summary["bets_skipped"].append({
+                "strategy": strat.name,
+                "reason": f"live-excluded prefix ({fix.get('tournament_prefix')})",
+                "side_label": side_label,
+            })
+            continue
 
         if dry_run:
             logger.info(

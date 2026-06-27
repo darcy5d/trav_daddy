@@ -99,6 +99,25 @@ def _strategy_filters_match_fixture(strategy: PaperStrategy, fixture: Dict[str, 
     return True
 
 
+def _live_excluded_prefix(fixture: Dict[str, Any]) -> bool:
+    """True if this fixture's tournament prefix is on the LIVE exclusion list.
+
+    Live-only: blocks new real placement (and rebalance adds) for excluded
+    leagues, while leaving paper scanners — which never call this — untouched
+    so the league keeps accruing paper bets for a confirmation window. Existing
+    positions can still be reduced/exited (those sells run before this guard).
+    """
+    try:
+        from config import BETTING_CONFIG
+        excluded = BETTING_CONFIG.get("live_exclude_prefixes", []) or []
+    except Exception:  # pragma: no cover
+        return False
+    if not excluded:
+        return False
+    prefix = (fixture.get("tournament_prefix") or "").lower()
+    return prefix in excluded
+
+
 def _moneyline_outcome_for_team(moneyline_market: Dict[str, Any], team_db_name: str) -> Optional[Dict[str, Any]]:
     if not moneyline_market or not team_db_name:
         return None
@@ -654,6 +673,19 @@ def scan_and_place_live_bets(
                         "reason": f"rebalance-{action.action}-zero-size",
                     })
                     continue
+
+            # Live-only league exclusion: block NEW real exposure (legacy
+            # placement and rebalance adds) for paper-confirm leagues like
+            # county T20 Blast. Rebalance reduce/exit sells above are unaffected,
+            # so existing positions can still be de-risked. Paper scanners never
+            # call this, so the league keeps accruing paper bets.
+            if _live_excluded_prefix(fix):
+                summary["bets_skipped"].append({
+                    "strategy": strat.name, "fixture": fix["fixture_key"],
+                    "reason": f"live-excluded prefix ({fix.get('tournament_prefix')})",
+                    "side_label": side_label,
+                })
+                continue
 
             # place_bet() opens its own DB connection; don't nest.
             if dry_run:
