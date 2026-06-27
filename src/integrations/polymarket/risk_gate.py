@@ -574,6 +574,8 @@ def get_risk_status() -> Dict[str, Any]:
             "live_exclude_prefixes": list(
                 BETTING_CONFIG.get("live_exclude_prefixes", []) or []
             ),
+            # Per-league live on/off + verdict + reason (Phase-2 coverage gate).
+            "league_policy": dict(BETTING_CONFIG.get("league_policy", {}) or {}),
             "rebalance_no_average_down": bool(
                 BETTING_CONFIG.get("rebalance_no_average_down", False)
             ),

@@ -613,6 +613,28 @@
 </div>
 
 <div class="lb-section">
+    <div class="lb-section-header">
+        <h2>League Policy <span class="lb-section-subtitle" id="lb-league-policy-count"></span></h2>
+        <div class="lb-section-controls">
+            <span class="lb-section-subtitle">Which competitions may place REAL-money bets. Paper trades on all leagues regardless.</span>
+        </div>
+    </div>
+    <table class="lb-fixtures-table" id="lb-league-policy-table">
+        <thead>
+            <tr>
+                <th>Prefix</th>
+                <th>Live</th>
+                <th>Verdict</th>
+                <th>Reason</th>
+            </tr>
+        </thead>
+        <tbody id="lb-league-policy-body">
+            <tr><td colspan="4" class="lb-empty">Loading...</td></tr>
+        </tbody>
+    </table>
+</div>
+
+<div class="lb-section">
     <h2>Surfaced edges (manual placement)</h2>
     <p style="color: var(--text-muted); font-size: 0.8rem;">
         After running Bulk Predict, edges flagged above the auto-min-edge threshold appear here for manual approval.
@@ -748,6 +770,60 @@
             killBtn.textContent = 'KILL SWITCH';
             killBtn.classList.remove('engaged');
         }
+
+        renderLeaguePolicy(status);
+    }
+
+    function renderLeaguePolicy(status) {
+        const body = document.getElementById('lb-league-policy-body');
+        if (!body) return;
+        const rc = (status && status.risk_controls) || {};
+        const policy = rc.league_policy || {};
+        const entries = Object.entries(policy);
+        const countEl = document.getElementById('lb-league-policy-count');
+        if (!entries.length) {
+            body.innerHTML = '<tr><td colspan="4" class="lb-empty">No league policy configured.</td></tr>';
+            if (countEl) countEl.textContent = '';
+            return;
+        }
+        // Sort: live ON first, then by verdict (GO, PAPER-ONLY, NO-GO), then prefix.
+        const vRank = (v) => {
+            const s = (v || '').toUpperCase();
+            if (s.startsWith('GO')) return 0;
+            if (s.startsWith('PAPER')) return 1;
+            return 2;
+        };
+        entries.sort((a, b) => {
+            const la = a[1].live ? 0 : 1, lb = b[1].live ? 0 : 1;
+            if (la !== lb) return la - lb;
+            const va = vRank(a[1].verdict), vb = vRank(b[1].verdict);
+            if (va !== vb) return va - vb;
+            return a[0].localeCompare(b[0]);
+        });
+        const nLive = entries.filter(([, v]) => v.live).length;
+        if (countEl) countEl.textContent = `(${nLive} live / ${entries.length} leagues)`;
+
+        const badge = (verdict) => {
+            const s = (verdict || '').toUpperCase();
+            let color = '#f87171';           // NO-GO red
+            if (s.startsWith('GO')) color = '#34d399';        // green
+            else if (s.startsWith('PAPER')) color = '#fbbf24'; // amber
+            return `<span style="display:inline-block;padding:0.05rem 0.4rem;border-radius:4px;`
+                + `font-size:0.7rem;font-weight:600;background:${color}22;color:${color};`
+                + `border:1px solid ${color}55;">${verdict || '—'}</span>`;
+        };
+        body.innerHTML = entries.map(([prefix, v]) => {
+            const liveCell = v.live
+                ? '<span style="color:#34d399;font-weight:600;">● LIVE</span>'
+                : '<span style="color:var(--text-muted);">○ paper</span>';
+            const reason = (v.reason || '').replace(/</g, '&lt;');
+            return `<tr>
+                <td style="font-family:monospace;">${prefix}</td>
+                <td>${liveCell}</td>
+                <td>${badge(v.verdict)}</td>
+                <td style="color:var(--text-muted);font-size:0.78rem;">${reason}</td>
+            </tr>`;
+        }).join('');
     }
 
     async function fetchStatus() {

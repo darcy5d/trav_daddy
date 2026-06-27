@@ -61,6 +61,48 @@ POLYMARKET_CONFIG = {
     "signature_type": int(os.getenv("POLYMARKET_SIGNATURE_TYPE", "0")),
 }
 
+# Phase 2 (2026-06-27): per-league LIVE-trading policy — the documented source
+# of truth for which competitions may place REAL-money bets. Paper trading runs
+# on ALL discovered leagues regardless of this table; it governs live placement
+# only. Verdicts come from the data-coverage gate
+# (scripts/poly_competition_coverage.py): GO = well-covered; PAPER-ONLY =
+# marginal, forward-test first; NO-GO = insufficient data, don't bet blind.
+#
+# To toggle a league on/off for live, flip its "live" flag (and update "reason").
+# Any prefix with live=False is added to live_exclude_prefixes below. Prefixes
+# NOT listed here are treated as live-eligible by default (blocklist posture) —
+# add new leagues here as the coverage tool surfaces them.
+BETTING_LEAGUE_POLICY = {
+    # --- GO: well-covered, live-eligible -------------------------------------
+    "crint":    {"live": True,  "verdict": "GO",        "reason": "Internationals: 94% team-match, deep history, 99% player-vocab."},
+    "cricpsl":  {"live": True,  "verdict": "GO",        "reason": "PSL: 100% team-match, ~114 median matches, 100% vocab."},
+    "cricipl":  {"live": True,  "verdict": "GO",        "reason": "IPL: flagship league, fully modelled (not always listed)."},
+    "cricbbl":  {"live": True,  "verdict": "GO",        "reason": "Big Bash: fully modelled (not always listed)."},
+    # --- PAPER-ONLY: marginal coverage; left live-eligible per option-B ------
+    # (flip live=False to enforce paper-confirm-first on these).
+    "criclcl":  {"live": True,  "verdict": "PAPER-ONLY", "reason": "Legends League: only 77% team-match — watch fills; resolve team mappings."},
+    "cricmlc":  {"live": True,  "verdict": "PAPER-ONLY", "reason": "MLC: median 26 matches (<30) and stale (last 2025-07); confirm in-season."},
+    # crictbcl = "T20 Brisbane Champions League" (exhibition; e.g. NY Liberty XI
+    # vs Melbourne Pirates). Only 1/2 teams resolve and the high match count is a
+    # false fuzzy-match (e.g. "mel" -> a Melbourne BBL side), so it is NOT safe
+    # for live despite the inflated median. Live-excluded.
+    "crictbcl": {"live": False, "verdict": "NO-GO", "reason": "Brisbane Champions League (exhibition): 50% team-match; inflated match count is a false fuzzy-match artifact."},
+    # --- Deliberate paper-confirm (data is fine, strategy choice) ------------
+    "crict20blast":  {"live": False, "verdict": "GO (paper-confirm)", "reason": "County T20 Blast: worst stable-window segment (-18% ROI/-$108 over 48 bets); paper-confirm before relisting live."},
+    "crict20blastw": {"live": False, "verdict": "PAPER-ONLY",         "reason": "Women's T20 Blast: median 20 matches (<30); paper-confirm."},
+    # --- NO-GO: insufficient data, live-excluded -----------------------------
+    "criccoppat10":   {"live": False, "verdict": "NO-GO", "reason": "Coppa il Mondo T10: 18% team-match; T10 novelty format."},
+    "cricmaharaja":   {"live": False, "verdict": "NO-GO", "reason": "Maharaja Trophy: 45% team-match."},
+    "cricecsbg":      {"live": False, "verdict": "NO-GO", "reason": "ECS Bulgaria: 25% team-match; minor-league."},
+    "cricnsk":        {"live": False, "verdict": "NO-GO", "reason": "NSK Trophy State T20: 0% team-match, no history in DB."},
+    "crictelangana":  {"live": False, "verdict": "NO-GO", "reason": "Telangana T20: 33% team-match."},
+    "cricjcl":        {"live": False, "verdict": "NO-GO", "reason": "Japan Cricket League: 40% team-match."},
+    "crickpl":        {"live": False, "verdict": "NO-GO", "reason": "KPL Indo-Nepal T20: 38% team-match."},
+    "cricshpageeza":  {"live": False, "verdict": "NO-GO", "reason": "Shpageeza (Afghanistan): 38% team-match."},
+    "crict20blastl2w":{"live": False, "verdict": "NO-GO", "reason": "Blast League 2 Women: no match history in DB."},
+    "cricapl":        {"live": False, "verdict": "NO-GO", "reason": "Andhra Premier League: 0% team-match, no history."},
+}
+
 # Wave 5 Phase 6c: Live betting risk gate config.
 # All caps are enforced server-side in src/integrations/polymarket/risk_gate.py;
 # the UI can re-check for UX but cannot bypass the server gate.
@@ -121,17 +163,23 @@ BETTING_CONFIG = {
     "associate_throttle_enabled": os.getenv(
         "BETTING_ASSOCIATE_THROTTLE_ENABLED", "0"
     ).strip() in ("1", "true", "True", "TRUE"),
-    # Live-only tournament-prefix exclusion. Comma-separated fixture-key
-    # prefixes (e.g. "crict20blast,crict20blastw") that are blocked from LIVE
-    # placement only; paper scanners ignore this list so the excluded leagues
-    # keep accruing paper bets for confirmation. County T20 Blast was the
-    # worst stable-window segment (-18% ROI / -$108 held-edge over 48 bets);
-    # excluded from live pending a paper-confirmation window.
-    "live_exclude_prefixes": [
-        p.strip().lower()
-        for p in os.getenv("BETTING_LIVE_EXCLUDE_PREFIXES", "").split(",")
-        if p.strip()
-    ],
+    # Live-only tournament-prefix exclusion. Blocks LIVE placement only; paper
+    # scanners ignore this list so excluded leagues keep accruing paper bets for
+    # confirmation. The effective set is the union of:
+    #   1. every BETTING_LEAGUE_POLICY entry with live=False (the documented gate
+    #      result — NO-GO leagues + deliberate paper-confirms), and
+    #   2. any extra prefixes in BETTING_LIVE_EXCLUDE_PREFIXES (ad-hoc override).
+    # Edit the league policy table above to toggle a competition on/off.
+    "live_exclude_prefixes": sorted(
+        {p for p, v in BETTING_LEAGUE_POLICY.items() if not v.get("live", False)}
+        | {
+            p.strip().lower()
+            for p in os.getenv("BETTING_LIVE_EXCLUDE_PREFIXES", "").split(",")
+            if p.strip()
+        }
+    ),
+    # Full per-league policy table (verdict + reason + live toggle) for UI/ops.
+    "league_policy": BETTING_LEAGUE_POLICY,
     # Exit-health circuit breaker (2026-06-27, post-outage). New LIVE bets are
     # blocked when there are open positions AND the in-play cashout scanner's
     # heartbeat (data/paper_trading/cashout_scan_status.json) is older than this

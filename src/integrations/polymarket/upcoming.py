@@ -62,7 +62,7 @@ TOURNAMENT_PREFIX_MAP = {
     "cricwbbl":  ("T20", "female", "Women's Big Bash"),
     "cricwpl":   ("T20", "female", "Women's Premier League"),
     "criclcl":   ("T20", "male",   "Legends Cricket League"),
-    "crictbcl":  ("T20", "male",   "Tasmanian Bushrangers Cricket League"),
+    "crictbcl":  ("T20", "male",   "Brisbane Champions League"),
     "crint":     None,  # title-dependent; see _infer_format_gender_from_title
     "cricint":   ("T20", "male",   "International (T20I)"),
     "cricodi":   ("ODI", "male",   "ODI International"),
@@ -70,7 +70,11 @@ TOURNAMENT_PREFIX_MAP = {
     "cricwodi":  ("ODI", "female", "Women's ODI"),
     "cricbifa":   ("T20", "female", "BIFA Women's"),
     "cricwt20":   ("T20", "female", "Women's T20"),
+    "cricmlc":    ("T20", "male",   "Major League Cricket"),
     "crict20blast":  ("T20", "male",   "Vitality T20 Blast"),
+    # Polymarket's observed women's-Blast prefix is "crict20blastw" (suffix -w),
+    # not "crict20wblast"; keep both so either taxonomy resolves.
+    "crict20blastw": ("T20", "female", "Women's Vitality T20 Blast"),
     "crict20wblast": ("T20", "female", "Women's T20 Blast"),
 }
 
