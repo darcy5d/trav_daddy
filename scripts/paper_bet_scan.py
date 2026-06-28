@@ -444,20 +444,59 @@ def scan_and_place_paper_bets(
             edge_t1_pp = (t1_pred - market_price_t1) * 100
             edge_t2_pp = (t2_pred - market_price_t2) * 100
 
-            # Pick the side with bigger positive edge
+            # Pick the side with bigger positive edge (model's preferred side),
+            # and keep the opposite side handy for the fade variant.
             if edge_t1_pp >= edge_t2_pp:
                 back_side, side_label, side_token_id, model_prob, market_price, edge_pp = (
                     "t1", t1_outcome.get("label"), t1_outcome.get("token_id"),
                     t1_pred, market_price_t1, edge_t1_pp,
                 )
+                opp_outcome, opp_pred, opp_price = t2_outcome, t2_pred, market_price_t2
             else:
                 back_side, side_label, side_token_id, model_prob, market_price, edge_pp = (
                     "t2", t2_outcome.get("label"), t2_outcome.get("token_id"),
                     t2_pred, market_price_t2, edge_t2_pp,
                 )
+                opp_outcome, opp_pred, opp_price = t1_outcome, t1_pred, market_price_t1
 
-            # Apply edge / price gate
-            if edge_pp < strat.min_edge_pp:
+            # Wave 6 W3: fade-the-underdog. Invert to back the side the model
+            # does NOT favour, but only when the model's pick is an underdog
+            # (model-side price < fade_max_model_price) with real conviction
+            # (model edge >= min_edge_pp). This is where held-to-settle ROI is
+            # deeply negative, so backing the favourite is the tested signal.
+            is_fade = bool(getattr(strat, "fade", False))
+            if is_fade:
+                if market_price >= strat.fade_max_model_price:
+                    summary["bets_skipped"].append({
+                        "strategy": strat.name, "fixture": fix["fixture_key"],
+                        "reason": (
+                            f"fade: model side price {market_price:.3f} "
+                            f">= {strat.fade_max_model_price:.2f} (not an underdog)"
+                        ),
+                        "side_label": side_label,
+                    })
+                    continue
+                if edge_pp < strat.min_edge_pp:
+                    summary["bets_skipped"].append({
+                        "strategy": strat.name, "fixture": fix["fixture_key"],
+                        "reason": (
+                            f"fade: model conviction {edge_pp:.1f}pp "
+                            f"< {strat.min_edge_pp:.1f}pp"
+                        ),
+                        "side_label": side_label,
+                    })
+                    continue
+                # Flip to the favourite (opposite) side. model_prob/edge_pp now
+                # describe the side we actually back (edge is negative by design).
+                side_label = opp_outcome.get("label")
+                side_token_id = opp_outcome.get("token_id")
+                model_prob = opp_pred
+                market_price = opp_price
+                edge_pp = (opp_pred - opp_price) * 100
+
+            # Apply edge / price gate. For fades the model-conviction gate above
+            # already ran; the backed favourite has negative model edge by design.
+            if not is_fade and edge_pp < strat.min_edge_pp:
                 summary["bets_skipped"].append({
                     "strategy": strat.name, "fixture": fix["fixture_key"],
                     "reason": f"edge {edge_pp:.1f}pp < {strat.min_edge_pp:.1f}pp",
@@ -506,11 +545,19 @@ def scan_and_place_paper_bets(
                         "reason": "bankroll-exhausted",
                     })
                     continue
-                stake = kelly_stake_usdc(model_prob, market_price, bankroll_now, strat)
+                if is_fade and strat.flat_stake_frac is not None:
+                    # Flat-fraction sizing: model Kelly is ~0 on the negative-edge
+                    # favourite we back when fading.
+                    raw = strat.flat_stake_frac * bankroll_now
+                    stake = min(raw, strat.max_stake_usdc, bankroll_now * 0.25)
+                    if stake < strat.min_stake_usdc:
+                        stake = 0.0
+                else:
+                    stake = kelly_stake_usdc(model_prob, market_price, bankroll_now, strat)
                 if stake <= 0:
                     summary["bets_skipped"].append({
                         "strategy": strat.name, "fixture": fix["fixture_key"],
-                        "reason": "kelly-stake-zero",
+                        "reason": "stake-zero",
                     })
                     continue
 

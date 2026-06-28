@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import os
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -116,6 +117,29 @@ def _live_excluded_prefix(fixture: Dict[str, Any]) -> bool:
         return False
     prefix = (fixture.get("tournament_prefix") or "").lower()
     return prefix in excluded
+
+
+def effective_min_market_price(strat) -> float:
+    """Live-only minimum backed-side price (Wave 6 follow-up).
+
+    Returns max(strat.min_market_price, BETTING_LIVE_MIN_MARKET_PRICE). The env
+    floor lets us refuse low-priced sides on LIVE money (where realised ROI is
+    deeply negative: -71% below 0.20, negative below 0.50) without touching the
+    shared per-strategy band or paper trading. Unset/0 = today's behaviour.
+
+    Shared by both live paths (pre-toss live_bet_scan + post-toss
+    live_bet_post_toss_scan) so the floor can't drift between them.
+    """
+    floor = strat.min_market_price
+    raw = os.getenv("BETTING_LIVE_MIN_MARKET_PRICE", "").strip()
+    if raw:
+        try:
+            floor = max(floor, float(raw))
+        except ValueError:
+            logger.warning(
+                f"Invalid BETTING_LIVE_MIN_MARKET_PRICE={raw!r}; ignoring"
+            )
+    return floor
 
 
 def _moneyline_outcome_for_team(moneyline_market: Dict[str, Any], team_db_name: str) -> Optional[Dict[str, Any]]:
@@ -530,10 +554,12 @@ def scan_and_place_live_bets(
                     "market_price": market_price,
                 })
                 continue
-            if not (strat.min_market_price <= market_price <= strat.max_market_price):
+            # Wave 6 follow-up: live-only minimum-price guardrail (default OFF).
+            effective_min_price = effective_min_market_price(strat)
+            if not (effective_min_price <= market_price <= strat.max_market_price):
                 summary["bets_skipped"].append({
                     "strategy": strat.name, "fixture": fix["fixture_key"],
-                    "reason": f"market_price {market_price:.3f} outside [{strat.min_market_price:.2f}, {strat.max_market_price:.2f}]",
+                    "reason": f"market_price {market_price:.3f} outside [{effective_min_price:.2f}, {strat.max_market_price:.2f}]",
                     "side_label": side_label,
                 })
                 continue

@@ -80,16 +80,19 @@ BETTING_LEAGUE_POLICY = {
     "cricbbl":  {"live": True,  "verdict": "GO",        "reason": "Big Bash: fully modelled (not always listed)."},
     # --- PAPER-ONLY: marginal coverage; left live-eligible per option-B ------
     # (flip live=False to enforce paper-confirm-first on these).
-    "criclcl":  {"live": True,  "verdict": "PAPER-ONLY", "reason": "Legends League: only 77% team-match — watch fills; resolve team mappings."},
+    "criclcl":  {"live": False, "verdict": "PAPER-ONLY", "reason": "Legends League: moved to paper-only by operator 2026-06-28 (only 77% team-match; watch fills / resolve team mappings before relisting)."},
     "cricmlc":  {"live": True,  "verdict": "PAPER-ONLY", "reason": "MLC: median 26 matches (<30) and stale (last 2025-07); confirm in-season."},
     # crictbcl = "T20 Brisbane Champions League" (exhibition; e.g. NY Liberty XI
     # vs Melbourne Pirates). Only 1/2 teams resolve and the high match count is a
     # false fuzzy-match (e.g. "mel" -> a Melbourne BBL side), so it is NOT safe
     # for live despite the inflated median. Live-excluded.
     "crictbcl": {"live": False, "verdict": "NO-GO", "reason": "Brisbane Champions League (exhibition): 50% team-match; inflated match count is a false fuzzy-match artifact."},
-    # --- Deliberate paper-confirm (data is fine, strategy choice) ------------
-    "crict20blast":  {"live": False, "verdict": "GO (paper-confirm)", "reason": "County T20 Blast: worst stable-window segment (-18% ROI/-$108 over 48 bets); paper-confirm before relisting live."},
-    "crict20blastw": {"live": False, "verdict": "PAPER-ONLY",         "reason": "Women's T20 Blast: median 20 matches (<30); paper-confirm."},
+    # --- Relisted live by operator (2026-06-28) ------------------------------
+    # County T20 Blast (men + women) turned back ON for live after the
+    # paper-confirm window. Data coverage is fine (the earlier block was a
+    # strategy choice, not a data NO-GO). Watch the segment ROI in the rollup.
+    "crict20blast":  {"live": True,  "verdict": "GO", "reason": "County T20 Blast: relisted live 2026-06-28 by operator after paper-confirm window (prior block was strategy-choice, not data-coverage)."},
+    "crict20blastw": {"live": True,  "verdict": "GO", "reason": "Women's T20 Blast: relisted live 2026-06-28 by operator after paper-confirm window."},
     # --- NO-GO: insufficient data, live-excluded -----------------------------
     "criccoppat10":   {"live": False, "verdict": "NO-GO", "reason": "Coppa il Mondo T10: 18% team-match; T10 novelty format."},
     "cricmaharaja":   {"live": False, "verdict": "NO-GO", "reason": "Maharaja Trophy: 45% team-match."},

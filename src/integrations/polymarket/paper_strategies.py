@@ -54,6 +54,20 @@ class PaperStrategy:
     model_version: str = "v2"          # "v2" or "v3"
     toss_mode: str = "marginalised"     # "marginalised" or "pinned" (V3 only)
     require_consensus_with: Optional[str] = None  # name of another strategy that must agree
+
+    # Wave 6 W3: fade-the-underdog.
+    # When True, the scanner INVERTS the model's pick: it only acts when the
+    # model would back an underdog (model-side price < fade_max_model_price)
+    # with at least min_edge_pp conviction, and then backs the OPPOSITE
+    # (favourite) side instead. This tests the data finding that the model's
+    # underdog picks are deeply -EV held to settlement while favourites are +EV.
+    # Sizing for faded bets uses flat_stake_frac (model Kelly is ~0 on the
+    # negative-edge favourite side).
+    fade: bool = False
+    fade_max_model_price: float = 0.50   # only fade when model side is an underdog
+    # Flat fraction of bankroll per faded bet (model Kelly does not apply to the
+    # negative-edge side we back). None falls back to Kelly (~0 for fades).
+    flat_stake_frac: Optional[float] = None
     # Post-toss real-bet eligibility. Set False for V2-based strategies that
     # cannot condition on the toss outcome (V2 sim ignores toss kwargs).
     # Paper bets are always placed regardless of this flag.
@@ -162,6 +176,60 @@ STRATEGIES: List[PaperStrategy] = [
         kelly_mult=0.5,
         min_model_prob=0.52,
         post_toss_eligible=False,
+    ),
+    # Wave 6 W3: favourites-only. Same V3 signal/direction as v3_marg_3pp, but
+    # only acts when the backed side is a market favourite (price >= 0.65) -
+    # the only price buckets with positive held-to-settle ROI (+13-14%).
+    # PAPER ONLY: deliberately kept off the BETTING_LIVE_STRATEGIES whitelist.
+    PaperStrategy(
+        name="v3_fav_only_3pp",
+        description=(
+            "Wave 6 W3 test: V3 marginalised, moneyline, 3pp edge, but ONLY "
+            "backs market favourites (min_market_price=0.65). Tests the finding "
+            "that the model's edge held-to-settle is real only on favourites. "
+            "Paper-only forward test; not on the live whitelist."
+        ),
+        enabled_market_types=["moneyline"],
+        min_edge_pp=3.0,
+        model_version="v3",
+        toss_mode="marginalised",
+        lookback_hours=48.0,
+        lookback_hours_min=0.0,
+        starting_bankroll_usdc=1000.0,
+        kelly_mult=0.5,
+        min_market_price=0.65,
+        max_market_price=0.95,
+        post_toss_eligible=False,
+        enabled=True,
+    ),
+    # Wave 6 W3: fade-the-underdog. Inverts the V3 pick - when the model would
+    # back an underdog (price < 0.5) with >= 3pp conviction, it backs the
+    # FAVOURITE instead, flat-sized at 5% of bankroll. Tests the "opposite of
+    # our live betting" hypothesis. PAPER ONLY.
+    PaperStrategy(
+        name="v3_fade_dog_3pp",
+        description=(
+            "Wave 6 W3 test: FADE the V3 model. When the model would back an "
+            "underdog (price < 0.5) with >= 3pp edge, back the favourite side "
+            "instead, flat 5% of bankroll. Tests whether the model's -EV "
+            "underdog love is profitable to fade. Paper-only; not live."
+        ),
+        enabled_market_types=["moneyline"],
+        min_edge_pp=3.0,
+        model_version="v3",
+        toss_mode="marginalised",
+        lookback_hours=48.0,
+        lookback_hours_min=0.0,
+        starting_bankroll_usdc=1000.0,
+        min_market_price=0.50,
+        max_market_price=0.95,
+        min_model_prob=None,
+        max_model_prob=None,
+        fade=True,
+        fade_max_model_price=0.50,
+        flat_stake_frac=0.05,
+        post_toss_eligible=False,
+        enabled=True,
     ),
     # Diagnostic: low-edge wide-window quarter-Kelly to capture max data.
     PaperStrategy(

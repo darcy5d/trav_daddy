@@ -661,6 +661,62 @@ def init_live_model_snapshots(db_path: Optional[Path] = None) -> bool:
         return False
 
 
+def init_mm_snapshots(db_path: Optional[Path] = None) -> bool:
+    """Wave 6 pre-work (W2): create mm_market_snapshots table + indexes.
+
+    Idempotent. Safe to call on every app startup or on demand from the
+    recon scanner.
+    """
+    if db_path is None:
+        db_path = DATABASE_PATH
+
+    schema_path = Path(__file__).parent / "schema_v12_mm_snapshots.sql"
+    if not schema_path.exists():
+        logger.error(f"Schema file not found: {schema_path}")
+        return False
+
+    try:
+        schema_sql = schema_path.read_text()
+        with get_db_connection(db_path) as conn:
+            conn.executescript(schema_sql)
+            logger.info("MM market snapshots (V12) initialized")
+        return True
+    except Exception as e:
+        logger.error(f"Failed to initialize mm_market_snapshots schema: {e}")
+        import traceback
+
+        traceback.print_exc()
+        return False
+
+
+def init_capital_flows(db_path: Optional[Path] = None) -> bool:
+    """Wave 6 follow-up: create capital_flows table (deposits/withdrawals).
+
+    Idempotent. Safe to call on every app startup or on demand from the
+    record-flow CLI.
+    """
+    if db_path is None:
+        db_path = DATABASE_PATH
+
+    schema_path = Path(__file__).parent / "schema_v13_capital_flows.sql"
+    if not schema_path.exists():
+        logger.error(f"Schema file not found: {schema_path}")
+        return False
+
+    try:
+        schema_sql = schema_path.read_text()
+        with get_db_connection(db_path) as conn:
+            conn.executescript(schema_sql)
+            logger.info("Capital flows (V13) initialized")
+        return True
+    except Exception as e:
+        logger.error(f"Failed to initialize capital_flows schema: {e}")
+        import traceback
+
+        traceback.print_exc()
+        return False
+
+
 def upsert_live_model_snapshot(
     conn,
     *,

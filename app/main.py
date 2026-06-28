@@ -109,6 +109,22 @@ try:
 except Exception as _exc:  # pragma: no cover - logged but non-fatal at import time
     logger.warning(f"Live model snapshots schema init failed at startup: {_exc}")
 
+# Wave 6 pre-work: order-book spread / reward reconnaissance snapshots.
+try:
+    from src.data.database import init_mm_snapshots as _init_mm_snapshots
+
+    _init_mm_snapshots()
+except Exception as _exc:  # pragma: no cover - logged but non-fatal at import time
+    logger.warning(f"MM snapshots schema init failed at startup: {_exc}")
+
+# Wave 6 follow-up: live wallet capital-flow ledger (deposits/withdrawals).
+try:
+    from src.data.database import init_capital_flows as _init_capital_flows
+
+    _init_capital_flows()
+except Exception as _exc:  # pragma: no cover - logged but non-fatal at import time
+    logger.warning(f"Capital flows schema init failed at startup: {_exc}")
+
 # Lazy load simulators (they take time to initialize)
 # Cache per gender to avoid re-initializing
 _fast_simulators = {}  # {'male': simulator, 'female': simulator}

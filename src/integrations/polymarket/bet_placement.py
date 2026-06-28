@@ -609,6 +609,32 @@ def place_bet_twap(
     import os
     edge_pp = (model_prob - market_price_at_proposal) * 100.0
 
+    # Wave 6 W5 (default OFF): optionally cap how far above the screen mid the
+    # TWAP is allowed to chase. BETTING_TWAP_MAX_CHASE_PP = max percentage
+    # points above market_price_at_proposal we will ever bid. Unset/empty = no
+    # cap (today's behaviour, preserved by default). The Phase-A passive-TWAP
+    # simulation (scripts/simulate_passive_twap.py) did NOT justify enabling
+    # this on current data (passive-only fills were more adversely selected);
+    # it ships as opt-in scaffolding for future markets / more data.
+    _max_chase_raw = os.getenv("BETTING_TWAP_MAX_CHASE_PP", "").strip()
+    if _max_chase_raw:
+        try:
+            _max_chase_pp = float(_max_chase_raw)
+            _chase_cap_price = market_price_at_proposal + _max_chase_pp / 100.0
+            if _chase_cap_price < max_acceptable_price:
+                logger.info(
+                    f"TWAP chase cap: max_acceptable_price "
+                    f"{max_acceptable_price:.4f} -> {_chase_cap_price:.4f} "
+                    f"(BETTING_TWAP_MAX_CHASE_PP={_max_chase_pp})"
+                )
+                max_acceptable_price = round(_chase_cap_price, 4)
+                if base_price > max_acceptable_price:
+                    base_price = max_acceptable_price
+        except ValueError:
+            logger.warning(
+                f"Invalid BETTING_TWAP_MAX_CHASE_PP={_max_chase_raw!r}; ignoring"
+            )
+
     # Step 1: risk gate
     decision = can_place_bet(
         size_usdc, market_type, edge_pp, requested_mode,

@@ -66,6 +66,7 @@ from src.integrations.polymarket.upcoming import (
 from scripts.live_bet_scan import (
     _live_excluded_prefix,
     _moneyline_outcome_for_team,
+    effective_min_market_price,
     get_live_strategy_bankroll,
     live_scaled_kelly_stake,
 )
@@ -448,10 +449,16 @@ def post_toss_live_scan(
                 "market_price": market_price,
             })
             continue
-        if not (strat.min_market_price <= market_price <= strat.max_market_price):
+        # Wave 6 follow-up: live-only minimum-price guardrail (default OFF),
+        # shared with the pre-toss live path so the floor can't drift.
+        effective_min_price = effective_min_market_price(strat)
+        if not (effective_min_price <= market_price <= strat.max_market_price):
             summary["bets_skipped"].append({
                 "strategy": strat.name,
-                "reason": f"market_price {market_price:.3f} outside lottery filter",
+                "reason": (
+                    f"market_price {market_price:.3f} outside "
+                    f"[{effective_min_price:.2f}, {strat.max_market_price:.2f}]"
+                ),
             })
             continue
         # Model probability bounds: exclude coin-flip zone.

@@ -493,6 +493,15 @@ def bankroll_snapshot(conn: sqlite3.Connection, pm: Optional[Any] = None) -> Dic
         }
         for label, w in weights.items()
     }
+    # Capital-flow-aware ROI (deposits/withdrawals tracked separately). Lazy
+    # import avoids a circular dependency (capital.py reads this module).
+    capital_summary: Optional[Dict[str, Any]] = None
+    try:
+        from src.integrations.polymarket.capital import get_capital_summary
+        capital_summary = get_capital_summary(conn, pm=pm)
+    except Exception as exc:  # pragma: no cover - telemetry only
+        logger.debug(f"capital summary unavailable: {exc}")
+
     return {
         "portfolio_value_usdc": round(portfolio, 2),
         "wallet_cash_usdc": breakdown.get("wallet_cash_usdc"),
@@ -511,4 +520,5 @@ def bankroll_snapshot(conn: sqlite3.Connection, pm: Optional[Any] = None) -> Dic
         "max_loss_per_day_usdc": round(get_max_loss_per_day_usdc(conn, pm=pm), 2),
         "strategy_weights": weights,
         "strategies": strategies,
+        "capital": capital_summary,
     }
