@@ -41,6 +41,42 @@ SUPPORTED_FORMATS = ["T20", "ODI"]
 CRICKET_DATA_API_KEY = os.getenv("CRICKET_DATA_API_KEY")
 CRICKET_DATA_BASE_URL = "https://api.cricapi.com/v1"
 
+# CricketArchive (subscription site — PERSONAL-USE enrichment only).
+# ToS has no anti-automation clause, and robots.txt permits the /Archive/* data
+# paths for normal user agents, but the copyright clause forbids redistribution
+# and the "detrimental to use" catch-all means we MUST be gentle. Hence: present
+# as a normal browser, honour the robots `*` disallow list, rate-limit hard,
+# cache every page on disk (fetch each URL once, ever), and never redistribute
+# the raw scraped data. Credentials live in .env (gitignored) — never committed.
+CRICKETARCHIVE_CONFIG = {
+    "enabled": os.getenv("CRICKETARCHIVE_ENABLED", "false").lower() == "true",
+    "username": os.getenv("CRICKETARCHIVE_USERNAME"),
+    "password": os.getenv("CRICKETARCHIVE_PASSWORD"),
+    # Data/content lives on cricketarchive.com; auth/paywall is on my.cricketarchive.com.
+    "base_url": os.getenv("CRICKETARCHIVE_BASE_URL", "https://cricketarchive.com"),
+    "auth_base_url": os.getenv("CRICKETARCHIVE_AUTH_BASE_URL", "https://my.cricketarchive.com"),
+    "login_url": os.getenv("CRICKETARCHIVE_LOGIN_URL", "https://my.cricketarchive.com/"),
+    # Politeness controls (be gentle to avoid the ToS "detrimental to use" catch-all).
+    "min_delay_sec": float(os.getenv("CRICKETARCHIVE_MIN_DELAY", "2.5")),
+    "max_delay_sec": float(os.getenv("CRICKETARCHIVE_MAX_DELAY", "5.0")),
+    "max_requests_per_day": int(os.getenv("CRICKETARCHIVE_MAX_PER_DAY", "2000")),
+    "request_timeout_sec": float(os.getenv("CRICKETARCHIVE_TIMEOUT", "30")),
+    "user_agent": os.getenv(
+        "CRICKETARCHIVE_USER_AGENT",
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+    ),
+    # On-disk cache + saved login session (both under the gitignored data/raw/).
+    "cache_dir": RAW_DATA_DIR / "cricketarchive",
+    "auth_state_path": RAW_DATA_DIR / "cricketarchive" / "auth_state.json",
+    # Isolated CA datastore — DELIBERATELY separate from cricket.db so the archive
+    # can be harvested, audited and experimented on without touching the trusted
+    # production database (gitignored via *.db).
+    "archive_db_path": BASE_DIR / "ca_archive.db",
+    # Re-use a saved login session for this many hours before forcing re-login.
+    "auth_max_age_hours": float(os.getenv("CRICKETARCHIVE_AUTH_MAX_AGE_HOURS", "168")),
+}
+
 # Market integrations (Wave 2: read-path readiness; Wave 5 Phase 6a: write-path)
 POLYMARKET_CONFIG = {
     "enabled": os.getenv("POLYMARKET_ENABLED", "false").lower() == "true",
