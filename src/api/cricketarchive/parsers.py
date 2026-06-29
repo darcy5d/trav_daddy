@@ -328,8 +328,16 @@ def parse_scorecard(html: str, url: str) -> CAScorecard:
                     current.total_text = cells[1]
                     if len(cells) > 2:
                         current.total_runs = _int(cells[2])
+                    # Prefer the Fall-of-Wickets entry count: it is CA's own
+                    # per-ball truth and correctly handles "all out" with a
+                    # retired/absent batter (fewer than 10 dismissals). Fall back
+                    # to the "(N wickets)" text, then to all-out -> 10.
+                    fow_n = (len(re.findall(r"\b\d+-\d+", current.fall_of_wickets))
+                             if current.fall_of_wickets else 0)
                     mw = re.search(r"(\d+)\s+wickets?", cells[1])
-                    if mw:
+                    if fow_n:
+                        current.total_wickets = fow_n
+                    elif mw:
                         current.total_wickets = int(mw.group(1))
                     elif "all out" in cells[1].lower():
                         current.total_wickets = 10
