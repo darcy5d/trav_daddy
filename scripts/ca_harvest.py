@@ -30,15 +30,15 @@ logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(messag
 logger = logging.getLogger("ca_harvest")
 
 
-def harvest_scorecard(conn, fetcher: PoliteFetcher, url: str) -> dict:
-    sc = P.parse_scorecard(fetcher.get(url), url)
+def harvest_scorecard(conn, fetcher: PoliteFetcher, url: str, cache_only: bool = False) -> dict:
+    sc = P.parse_scorecard(fetcher.get(url, cache_only=cache_only), url)
     deliveries_by_innings = {}
     reports_by_innings = {}
     recon = []
     for idx, comm_url in enumerate(sc.commentary_urls):
         if idx >= len(sc.innings):
             continue
-        dels = P.parse_commentary(fetcher.get(comm_url), comm_url)
+        dels = P.parse_commentary(fetcher.get(comm_url, cache_only=cache_only), comm_url)
         dels, report = I.resolve_innings(sc.innings[idx], dels)
         deliveries_by_innings[idx + 1] = dels
         reports_by_innings[idx + 1] = report
@@ -62,25 +62,44 @@ def main() -> int:
     g.add_argument("--series", help="event/series page URL")
     g.add_argument("--scorecard", help="single scorecard URL")
     g.add_argument("--list", help="file with one scorecard URL per line")
+    ap.add_argument("--cache-only", action="store_true",
+                    help="re-parse only already-cached pages (no network); for "
+                         "applying parser fixes offline and skipping missing pages")
     args = ap.parse_args()
 
     fetcher = PoliteFetcher(auth._new_session())  # data pages are public
 
+    def expand(url: str) -> list[str]:
+        """Event/series URL -> its scorecard URLs; scorecard URL -> itself."""
+        if "/Archive/Events/" in url:
+            try:
+                ms = P.parse_event_matches(fetcher.get(url, cache_only=args.cache_only), url)
+                logger.info("Series %s -> %d scorecards", url.rsplit("/", 1)[-1], len(ms))
+                return [m.url for m in ms]
+            except Exception as e:  # noqa: BLE001
+                logger.error("Failed to expand series %s: %s", url, e)
+                return []
+        return [url]
+
     if args.series:
-        matches = P.parse_event_matches(fetcher.get(args.series), args.series)
-        urls = [m.url for m in matches]
+        urls = expand(args.series)
     elif args.scorecard:
         urls = [args.scorecard]
     else:
-        urls = [ln.strip() for ln in Path(args.list).read_text().splitlines() if ln.strip()]
+        lines = [ln.strip() for ln in Path(args.list).read_text().splitlines() if ln.strip()]
+        urls = []
+        for ln in lines:
+            urls.extend(expand(ln))
 
-    logger.info("Harvesting %d scorecard(s) into ca_archive.db", len(urls))
-    n_ok = n_bbb = 0
+    logger.info("Harvesting %d scorecard(s) into ca_archive.db%s",
+                len(urls), " [cache-only]" if args.cache_only else "")
+    n_ok = n_bbb = n_skip = n_fail = 0
+    from src.api.cricketarchive.fetcher import CacheMissError
     with store.get_connection() as conn:
         store.init_db(conn)
         for u in urls:
             try:
-                res = harvest_scorecard(conn, fetcher, u)
+                res = harvest_scorecard(conn, fetcher, u, cache_only=args.cache_only)
                 conn.commit()
                 recon_ok = all(r[5] for r in res["recon"]) if res["recon"] else True
                 n_ok += 1
@@ -94,12 +113,17 @@ def main() -> int:
                 else:
                     flag = "bbb-MISMATCH"
                 logger.info("  %s %s (%s) [%s]", res["scorecard_id"], res["title"], res["date"], flag)
+            except CacheMissError:
+                n_skip += 1  # cache-only mode: page not cached, skip quietly
             except Exception as e:  # noqa: BLE001
+                n_fail += 1
                 logger.error("  FAILED %s -> %s: %s", u, type(e).__name__, e)
 
     print("\n" + "=" * 70)
-    print(f"Harvested: {n_ok}/{len(urls)} scorecards ({n_bbb} with ball-by-ball)")
-    print(f"Store    : {store.get_connection.__module__} -> ca_archive.db")
+    print(f"Harvested: {n_ok}/{len(urls)} scorecards ({n_bbb} with ball-by-ball)"
+          + (f"  skipped(uncached): {n_skip}" if n_skip else "")
+          + (f"  failed: {n_fail}" if n_fail else ""))
+    print("Store    : ca_archive.db")
     print("=" * 70)
     return 0
 

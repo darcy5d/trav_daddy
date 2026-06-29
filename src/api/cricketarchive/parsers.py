@@ -155,6 +155,22 @@ def parse_player_bio(html: str, url: str) -> CAPlayer:
 # ---------------------------------------------------------------------------
 # Scorecard
 # ---------------------------------------------------------------------------
+_NOT_OUT_DISMISSALS = {
+    "", "not out", "did not bat", "retired not out", "retired hurt",
+    "absent hurt", "absent", "absent ill",
+}
+
+
+def _count_dismissed(batting) -> int:
+    """Wickets fallen = batting-card entries with a real (out) dismissal.
+
+    More robust than the Fall-of-Wickets text: handles super overs, 0-wicket
+    innings, and excludes retired-not-out / absent (which are not wickets).
+    """
+    return sum(1 for b in batting
+               if (b.dismissal or "").strip().lower() not in _NOT_OUT_DISMISSALS)
+
+
 def _is_batting_header(cells: List[str]) -> bool:
     return (len(cells) >= 2 and cells[0].endswith("innings")
             and "Runs" in cells and "Balls" in cells)
@@ -328,19 +344,18 @@ def parse_scorecard(html: str, url: str) -> CAScorecard:
                     current.total_text = cells[1]
                     if len(cells) > 2:
                         current.total_runs = _int(cells[2])
-                    # Prefer the Fall-of-Wickets entry count: it is CA's own
-                    # per-ball truth and correctly handles "all out" with a
-                    # retired/absent batter (fewer than 10 dismissals). Fall back
-                    # to the "(N wickets)" text, then to all-out -> 10.
-                    fow_n = (len(re.findall(r"\b\d+-\d+", current.fall_of_wickets))
-                             if current.fall_of_wickets else 0)
-                    mw = re.search(r"(\d+)\s+wickets?", cells[1])
-                    if fow_n:
-                        current.total_wickets = fow_n
-                    elif mw:
-                        current.total_wickets = int(mw.group(1))
-                    elif "all out" in cells[1].lower():
-                        current.total_wickets = 10
+                    # Wickets fallen = dismissed batters on the card (most robust;
+                    # handles super overs, 0-wkt innings, retired-not-out). Fall
+                    # back to FoW count / "(N wickets)" text when no batting card.
+                    if current.batting:
+                        current.total_wickets = _count_dismissed(current.batting)
+                    else:
+                        fow_n = (len(re.findall(r"\b\d+-\d+", current.fall_of_wickets))
+                                 if current.fall_of_wickets else 0)
+                        mw = re.search(r"(\d+)\s+wickets?", cells[1])
+                        current.total_wickets = (
+                            fow_n or (int(mw.group(1)) if mw
+                                      else (10 if "all out" in cells[1].lower() else None)))
             sc.innings.append(current)
         elif _is_bowling_header(head) and current is not None:
             current.bowling = _parse_bowling_table(t, sc.players_seen)

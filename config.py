@@ -57,10 +57,17 @@ CRICKETARCHIVE_CONFIG = {
     "auth_base_url": os.getenv("CRICKETARCHIVE_AUTH_BASE_URL", "https://my.cricketarchive.com"),
     "login_url": os.getenv("CRICKETARCHIVE_LOGIN_URL", "https://my.cricketarchive.com/"),
     # Politeness controls (be gentle to avoid the ToS "detrimental to use" catch-all).
-    "min_delay_sec": float(os.getenv("CRICKETARCHIVE_MIN_DELAY", "2.5")),
-    "max_delay_sec": float(os.getenv("CRICKETARCHIVE_MAX_DELAY", "5.0")),
+    # NOTE: a 2.5-5s rate triggered intermittent HTTP 403 throttling from CA, so
+    # the defaults are deliberately gentle and the fetcher adds adaptive slowdown
+    # plus exponential backoff/retry on 403/429.
+    "min_delay_sec": float(os.getenv("CRICKETARCHIVE_MIN_DELAY", "6.0")),
+    "max_delay_sec": float(os.getenv("CRICKETARCHIVE_MAX_DELAY", "11.0")),
     "max_requests_per_day": int(os.getenv("CRICKETARCHIVE_MAX_PER_DAY", "2000")),
     "request_timeout_sec": float(os.getenv("CRICKETARCHIVE_TIMEOUT", "30")),
+    # Throttle-resilience: retry 403/429 with exponential backoff, and adaptively
+    # slow the base rate when throttled (decays back down on sustained success).
+    "max_retries": int(os.getenv("CRICKETARCHIVE_MAX_RETRIES", "4")),
+    "backoff_base_sec": float(os.getenv("CRICKETARCHIVE_BACKOFF_BASE", "20")),
     "user_agent": os.getenv(
         "CRICKETARCHIVE_USER_AGENT",
         "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "

@@ -35,6 +35,10 @@ class RobotsDisallowedError(RuntimeError):
     """Raised when a URL is disallowed by robots.txt for User-Agent: *."""
 
 
+class CacheMissError(RuntimeError):
+    """Raised in cache_only mode when a URL is not in the on-disk cache."""
+
+
 # Markers that indicate we got bounced to the paywall instead of content.
 _PAYWALL_MARKERS = (
     "To continue reading, sign in",
@@ -55,6 +59,11 @@ class PoliteFetcher:
         self._counter_path = Path(config["cache_dir"]) / "request_counter.json"
         self._robots: dict[str, RobotFileParser] = {}
         self._last_fetch_ts = 0.0
+        # Adaptive extra delay (seconds) added to the base throttle; grows on a
+        # throttle response (403/429), decays on sustained success.
+        self._extra_delay = 0.0
+        # Look more like a real browser navigation to reduce bot heuristics.
+        self.session.headers.setdefault("Referer", str(config.get("base_url", "")) + "/")
 
     # -- robots -----------------------------------------------------------------
     def _robots_for(self, url: str) -> RobotFileParser:
@@ -107,33 +116,59 @@ class PoliteFetcher:
     def _throttle(self) -> None:
         elapsed = time.time() - self._last_fetch_ts
         delay = random.uniform(self.cfg["min_delay_sec"], self.cfg["max_delay_sec"])
+        delay += self._extra_delay
         if elapsed < delay:
             time.sleep(delay - elapsed)
         self._last_fetch_ts = time.time()
 
     # -- main entrypoint --------------------------------------------------------
-    def get(self, url: str, force: bool = False) -> str:
-        """Return page HTML, from cache when available; otherwise fetch politely."""
+    def get(self, url: str, force: bool = False, cache_only: bool = False) -> str:
+        """Return page HTML, from cache when available; otherwise fetch politely.
+
+        Retries HTTP 403/429 (CA throttling) with exponential backoff and adaptively
+        slows the base rate. In cache_only mode, never hits the network.
+        """
         if not force:
             cached = self._cached(url)
             if cached is not None:
                 return cached
+        if cache_only:
+            raise CacheMissError(url)
 
         if not self._robots_allows(url):
             raise RobotsDisallowedError(f"robots.txt disallows: {url}")
 
-        self._check_and_bump_counter()
-        self._throttle()
+        max_retries = int(self.cfg.get("max_retries", 4))
+        backoff_base = float(self.cfg.get("backoff_base_sec", 20))
+        last_exc: Optional[Exception] = None
 
-        logger.info("FETCH %s", url)
-        resp = self.session.get(url, timeout=self.cfg["request_timeout_sec"], allow_redirects=True)
-        resp.raise_for_status()
-        html = resp.text
+        for attempt in range(max_retries + 1):
+            self._check_and_bump_counter()
+            self._throttle()
+            logger.info("FETCH %s%s", url, f" (retry {attempt})" if attempt else "")
+            resp = self.session.get(url, timeout=self.cfg["request_timeout_sec"],
+                                    allow_redirects=True)
 
-        if any(m in html for m in _PAYWALL_MARKERS):
-            raise NotAuthenticatedError(
-                f"Got paywall/sign-in for {url} — session expired? Re-run with force_login."
-            )
+            if resp.status_code in (403, 429):
+                # CA throttling: back off, slow the sustained rate, and retry.
+                self._extra_delay = min(self._extra_delay + 4.0, 60.0)
+                wait = backoff_base * (2 ** attempt) + random.uniform(0, 5)
+                logger.warning("HTTP %s for %s — backoff %.0fs (attempt %d/%d, extra_delay=%.1fs)",
+                               resp.status_code, url, wait, attempt + 1, max_retries + 1,
+                               self._extra_delay)
+                last_exc = requests.HTTPError(f"{resp.status_code} for {url}")
+                time.sleep(wait)
+                continue
 
-        self._cache_path(url).write_text(html, encoding="utf-8")
-        return html
+            resp.raise_for_status()
+            html = resp.text
+            if any(m in html for m in _PAYWALL_MARKERS):
+                raise NotAuthenticatedError(
+                    f"Got paywall/sign-in for {url} — session expired? Re-run with force_login."
+                )
+            # success: decay the adaptive slowdown
+            self._extra_delay = max(0.0, self._extra_delay - 1.0)
+            self._cache_path(url).write_text(html, encoding="utf-8")
+            return html
+
+        raise last_exc or RuntimeError(f"exhausted retries for {url}")
