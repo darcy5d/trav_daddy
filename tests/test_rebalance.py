@@ -108,7 +108,8 @@ def ledger() -> Generator[sqlite3.Connection, None, None]:
             toss_winner_team_id INTEGER,
             toss_chose_to TEXT,
             kickoff_at TEXT,
-            cancel_reason TEXT
+            cancel_reason TEXT,
+            exit_cost_usdc REAL DEFAULT 0
         )
         """
     )

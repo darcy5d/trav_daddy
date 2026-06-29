@@ -507,6 +507,13 @@ def init_betting_tables(db_path: Optional[Path] = None) -> bool:
                 # at bet time, e.g. '{"t20_male":"male_t20_20260416",...}'.
                 # Enables per-model-version calibration grouping in rollups.
                 ("model_snapshot",        "TEXT"),
+                # Wave 6: cumulative entry-cost (USDC) already removed from this
+                # BUY row by partial exits (rebalance/cashout SELLs). Lets the
+                # TWAP fill reconcile compute open stake as
+                # (gross_filled - exit_cost_usdc) instead of resetting
+                # fill_size_usdc back to the gross on-chain fill, which used to
+                # wipe the decrement and over-count open positions.
+                ("exit_cost_usdc",        "REAL DEFAULT 0"),
             ]
             for col_name, col_type in paper_columns:
                 if not _column_exists(conn, "bet_ledger", col_name):

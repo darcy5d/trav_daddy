@@ -472,6 +472,11 @@ def reduce_position(
         now = _utc_now_iso()
 
         # --- Decrement BUY rows' open stake pro-rata by the ACTUAL fill ---
+        # Also accumulate exit_cost_usdc so the TWAP fill reconcile in
+        # clob_fills.finalize_plan_from_chunks computes open stake as
+        # (gross_filled - exit_cost_usdc) and never tops fill_size_usdc back up
+        # to the gross on-chain fill (which would wipe this decrement and
+        # over-count the open position).
         for r in rows:
             row_cut = float(r["fill_size_usdc"]) * f_actual
             new_fill = round(float(r["fill_size_usdc"]) - row_cut, 6)
@@ -480,17 +485,21 @@ def reduce_position(
                     """
                     UPDATE bet_ledger
                     SET fill_size_usdc = 0,
+                        exit_cost_usdc = COALESCE(exit_cost_usdc, 0.0) + ?,
                         status = 'settled',
                         settled_at = ?,
                         pnl_realised_usdc = COALESCE(pnl_realised_usdc, 0.0)
                     WHERE bet_id = ?
                     """,
-                    (now, r["bet_id"]),
+                    (round(row_cut, 6), now, r["bet_id"]),
                 )
             else:
                 cur.execute(
-                    "UPDATE bet_ledger SET fill_size_usdc = ? WHERE bet_id = ?",
-                    (new_fill, r["bet_id"]),
+                    "UPDATE bet_ledger "
+                    "SET fill_size_usdc = ?, "
+                    "    exit_cost_usdc = COALESCE(exit_cost_usdc, 0.0) + ? "
+                    "WHERE bet_id = ?",
+                    (new_fill, round(row_cut, 6), r["bet_id"]),
                 )
 
         # --- Insert the SELL adjustment row (carries the realized pnl) ---

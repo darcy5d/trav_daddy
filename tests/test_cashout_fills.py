@@ -53,7 +53,8 @@ CREATE TABLE bet_ledger (
     cashout_pnl_usdc REAL,
     cashout_threshold_used REAL,
     cashout_order_id TEXT,
-    cashout_reason TEXT
+    cashout_reason TEXT,
+    exit_cost_usdc REAL DEFAULT 0
 );
 CREATE TABLE order_history (
     polymarket_order_id TEXT PRIMARY KEY, bet_id INTEGER, chunk_id INTEGER,

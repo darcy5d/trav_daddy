@@ -363,14 +363,23 @@ def finalize_plan_from_chunks(
             # recorded fill_size_usdc. Update fill_size_usdc and fill_price so the
             # bet reflects what we actually own on-chain. Do NOT touch settled rows
             # where pnl is already realized.
+            #
+            # Open stake target is gross-filled MINUS what we have already sold
+            # off this row (exit_cost_usdc, accrued by rebalance/cashout partial
+            # exits). Without this subtraction the top-up would re-inflate
+            # fill_size_usdc back to the gross on-chain fill after every exit,
+            # wiping the decrement and over-counting the open position.
             cur.execute(
-                "SELECT status, fill_size_usdc FROM bet_ledger WHERE bet_id = ?",
+                "SELECT status, fill_size_usdc, COALESCE(exit_cost_usdc, 0.0) AS exit_cost_usdc "
+                "FROM bet_ledger WHERE bet_id = ?",
                 (bet_id,),
             )
             br = cur.fetchone()
             if br is not None and (br["status"] or "").lower() == "filled":
                 current_fill = float(br["fill_size_usdc"] or 0)
-                if total_filled_usdc - current_fill > PARTIAL_FILL_TOPUP_THRESHOLD:
+                exit_cost = float(br["exit_cost_usdc"] or 0)
+                target_fill = max(0.0, total_filled_usdc - exit_cost)
+                if target_fill - current_fill > PARTIAL_FILL_TOPUP_THRESHOLD:
                     cur.execute(
                         """
                         UPDATE bet_ledger
@@ -379,13 +388,15 @@ def finalize_plan_from_chunks(
                             reconciled_at = ?
                         WHERE bet_id = ? AND status = 'filled'
                         """,
-                        (total_filled_usdc, avg_fill, now_iso, bet_id),
+                        (round(target_fill, 6), avg_fill, now_iso, bet_id),
                     )
                     if cur.rowcount:
                         bet_updated = True
                         logger.info(
-                            "Top-up bet_ledger #%s fill_size: $%.2f -> $%.2f (plan %s)",
-                            bet_id, current_fill, total_filled_usdc, plan_id,
+                            "Top-up bet_ledger #%s fill_size: $%.2f -> $%.2f "
+                            "(gross $%.2f - exited $%.2f, plan %s)",
+                            bet_id, current_fill, target_fill,
+                            total_filled_usdc, exit_cost, plan_id,
                         )
         else:
             cur.execute(

@@ -92,10 +92,11 @@ def _insert_bet(
 
 def test_stop_loss_config_shape():
     cfg = cashout.stop_loss_config()
-    assert set(cfg.keys()) == {"enabled", "floor", "gate_min"}
+    assert set(cfg.keys()) == {"enabled", "floor", "gate_min", "min_exit_price"}
     assert isinstance(cfg["enabled"], bool)
     assert isinstance(cfg["floor"], float)
     assert isinstance(cfg["gate_min"], float)
+    assert isinstance(cfg["min_exit_price"], float)
 
 
 # ---------------------------------------------------------------------------

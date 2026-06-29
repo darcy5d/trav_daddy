@@ -206,9 +206,10 @@ def evaluate_cashout(
 def stop_loss_config() -> Dict[str, Any]:
     """Read the live stop-loss settings from BETTING_CONFIG.
 
-    Returns a dict with: enabled (bool), floor (float), gate_min (float).
-    Imported lazily so this module stays importable without config side
-    effects and so .env changes are picked up per process.
+    Returns a dict with: enabled (bool), floor (float), gate_min (float),
+    min_exit_price (float — the hard ruin floor passed to marketable_sell in
+    liquidate mode). Imported lazily so this module stays importable without
+    config side effects and so .env changes are picked up per process.
     """
     try:
         from config import BETTING_CONFIG
@@ -549,10 +550,17 @@ def execute_cashout(
             return_ratio=return_ratio, cashout_oid=cashout_oid,
             reason=reason, now=now, conn=conn,
         )
+        # Decrement the open stake AND accumulate exit_cost_usdc so the TWAP
+        # fill reconcile (clob_fills.finalize_plan_from_chunks) computes open
+        # stake as (gross_filled - exit_cost_usdc) and never tops fill_size_usdc
+        # back up to the gross on-chain fill, which would wipe this decrement.
         new_fill = round(float(fill_size_usdc) - entry_cost_sold, 6)
         conn.execute(
-            "UPDATE bet_ledger SET fill_size_usdc = ? WHERE bet_id = ?",
-            (max(0.0, new_fill), bet_id),
+            "UPDATE bet_ledger "
+            "SET fill_size_usdc = ?, "
+            "    exit_cost_usdc = COALESCE(exit_cost_usdc, 0.0) + ? "
+            "WHERE bet_id = ?",
+            (max(0.0, new_fill), round(float(entry_cost_sold), 6), bet_id),
         )
         conn.commit()
         partial = True
