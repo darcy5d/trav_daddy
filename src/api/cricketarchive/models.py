@@ -56,7 +56,7 @@ class CADelivery:
 
     over_number: int                # 0-indexed over (as CA shows it)
     ball_number: int                # legal-ball ordinal within the over
-    batter: str                     # striker (name as shown)
+    batter: str                     # striker surname as shown in commentary
     bowler: str
     non_striker: Optional[str] = None   # reconstructed via strike rotation
     runs_batter: int = 0
@@ -75,6 +75,19 @@ class CADelivery:
     is_boundary_four: bool = False
     is_boundary_six: bool = False
     commentary_raw: Optional[str] = None
+    # --- identity (filled by identity.resolve_innings) ---
+    # The CA id is the unique key; the initials form ("HT Tector") is the
+    # human-readable discriminator. We always carry BOTH alongside the surname.
+    batter_ca_id: Optional[str] = None
+    batter_initials: Optional[str] = None
+    non_striker_ca_id: Optional[str] = None
+    non_striker_initials: Optional[str] = None
+    bowler_ca_id: Optional[str] = None
+    bowler_initials: Optional[str] = None
+    dismissed_player_ca_id: Optional[str] = None
+    dismissed_player_initials: Optional[str] = None
+    # 'verified' | 'unambiguous' | 'ambiguous_unverified' | 'unresolved'
+    resolution_status: Optional[str] = None
 
 
 @dataclass

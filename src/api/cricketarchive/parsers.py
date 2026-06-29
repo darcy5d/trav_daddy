@@ -186,6 +186,13 @@ def _parse_batting_table(table, players_seen: dict) -> List[CABattingEntry]:
         head = cells[0]
         if head in ("Extras", "Total") or head.startswith("Fall of wickets"):
             continue
+        # A real batter row's first cell IS the batter's name link. The
+        # Fall-of-Wickets data row also carries player links (e.g.
+        # "1-17 (TH Tector, 1.5 ov), ...") but its first cell is the FoW string,
+        # not a single name -> reject by requiring head == first link's text.
+        first_a = tr.find("a")
+        if first_a is None or _clean_name(first_a.get_text(" ", strip=True)) != _clean_name(head):
+            continue
         link_ids = _record_links(tr, players_seen)
         e = CABattingEntry(name=_clean_name(head))
         e.ca_id = link_ids[0] if link_ids else None
@@ -422,6 +429,10 @@ def parse_commentary(html: str, url: str,
             # delivery row
             if over_tok.isdigit() and _BALL_RE.match(ball_tok) and " to " in desc:
                 bowler, batter = [x.strip() for x in desc.split(" to ", 1)]
+                # CA annotates the batter on a free hit, e.g. "Tector (free hit)";
+                # strip any trailing parenthetical so the name resolves cleanly.
+                bowler = re.sub(r"\s*\([^)]*\)\s*$", "", bowler).strip()
+                batter = re.sub(r"\s*\([^)]*\)\s*$", "", batter).strip()
                 rd = _parse_runs_token(runs_tok)
                 dlv = CADelivery(
                     over_number=int(over_tok),

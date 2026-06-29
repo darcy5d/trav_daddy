@@ -23,7 +23,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from src.api.cricketarchive import auth, parsers as P, store
+from src.api.cricketarchive import auth, parsers as P, store, identity as I
 from src.api.cricketarchive.fetcher import PoliteFetcher
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
@@ -33,21 +33,27 @@ logger = logging.getLogger("ca_harvest")
 def harvest_scorecard(conn, fetcher: PoliteFetcher, url: str) -> dict:
     sc = P.parse_scorecard(fetcher.get(url), url)
     deliveries_by_innings = {}
+    reports_by_innings = {}
     recon = []
     for idx, comm_url in enumerate(sc.commentary_urls):
-        order = ([b.name.split()[-1] for b in sc.innings[idx].batting]
-                 if idx < len(sc.innings) else None)
-        dels = P.parse_commentary(fetcher.get(comm_url), comm_url, order)
+        if idx >= len(sc.innings):
+            continue
+        dels = P.parse_commentary(fetcher.get(comm_url), comm_url)
+        dels, report = I.resolve_innings(sc.innings[idx], dels)
         deliveries_by_innings[idx + 1] = dels
+        reports_by_innings[idx + 1] = report
         runs = sum(d.runs_total for d in dels)
         wkts = sum(1 for d in dels if d.is_wicket)
-        exp_r = sc.innings[idx].total_runs if idx < len(sc.innings) else None
-        exp_w = sc.innings[idx].total_wickets if idx < len(sc.innings) else None
+        exp_r = sc.innings[idx].total_runs
+        exp_w = sc.innings[idx].total_wickets
         recon.append((idx + 1, runs, exp_r, wkts, exp_w,
-                      runs == exp_r and (exp_w is None or wkts == exp_w)))
-    store.write_scorecard(conn, sc, deliveries_by_innings)
+                      runs == exp_r and (exp_w is None or wkts == exp_w),
+                      report["identity_verified"]))
+    store.write_scorecard(conn, sc, deliveries_by_innings, reports_by_innings)
     return {"scorecard_id": sc.ca_id, "title": sc.title, "date": sc.match_date,
-            "innings": len(sc.innings), "bbb": bool(deliveries_by_innings), "recon": recon}
+            "innings": len(sc.innings), "bbb": bool(deliveries_by_innings),
+            "recon": recon,
+            "identity_ok": all(r[6] for r in recon) if recon else True}
 
 
 def main() -> int:
@@ -76,10 +82,17 @@ def main() -> int:
             try:
                 res = harvest_scorecard(conn, fetcher, u)
                 conn.commit()
-                all_ok = all(r[5] for r in res["recon"]) if res["recon"] else True
+                recon_ok = all(r[5] for r in res["recon"]) if res["recon"] else True
                 n_ok += 1
                 n_bbb += 1 if res["bbb"] else 0
-                flag = "bbb-OK" if (res["bbb"] and all_ok) else ("bbb-MISMATCH" if res["bbb"] else "no-bbb")
+                if not res["bbb"]:
+                    flag = "no-bbb"
+                elif recon_ok and res["identity_ok"]:
+                    flag = "bbb-OK+id"
+                elif recon_ok:
+                    flag = "bbb-OK,id-UNVERIFIED"
+                else:
+                    flag = "bbb-MISMATCH"
                 logger.info("  %s %s (%s) [%s]", res["scorecard_id"], res["title"], res["date"], flag)
             except Exception as e:  # noqa: BLE001
                 logger.error("  FAILED %s -> %s: %s", u, type(e).__name__, e)

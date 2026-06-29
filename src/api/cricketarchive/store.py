@@ -66,6 +66,7 @@ CREATE TABLE IF NOT EXISTS ca_matches (
 CREATE TABLE IF NOT EXISTS ca_innings (
     scorecard_id TEXT, innings_number INTEGER, batting_team TEXT,
     total_runs INTEGER, total_wickets INTEGER, extras_text TEXT, fall_of_wickets TEXT,
+    identity_verified INTEGER, identity_report TEXT,
     PRIMARY KEY (scorecard_id, innings_number)
 );
 
@@ -89,12 +90,15 @@ CREATE TABLE IF NOT EXISTS ca_bowling (
 CREATE TABLE IF NOT EXISTS ca_deliveries (
     scorecard_id TEXT, innings_number INTEGER, seq INTEGER,
     over_number INTEGER, ball_number INTEGER,
-    batter TEXT, bowler TEXT, non_striker TEXT,
-    batter_ca_id TEXT, bowler_ca_id TEXT,
+    batter TEXT, batter_ca_id TEXT, batter_initials TEXT,
+    non_striker TEXT, non_striker_ca_id TEXT, non_striker_initials TEXT,
+    bowler TEXT, bowler_ca_id TEXT, bowler_initials TEXT,
     runs_batter INTEGER, runs_extras INTEGER, runs_total INTEGER,
     extras_wides INTEGER, extras_noballs INTEGER, extras_byes INTEGER, extras_legbyes INTEGER,
-    is_wicket INTEGER, wicket_type TEXT, dismissed_player TEXT, fielder1 TEXT,
-    is_boundary_four INTEGER, is_boundary_six INTEGER, commentary_raw TEXT,
+    is_wicket INTEGER, wicket_type TEXT,
+    dismissed_player TEXT, dismissed_player_ca_id TEXT, dismissed_player_initials TEXT,
+    fielder1 TEXT, is_boundary_four INTEGER, is_boundary_six INTEGER,
+    resolution_status TEXT, commentary_raw TEXT,
     PRIMARY KEY (scorecard_id, innings_number, seq)
 );
 
@@ -126,36 +130,6 @@ def get_connection(db_path: Optional[Path] = None):
 
 def init_db(conn: sqlite3.Connection) -> None:
     conn.executescript(SCHEMA)
-
-
-# ---------------------------------------------------------------------------
-# delivery <-> scorecard player resolution
-# ---------------------------------------------------------------------------
-def _name_to_caid(entries) -> Dict[str, str]:
-    """surname/name -> ca_id, dropping ambiguous surnames (e.g. two Tectors)."""
-    by_full, by_sur = {}, {}
-    counts: Dict[str, int] = {}
-    for e in entries:
-        if not e.ca_id:
-            continue
-        by_full[e.name] = e.ca_id
-        sur = e.name.split()[-1]
-        counts[sur] = counts.get(sur, 0) + 1
-        by_sur[sur] = e.ca_id
-    # remove ambiguous surnames
-    for sur, c in counts.items():
-        if c > 1:
-            by_sur.pop(sur, None)
-    by_full.update(by_sur)
-    return by_full
-
-
-def _resolve(name: Optional[str], name_map: Dict[str, str]) -> Optional[str]:
-    if not name:
-        return None
-    if name in name_map:
-        return name_map[name]
-    return name_map.get(name.split()[-1])
 
 
 # ---------------------------------------------------------------------------
@@ -196,9 +170,17 @@ def _delete_match(conn, sid: str) -> None:
 
 
 def write_scorecard(conn, sc: CAScorecard,
-                    deliveries_by_innings: Optional[Dict[int, List[CADelivery]]] = None) -> None:
-    """Idempotently write a parsed scorecard (+ optional ball-by-ball) to the store."""
+                    deliveries_by_innings: Optional[Dict[int, List[CADelivery]]] = None,
+                    reports_by_innings: Optional[Dict[int, dict]] = None) -> None:
+    """Idempotently write a parsed scorecard (+ optional resolved ball-by-ball).
+
+    Deliveries are expected to be ALREADY identity-resolved (see
+    identity.resolve_innings) so each carries batter/non_striker/bowler ca_id +
+    initials + resolution_status. `reports_by_innings` carries the per-innings
+    verification report.
+    """
     deliveries_by_innings = deliveries_by_innings or {}
+    reports_by_innings = reports_by_innings or {}
     sid = sc.ca_id
     _delete_match(conn, sid)
 
@@ -232,11 +214,15 @@ def write_scorecard(conn, sc: CAScorecard,
                 (sid, role, pid, nm))
 
     for i, inn in enumerate(sc.innings, start=1):
+        rep = reports_by_innings.get(i)
         conn.execute(
             """INSERT INTO ca_innings (scorecard_id, innings_number, batting_team,
-               total_runs, total_wickets, extras_text, fall_of_wickets) VALUES (?,?,?,?,?,?,?)""",
+               total_runs, total_wickets, extras_text, fall_of_wickets,
+               identity_verified, identity_report) VALUES (?,?,?,?,?,?,?,?,?)""",
             (sid, i, inn.batting_team, inn.total_runs, inn.total_wickets,
-             inn.extras_text, inn.fall_of_wickets))
+             inn.extras_text, inn.fall_of_wickets,
+             (1 if rep and rep.get("identity_verified") else 0) if rep else None,
+             json.dumps(rep) if rep else None))
         for pos, b in enumerate(inn.batting, start=1):
             conn.execute(
                 """INSERT INTO ca_batting (scorecard_id, innings_number, position, batter_ca_id,
@@ -252,21 +238,25 @@ def write_scorecard(conn, sc: CAScorecard,
                 (sid, i, pos, bw.ca_id, bw.name, bw.overs, bw.maidens, bw.runs, bw.wickets,
                  bw.wides, bw.noballs, bw.dots, bw.fours, bw.sixes, bw.econ))
 
-        # deliveries: resolve striker/bowler names -> ca_ids using this match's cards
+        # deliveries are already identity-resolved by identity.resolve_innings
         deliveries = deliveries_by_innings.get(i, [])
-        bat_map = _name_to_caid(inn.batting)
-        bowl_map = _name_to_caid(inn.bowling)
         for seq, d in enumerate(deliveries, start=1):
             conn.execute(
                 """INSERT INTO ca_deliveries (scorecard_id, innings_number, seq, over_number,
-                   ball_number, batter, bowler, non_striker, batter_ca_id, bowler_ca_id,
+                   ball_number, batter, batter_ca_id, batter_initials,
+                   non_striker, non_striker_ca_id, non_striker_initials,
+                   bowler, bowler_ca_id, bowler_initials,
                    runs_batter, runs_extras, runs_total, extras_wides, extras_noballs, extras_byes,
-                   extras_legbyes, is_wicket, wicket_type, dismissed_player, fielder1,
-                   is_boundary_four, is_boundary_six, commentary_raw)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-                (sid, i, seq, d.over_number, d.ball_number, d.batter, d.bowler, d.non_striker,
-                 _resolve(d.batter, bat_map), _resolve(d.bowler, bowl_map),
+                   extras_legbyes, is_wicket, wicket_type,
+                   dismissed_player, dismissed_player_ca_id, dismissed_player_initials,
+                   fielder1, is_boundary_four, is_boundary_six, resolution_status, commentary_raw)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (sid, i, seq, d.over_number, d.ball_number,
+                 d.batter, d.batter_ca_id, d.batter_initials,
+                 d.non_striker, d.non_striker_ca_id, d.non_striker_initials,
+                 d.bowler, d.bowler_ca_id, d.bowler_initials,
                  d.runs_batter, d.runs_extras, d.runs_total, d.extras_wides, d.extras_noballs,
                  d.extras_byes, d.extras_legbyes, int(d.is_wicket), d.wicket_type,
-                 d.dismissed_player, d.fielder1, int(d.is_boundary_four), int(d.is_boundary_six),
-                 d.commentary_raw))
+                 d.dismissed_player, d.dismissed_player_ca_id, d.dismissed_player_initials,
+                 d.fielder1, int(d.is_boundary_four), int(d.is_boundary_six),
+                 d.resolution_status, d.commentary_raw))
