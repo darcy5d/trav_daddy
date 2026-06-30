@@ -115,6 +115,13 @@ def main() -> int:
                 logger.info("  %s %s (%s) [%s]", res["scorecard_id"], res["title"], res["date"], flag)
             except CacheMissError:
                 n_skip += 1  # cache-only mode: page not cached, skip quietly
+            except RuntimeError as e:
+                if "cap" in str(e).lower():     # daily request cap -> stop cleanly (resumable)
+                    logger.warning("Daily request cap reached — stopping cleanly; "
+                                   "re-run to resume. (%s)", e)
+                    break
+                n_fail += 1
+                logger.error("  FAILED %s -> %s: %s", u, type(e).__name__, e)
             except Exception as e:  # noqa: BLE001
                 n_fail += 1
                 logger.error("  FAILED %s -> %s: %s", u, type(e).__name__, e)
