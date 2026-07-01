@@ -66,12 +66,19 @@ def _overs_to_balls(o):
     return int(o) * 6 if o.isdigit() else 0
 
 
-def load_matches() -> list:
+def load_matches(category: str | None = None, gender: str | None = None) -> list:
+    clauses = []
+    if category:
+        clauses.append(f"AND match_category = '{category}'")
+    if gender:
+        clauses.append(f"AND match_gender = '{gender}'")
+    extra = " ".join(clauses)
     with store.get_connection() as c:
-        rows = c.execute("""
+        rows = c.execute(f"""
             SELECT scorecard_id, match_date, competition_url, team1_name, team2_name, toss, result
             FROM ca_matches
             WHERE match_date IS NOT NULL AND team1_name IS NOT NULL AND team2_name IS NOT NULL
+            {extra}
             ORDER BY match_date, scorecard_id
         """).fetchall()
         matches = []
@@ -204,8 +211,77 @@ def _metrics(y_true, p):
             "auc": round(roc_auc_score(y_true, p), 4) if len(set(y_true)) > 1 else None}
 
 
+def _run_one(category, gender):
+    """Run the full pipeline for a single (category, gender) slice. Returns summary dict."""
+    matches = load_matches(category=category, gender=gender)
+    X, y, meta = build_dataset(matches)
+    n = len(y)
+    if n < 80:
+        return {"n": n, "auc_lr": None, "auc_gbm": None, "acc_lr": None, "top_feature": None}
+    split = int(n * 0.75)
+    Xtr, Xte, ytr, yte = X[:split], X[split:], y[:split], y[split:]
+    mu, sd = Xtr.mean(0), Xtr.std(0) + 1e-9
+    Xtr_s, Xte_s = (Xtr - mu) / sd, (Xte - mu) / sd
+    lr = LogisticRegression(max_iter=2000).fit(Xtr_s, ytr)
+    gb = GradientBoostingClassifier(random_state=0, n_estimators=120, max_depth=2,
+                                    learning_rate=0.05).fit(Xtr, ytr)
+    auc_lr = round(roc_auc_score(yte, lr.predict_proba(Xte_s)[:, 1]), 3)
+    auc_gbm = round(roc_auc_score(yte, gb.predict_proba(Xte)[:, 1]), 3)
+    acc_lr = round(accuracy_score(yte, lr.predict(Xte_s)), 3)
+    coefs = {f: abs(c) for f, c in zip(FEATURES, lr.coef_[0])}
+    top = max(coefs, key=coefs.get)
+    return {"n": n, "auc_lr": auc_lr, "auc_gbm": auc_gbm, "acc_lr": acc_lr, "top_feature": top}
+
+
+def _sweep() -> int:
+    """Print a breakdown table across all category × gender slices."""
+    CATEGORIES = ["premium_franchise", "t20_league", "international", "domestic"]
+    GENDERS = ["men", "women"]
+
+    rows = []
+    for cat in CATEGORIES + [None]:
+        for gen in GENDERS + [None]:
+            if cat is None and gen is None:
+                continue  # skip all/all; too coarse
+            label_cat = cat or "ALL"
+            label_gen = gen or "ALL"
+            res = _run_one(cat, gen)
+            rows.append((label_cat, label_gen, res))
+
+    sep = "=" * 80
+    print(f"\n{sep}")
+    print("THREAD A  — SIGNAL SWEEP  (category × gender)")
+    print(sep)
+    print(f"  {'category':<22} {'gender':<8} {'n':>6}  {'AUC(LR)':>8}  {'AUC(GBM)':>9}  {'Acc(LR)':>8}  top feature")
+    print("  " + "-" * 75)
+    for cat_l, gen_l, r in rows:
+        if cat_l != "ALL" and gen_l == "ALL":
+            print()  # blank line between category blocks
+        if r["auc_lr"] is None:
+            print(f"  {cat_l:<22} {gen_l:<8} {r['n']:>6}  {'<80 samples — skip':>37}")
+        else:
+            print(f"  {cat_l:<22} {gen_l:<8} {r['n']:>6}  {r['auc_lr']:>8.3f}  "
+                  f"{r['auc_gbm']:>9.3f}  {r['acc_lr']:>8.3f}  {r['top_feature']}")
+    print(sep)
+    return 0
+
+
 def main() -> int:
-    matches = load_matches()
+    import argparse
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--category",
+                    choices=["premium_franchise", "t20_league", "international", "domestic"],
+                    default=None, help="Filter by match_category (default: all)")
+    ap.add_argument("--gender", choices=["men", "women"],
+                    default=None, help="Filter by match_gender (default: both)")
+    ap.add_argument("--sweep", action="store_true",
+                    help="Run all category × gender combinations and print a summary table")
+    args = ap.parse_args()
+
+    if args.sweep:
+        return _sweep()
+
+    matches = load_matches(category=args.category, gender=args.gender)
     X, y, meta = build_dataset(matches)
     n = len(y)
     if n < 100:
@@ -242,8 +318,10 @@ def main() -> int:
     out = Path(PROCESSED_DATA_DIR) / "cricketarchive"; out.mkdir(parents=True, exist_ok=True)
     (out / "thread_a_report.json").write_text(json.dumps(report, indent=2))
 
+    parts = [args.category or "ALL", args.gender or "ALL"]
+    label = f"[{'/'.join(parts)}]"
     print("\n" + "=" * 72)
-    print("THREAD A - SCORECARD SIGNAL CHECK (predict match winner)")
+    print(f"THREAD A - SCORECARD SIGNAL CHECK {label} (predict match winner)")
     print("=" * 72)
     print(f"  samples: {n}  (train {len(ytr)} / test {len(yte)})   "
           f"test base-rate(t1 win): {report['test_base_rate_t1_win']}")

@@ -59,6 +59,12 @@ CREATE TABLE IF NOT EXISTS ca_matches (
     result TEXT,
     player_of_match_ca_id TEXT,
     has_ball_by_ball INTEGER DEFAULT 0,
+    -- Match classification (see store.classify_competition / store.infer_gender).
+    -- match_category: 'premium_franchise' | 't20_league' | 'international' | 'domestic'
+    -- match_gender:   'men' | 'women'
+    -- Both are set at ingest and can be bulk-updated via store.reclassify_all().
+    match_category TEXT,
+    match_gender TEXT,
     source_url TEXT,
     ingested_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
@@ -112,6 +118,132 @@ CREATE INDEX IF NOT EXISTS idx_ca_batting_player ON ca_batting(batter_ca_id);
 CREATE INDEX IF NOT EXISTS idx_ca_bowling_player ON ca_bowling(bowler_ca_id);
 CREATE INDEX IF NOT EXISTS idx_ca_matches_date ON ca_matches(match_date);
 """
+
+
+# ---------------------------------------------------------------------------
+# Match classification
+# ---------------------------------------------------------------------------
+# Four categories designed around betting-market reality:
+#
+#   premium_franchise  — city-based franchise leagues with player auctions/drafts,
+#                        international stars, and high betting liquidity
+#                        (IPL, BBL, PSL, CPL, SA20, Hundred, ILT20, MLC, …)
+#
+#   t20_league         — commercially branded domestic T20 competitions where
+#                        traditional county/state teams play in T20 format
+#                        (T20 Blast, Super Smash, Charlotte Edwards Cup, Kia SL, …)
+#                        Betting markets exist but team identities are stable domestic ones.
+#
+#   international      — national representative cricket (bilateral series, World Cups,
+#                        ICC events, multi-nation tournaments)
+#
+#   domestic           — non-commercial provincial/state/club competitions
+#                        (women's county cups, CSA provincial, National T20 Cup, …)
+#
+# Order matters: check most-specific first.
+
+_PREMIUM_FRANCHISE = [
+    "Indian Premier League",
+    "Big Bash League", "KFC Twenty20 Big Bash", "Women's Big Bash League",
+    "Weber Women's Big Bash", "Rebel Women's Big Bash",
+    "Pakistan Super League", "HBL Pakistan Super League",
+    "Caribbean Premier League", "Women's Caribbean Premier League",
+    "SA20",
+    "International League T20", "ILT20",
+    "Major League Cricket",
+    "Global T20 Canada", "GT20 Canada",
+    "Lanka Premier League", "Sri Lanka Premier League",
+    "Afghanistan Premier League",
+    "Bangladesh Premier League",
+    "The Hundred", "Men's Hundred", "Women's Hundred",
+    "T20 Global League",
+    "Mzansi Super League",
+    "Women's Premier League",
+    "T20 Mumbai",
+]
+
+_T20_LEAGUE = [
+    # English T20 Blast (all naming eras: 2003–present)
+    "Friends Provident T20", "Friends Life t20",
+    "NatWest T20 Blast", "Natwest t20 blast",
+    "Vitality Blast", "The Vitality Blast", "Men's Vitality Blast",
+    "The Blast",
+    # NZ domestic T20 (HRV Cup era → Super Smash)
+    "Super Smash", "HRV Cup", "HRV Twenty20",
+    # Women's domestic T20 leagues (county/state-based but commercial T20 product)
+    "Kia Super League",
+    "Charlotte Edwards Cup",
+    "Vitality Women's Twenty20 Cup", "NatWest Women's Twenty20 Cup",
+    "Vitality Women's County T20",
+    "Women's Vitality Blast",
+    # SA domestic T20 leagues
+    "Ram Slam T20", "CSA T20 Challenge", "Hollywoodbets Pro 20",
+    # Other domestic-franchise hybrids
+    "Syed Mushtaq Ali",
+    "Vijay Hazare",  # ODI but just in case
+    "Deodhar Trophy",
+]
+
+_INTERNATIONAL = [
+    "World Twenty20", "T20 World Cup", "ICC T20", "ICC Men's T20", "ICC Women's T20",
+    "World Cup",
+    "Asia Cup", "Nidahas Trophy",
+    " in ",          # "Australia in India", "England in New Zealand" etc.
+    " tour of ",     # "Australia tour of India"
+    "tri-series", "Tri-Nation", "Tri-Series",
+    "African Games", "Asian Games",
+]
+
+
+def classify_competition(competition: str) -> str:
+    """Return one of: 'premium_franchise' | 't20_league' | 'international' | 'domestic'."""
+    if not competition:
+        return "domestic"
+    c = competition.lower()
+    for pat in _PREMIUM_FRANCHISE:
+        if pat.lower() in c:
+            return "premium_franchise"
+    for pat in _T20_LEAGUE:
+        if pat.lower() in c:
+            return "t20_league"
+    for pat in _INTERNATIONAL:
+        if pat.lower() in c:
+            return "international"
+    return "domestic"
+
+
+def infer_gender(competition: str) -> str:
+    """Return 'women' if competition name clearly indicates a women's event, else 'men'."""
+    if not competition:
+        return "men"
+    c = competition.lower()
+    return "women" if "women" in c or "female" in c else "men"
+
+
+def reclassify_all(conn: sqlite3.Connection) -> dict:
+    """Re-classify every row (used after updating the classifier logic). Returns counts."""
+    rows = conn.execute(
+        "SELECT scorecard_id, competition FROM ca_matches"
+    ).fetchall()
+    updates = [
+        (classify_competition(r["competition"] or ""),
+         infer_gender(r["competition"] or ""),
+         r["scorecard_id"])
+        for r in rows
+    ]
+    conn.executemany(
+        "UPDATE ca_matches SET match_category=?, match_gender=? WHERE scorecard_id=?",
+        updates,
+    )
+    conn.commit()
+    counts: dict = {}
+    for row in conn.execute(
+        "SELECT match_category, match_gender, COUNT(*) as n FROM ca_matches "
+        "GROUP BY match_category, match_gender ORDER BY n DESC"
+    ).fetchall():
+        counts[f"{row[0]}/{row[1]}"] = row[2]
+    logger.info("reclassify_all: updated %d rows", len(rows))
+    return counts
 
 
 @contextmanager
@@ -198,13 +330,15 @@ def write_scorecard(conn, sc: CAScorecard,
         INSERT INTO ca_matches (scorecard_id, alt_ids, title, competition, competition_url,
             match_label, match_date, overs_per_innings, balls_per_over, ground_ca_id, ground_name,
             team1_ca_id, team1_name, team2_ca_id, team2_name, toss, result,
-            player_of_match_ca_id, has_ball_by_ball, source_url)
-        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            player_of_match_ca_id, has_ball_by_ball, match_category, match_gender, source_url)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
         """,
         (sid, json.dumps(sc.alt_ids), sc.title, sc.competition, sc.competition_url,
          sc.match_label, sc.match_date, sc.overs_per_innings, sc.balls_per_over,
          sc.ground_ca_id, sc.ground, t1[1], t1[0], t2[1], t2[0], sc.toss, sc.result,
-         sc.player_of_match_ca_id, 1 if deliveries_by_innings else 0, sc.url),
+         sc.player_of_match_ca_id, 1 if deliveries_by_innings else 0,
+         classify_competition(sc.competition or ""),
+         infer_gender(sc.competition or ""), sc.url),
     )
 
     for role, people in sc.officials.items():

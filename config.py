@@ -57,12 +57,18 @@ CRICKETARCHIVE_CONFIG = {
     "auth_base_url": os.getenv("CRICKETARCHIVE_AUTH_BASE_URL", "https://my.cricketarchive.com"),
     "login_url": os.getenv("CRICKETARCHIVE_LOGIN_URL", "https://my.cricketarchive.com/"),
     # Politeness controls (be gentle to avoid the ToS "detrimental to use" catch-all).
-    # NOTE: a 2.5-5s rate triggered intermittent HTTP 403 throttling from CA, so
-    # the defaults are deliberately gentle and the fetcher adds adaptive slowdown
-    # plus exponential backoff/retry on 403/429.
+    # RATE PHILOSOPHY: the per-request delay is the primary politeness mechanism.
+    # The daily cap is NOT the governor — it's just a runaway-bug safety net set
+    # intentionally high. With 3 parallel workers at 6-12 s/request the effective
+    # rate is ~20 req/min (~29,000/day), well within polite territory and proven
+    # stable over multi-day runs at ~0.7% 403 rate.
+    # NOTE: 2.5-5s rate triggered intermittent 403s early on; 6-12s has been
+    # robust across 30k+ requests. The fetcher adds adaptive slowdown on top.
     "min_delay_sec": float(os.getenv("CRICKETARCHIVE_MIN_DELAY", "6.0")),
-    "max_delay_sec": float(os.getenv("CRICKETARCHIVE_MAX_DELAY", "11.0")),
-    "max_requests_per_day": int(os.getenv("CRICKETARCHIVE_MAX_PER_DAY", "2000")),
+    "max_delay_sec": float(os.getenv("CRICKETARCHIVE_MAX_DELAY", "12.0")),
+    # High cap = effectively no daily limit; rely on the delay to govern rate.
+    # Set CRICKETARCHIVE_MAX_PER_DAY in env to a lower value during testing.
+    "max_requests_per_day": int(os.getenv("CRICKETARCHIVE_MAX_PER_DAY", "100000")),
     "request_timeout_sec": float(os.getenv("CRICKETARCHIVE_TIMEOUT", "30")),
     # Throttle-resilience: retry 403/429 with exponential backoff, and adaptively
     # slow the base rate when throttled (decays back down on sustained success).

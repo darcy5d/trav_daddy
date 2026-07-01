@@ -109,3 +109,15 @@ temp/
 
 # Local operational restart notes (machine-specific P&L, dates, env)
 RESTART_SUMMARY.md
+
+# macOS duplicate files (created when copying files with conflicting names)
+* 2.py
+* 2.sh
+* 2.sql
+* 2.html
+* 2.md
+* 2.example
+* 2
+
+# macOS metadata
+.metadata_never_index

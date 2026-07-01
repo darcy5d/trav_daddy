@@ -15,6 +15,7 @@ import hashlib
 import json
 import logging
 import random
+import threading
 import time
 from datetime import date
 from pathlib import Path
@@ -48,7 +49,12 @@ _PAYWALL_MARKERS = (
 
 
 class PoliteFetcher:
-    def __init__(self, session: requests.Session, config: Optional[dict] = None):
+    def __init__(
+        self,
+        session: requests.Session,
+        config: Optional[dict] = None,
+        counter_lock: Optional[threading.Lock] = None,
+    ):
         if config is None:
             from config import CRICKETARCHIVE_CONFIG
             config = CRICKETARCHIVE_CONFIG
@@ -62,6 +68,9 @@ class PoliteFetcher:
         # Adaptive extra delay (seconds) added to the base throttle; grows on a
         # throttle response (403/429), decays on sustained success.
         self._extra_delay = 0.0
+        # When multiple fetcher instances run in parallel threads they share one
+        # counter file — serialise reads/writes with this lock.
+        self._counter_lock = counter_lock or threading.Lock()
         # Look more like a real browser navigation to reduce bot heuristics.
         self.session.headers.setdefault("Referer", str(config.get("base_url", "")) + "/")
 
@@ -96,22 +105,23 @@ class PoliteFetcher:
 
     # -- daily request cap ------------------------------------------------------
     def _check_and_bump_counter(self) -> None:
-        today = date.today().isoformat()
-        data = {"date": today, "count": 0}
-        if self._counter_path.exists():
-            try:
-                data = json.loads(self._counter_path.read_text())
-            except Exception:
-                pass
-        if data.get("date") != today:
+        with self._counter_lock:
+            today = date.today().isoformat()
             data = {"date": today, "count": 0}
-        if data["count"] >= self.cfg["max_requests_per_day"]:
-            raise RuntimeError(
-                f"Daily request cap reached ({self.cfg['max_requests_per_day']}). "
-                "Resume tomorrow or raise CRICKETARCHIVE_MAX_PER_DAY."
-            )
-        data["count"] += 1
-        self._counter_path.write_text(json.dumps(data))
+            if self._counter_path.exists():
+                try:
+                    data = json.loads(self._counter_path.read_text())
+                except Exception:
+                    pass
+            if data.get("date") != today:
+                data = {"date": today, "count": 0}
+            if data["count"] >= self.cfg["max_requests_per_day"]:
+                raise RuntimeError(
+                    f"Daily request cap reached ({self.cfg['max_requests_per_day']}). "
+                    "Resume tomorrow or raise CRICKETARCHIVE_MAX_PER_DAY."
+                )
+            data["count"] += 1
+            self._counter_path.write_text(json.dumps(data))
 
     def _throttle(self) -> None:
         elapsed = time.time() - self._last_fetch_ts
@@ -146,8 +156,21 @@ class PoliteFetcher:
             self._check_and_bump_counter()
             self._throttle()
             logger.info("FETCH %s%s", url, f" (retry {attempt})" if attempt else "")
-            resp = self.session.get(url, timeout=self.cfg["request_timeout_sec"],
-                                    allow_redirects=True)
+            try:
+                resp = self.session.get(url, timeout=self.cfg["request_timeout_sec"],
+                                        allow_redirects=True)
+            except requests.exceptions.ConnectionError as conn_err:
+                # Server closed the connection (RemoteDisconnected / keep-alive reset).
+                # Back off and retry — don't count as a permanent failure.
+                wait = backoff_base * (2 ** attempt) + random.uniform(0, 5)
+                logger.warning("ConnectionError for %s — backoff %.0fs (attempt %d/%d): %s",
+                               url, wait, attempt + 1, max_retries + 1, conn_err)
+                last_exc = conn_err
+                time.sleep(wait)
+                # Re-create the session so we get a fresh TCP connection.
+                self.session = requests.Session()
+                self.session.headers.update({"Referer": str(self.cfg.get("base_url", "")) + "/"})
+                continue
 
             if resp.status_code in (403, 429):
                 # CA throttling: back off, slow the sustained rate, and retry.
