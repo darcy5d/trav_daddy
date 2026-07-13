@@ -30,7 +30,10 @@ Read-mostly: only writes to the append-only mm_market_snapshots table.
 from __future__ import annotations
 
 import argparse
+import json
 import logging
+import os
+import signal
 import sys
 import time
 from datetime import datetime, timezone
@@ -50,10 +53,33 @@ logging.basicConfig(
 logger = logging.getLogger("scan_mm_markets")
 
 DEFAULT_MARKETS = ["moneyline", "top_batter", "most_sixes", "toss_match_double"]
+ROOT = Path(__file__).resolve().parent.parent
+PID_FILE = ROOT / "logs" / "scan_mm_markets.pid"
+STATUS_FILE = ROOT / "logs" / "scan_mm_markets_status.json"
+_RUNNING = True
 
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _write_status(*, db_ok: bool, iter_count: int, last_sweep: Optional[Dict[str, Any]] = None,
+                  error: Optional[str] = None) -> None:
+    """Write a watchdog-readable heartbeat after every sweep attempt."""
+    STATUS_FILE.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "written_at_utc": _now_iso(),
+        "db_ok": db_ok,
+        "iter_count": iter_count,
+        "last_sweep": last_sweep or {},
+        "error": error,
+    }
+    STATUS_FILE.write_text(json.dumps(payload, indent=2, default=str))
+
+
+def _handle_shutdown(_signum, _frame) -> None:
+    global _RUNNING
+    _RUNNING = False
 
 
 def _volume_num(raw_market: Dict[str, Any]) -> Optional[float]:
@@ -266,6 +292,7 @@ def main() -> int:
         help="comma list: moneyline,top_batter,most_sixes,toss_match_double",
     )
     ap.add_argument("--loop", action="store_true", help="poll repeatedly")
+    ap.add_argument("--once", action="store_true", help="run exactly one watchdog-friendly sweep")
     ap.add_argument("--interval-min", type=float, default=15.0)
     ap.add_argument(
         "--duration-min", type=float, default=0.0,
@@ -285,13 +312,15 @@ def main() -> int:
     args = ap.parse_args()
 
     wanted = [m.strip() for m in args.markets.split(",") if m.strip()]
+    if args.loop and args.once:
+        ap.error("--loop and --once are mutually exclusive")
     if not args.dry_run:
         init_mm_snapshots()
 
     client = PolymarketClient()
     probe_rewards = not args.no_rewards_probe
 
-    def _one() -> None:
+    def _one() -> Dict[str, Any]:
         res = scan_once(
             client, wanted, args.hours_ahead, probe_rewards,
             args.limit_fixtures, args.dry_run,
@@ -305,23 +334,49 @@ def main() -> int:
             f"written={res['written']} reward_markets={res['reward_market_hits']} "
             f"avg_spread={spread_str}"
         )
+        return res
 
     if not args.loop:
         _one()
         return 0
 
+    PID_FILE.parent.mkdir(parents=True, exist_ok=True)
+    if PID_FILE.exists():
+        try:
+            previous_pid = int(PID_FILE.read_text().strip())
+            os.kill(previous_pid, 0)
+            raise RuntimeError(f"scanner already running (pid {previous_pid})")
+        except ProcessLookupError:
+            PID_FILE.unlink(missing_ok=True)
+        except ValueError:
+            PID_FILE.unlink(missing_ok=True)
+    PID_FILE.write_text(str(os.getpid()))
+    signal.signal(signal.SIGTERM, _handle_shutdown)
+    signal.signal(signal.SIGINT, _handle_shutdown)
     deadline = (
         time.time() + args.duration_min * 60 if args.duration_min > 0 else None
     )
     interval = max(30.0, args.interval_min * 60)
-    while True:
-        try:
-            _one()
-        except Exception as exc:
-            logger.warning(f"sweep failed (continuing): {exc}")
-        if deadline is not None and time.time() >= deadline:
-            break
-        time.sleep(interval)
+    iteration = 0
+    try:
+        while _RUNNING:
+            iteration += 1
+            result = None
+            error = None
+            try:
+                result = _one()
+                _write_status(db_ok=True, iter_count=iteration, last_sweep=result)
+            except Exception as exc:
+                error = str(exc)
+                logger.warning(f"sweep failed (continuing): {exc}")
+                _write_status(db_ok=False, iter_count=iteration, error=error)
+            if deadline is not None and time.time() >= deadline:
+                break
+            sleep_until = time.monotonic() + interval
+            while _RUNNING and time.monotonic() < sleep_until:
+                time.sleep(min(1.0, sleep_until - time.monotonic()))
+    finally:
+        PID_FILE.unlink(missing_ok=True)
     return 0
 
 

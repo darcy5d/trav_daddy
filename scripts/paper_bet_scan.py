@@ -52,12 +52,28 @@ from src.integrations.polymarket.paper_strategies import (
     kelly_stake_usdc,
     get_strategy_bankroll,
 )
+from src.integrations.odds.polymarket_compare import POLYMARKET_TAKER_FEE
 
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
 )
 logger = logging.getLogger(__name__)
+COMPETITION_GATE_FILE = Path(__file__).resolve().parent.parent / "data/paper_trading/competition_gate.json"
+MODEL_DRIVEN_STRATEGIES = {"v3_marg_3pp", "consensus_5pp", "v2_diag_2pp", "blend_v3_w25"}
+
+
+def _competition_gate_allows(strategy: PaperStrategy, fixture: Dict[str, Any]) -> bool:
+    """Apply the self-updating gate to model strategies only; absent data is permissive."""
+    if strategy.name not in MODEL_DRIVEN_STRATEGIES:
+        return True
+    try:
+        payload = json.loads(COMPETITION_GATE_FILE.read_text())
+        prefix = fixture.get("tournament_prefix") or ""
+        gate = (payload.get("gates") or {}).get(prefix)
+        return gate is None or bool(gate.get("go"))
+    except (OSError, ValueError, TypeError):
+        return True
 
 
 def _strategy_in_window(strategy: PaperStrategy, hours_to_kickoff: float) -> bool:
@@ -197,7 +213,7 @@ def _insert_paper_bet(
             status, mode, bet_kind, strategy_label,
             bankroll_at_proposal,
             phase, xi_signature, toss_winner_team_id, toss_chose_to,
-            model_snapshot
+            model_snapshot, kickoff_at
         ) VALUES (
             ?, ?, ?,
             ?, ?, ?,
@@ -208,7 +224,7 @@ def _insert_paper_bet(
             ?, ?, ?, ?,
             ?,
             ?, ?, ?, ?,
-            ?
+            ?, ?
         )
         """,
         (
@@ -216,12 +232,15 @@ def _insert_paper_bet(
             None, fixture["fixture_key"], "moneyline",
             market.get("market_id"), side_token_id,
             side_label, model_prob, market_price, edge_pp,
-            "BUY", stake_usdc, stake_usdc * 0.02,
+            "BUY", stake_usdc, stake_usdc * POLYMARKET_TAKER_FEE,
             market_price, stake_usdc,
             "filled", "manual", "paper", strategy.name,
             bankroll_at_proposal,
             phase, xi_signature, toss_winner_team_id, toss_chose_to,
             model_snapshot,
+            fixture["scheduled_start_estimate"].isoformat()
+            if hasattr(fixture.get("scheduled_start_estimate"), "isoformat")
+            else fixture.get("scheduled_start_estimate"),
         ),
     )
     return cur.lastrowid
@@ -417,6 +436,12 @@ def scan_and_place_paper_bets(
 
         # For each eligible strategy, decide if and which side to back
         for strat in eligible:
+            if not _competition_gate_allows(strat, fix):
+                summary["bets_skipped"].append({
+                    "strategy": strat.name, "fixture": fix["fixture_key"],
+                    "reason": "competition-quality-gate",
+                })
+                continue
             # Get the model probabilities this strategy uses
             if strat.model_version == "v2":
                 if v2_t1_prob is None:
@@ -438,6 +463,9 @@ def scan_and_place_paper_bets(
                 t1_pred = (v2_t1_prob + v3_t1_prob) / 2.0
             else:
                 continue
+            if strat.blend_weight is not None:
+                weight = max(0.0, min(1.0, strat.blend_weight))
+                t1_pred = weight * t1_pred + (1.0 - weight) * market_price_t1
             t2_pred = 1.0 - t1_pred
 
             # Compute edge per side
@@ -465,6 +493,24 @@ def scan_and_place_paper_bets(
             # (model edge >= min_edge_pp). This is where held-to-settle ROI is
             # deeply negative, so backing the favourite is the tested signal.
             is_fade = bool(getattr(strat, "fade", False))
+            is_fav_band = strat.name == "fav_band_60_85"
+            if is_fav_band:
+                # This is explicitly a price-band experiment, not a positive
+                # model-edge strategy. Back the market favourite only while V3
+                # remains within 5pp of its quoted probability.
+                if market_price_t1 >= market_price_t2:
+                    side_label, side_token_id = t1_outcome.get("label"), t1_outcome.get("token_id")
+                    model_prob, market_price = t1_pred, market_price_t1
+                else:
+                    side_label, side_token_id = t2_outcome.get("label"), t2_outcome.get("token_id")
+                    model_prob, market_price = t2_pred, market_price_t2
+                edge_pp = (model_prob - market_price) * 100
+                if edge_pp < -5.0:
+                    summary["bets_skipped"].append({
+                        "strategy": strat.name, "fixture": fix["fixture_key"],
+                        "reason": f"model disagrees with favourite by {-edge_pp:.1f}pp",
+                    })
+                    continue
             if is_fade:
                 if market_price >= strat.fade_max_model_price:
                     summary["bets_skipped"].append({
@@ -496,7 +542,7 @@ def scan_and_place_paper_bets(
 
             # Apply edge / price gate. For fades the model-conviction gate above
             # already ran; the backed favourite has negative model edge by design.
-            if not is_fade and edge_pp < strat.min_edge_pp:
+            if not is_fade and not is_fav_band and edge_pp < strat.min_edge_pp:
                 summary["bets_skipped"].append({
                     "strategy": strat.name, "fixture": fix["fixture_key"],
                     "reason": f"edge {edge_pp:.1f}pp < {strat.min_edge_pp:.1f}pp",
@@ -526,6 +572,16 @@ def scan_and_place_paper_bets(
                     "side_label": side_label,
                 })
                 continue
+            if (
+                strat.max_model_minus_fill_pp is not None
+                and not is_fade
+                and edge_pp > strat.max_model_minus_fill_pp
+            ):
+                summary["bets_skipped"].append({
+                    "strategy": strat.name, "fixture": fix["fixture_key"],
+                    "reason": f"model/fill gap {edge_pp:.1f}pp exceeds guard",
+                })
+                continue
 
             # Idempotent dedup
             with get_db_connection() as conn:
@@ -545,7 +601,7 @@ def scan_and_place_paper_bets(
                         "reason": "bankroll-exhausted",
                     })
                     continue
-                if is_fade and strat.flat_stake_frac is not None:
+                if (is_fade or is_fav_band) and strat.flat_stake_frac is not None:
                     # Flat-fraction sizing: model Kelly is ~0 on the negative-edge
                     # favourite we back when fading.
                     raw = strat.flat_stake_frac * bankroll_now

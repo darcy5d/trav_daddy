@@ -52,6 +52,9 @@ class PaperStrategy:
 
     # Model
     model_version: str = "v2"          # "v2" or "v3"
+    # When set, anchor the model probability to the quoted market probability:
+    # p_final = blend_weight * p_model + (1 - blend_weight) * p_market.
+    blend_weight: Optional[float] = None
     toss_mode: str = "marginalised"     # "marginalised" or "pinned" (V3 only)
     require_consensus_with: Optional[str] = None  # name of another strategy that must agree
 
@@ -200,6 +203,62 @@ STRATEGIES: List[PaperStrategy] = [
         min_market_price=0.65,
         max_market_price=0.95,
         post_toss_eligible=False,
+        enabled=True,
+    ),
+    PaperStrategy(
+        name="blend_v3_w25",
+        description=(
+            "Paper-only market-anchored V3: 25% model and 75% market, requiring "
+            "a 3pp blended edge after the assumed 3% taker cost."
+        ),
+        enabled_market_types=["moneyline"],
+        model_version="v3",
+        blend_weight=0.25,
+        min_edge_pp=3.0,
+        min_market_price=0.10,
+        max_market_price=0.90,
+        lookback_hours=48.0,
+        lookback_hours_min=0.0,
+        starting_bankroll_usdc=1000.0,
+        kelly_mult=0.5,
+        post_toss_eligible=False,
+        enabled=True,
+    ),
+    PaperStrategy(
+        name="fav_band_60_85",
+        description=(
+            "Paper-only favourite-band test: backs 60–85c favourites unless V3 "
+            "disagrees by more than 5pp; flat 5% bankroll stake."
+        ),
+        enabled_market_types=["moneyline"],
+        model_version="v3",
+        min_edge_pp=0.0,
+        min_market_price=0.60,
+        max_market_price=0.85,
+        flat_stake_frac=0.05,
+        lookback_hours=48.0,
+        lookback_hours_min=0.0,
+        starting_bankroll_usdc=1000.0,
+        post_toss_eligible=False,
+        enabled=True,
+    ),
+    PaperStrategy(
+        name="v3_toss_reprice",
+        description=(
+            "Paper-only post-toss V3 repricing experiment. Requires a 4pp "
+            "pinned-toss edge and a market that has not moved more than 2pp "
+            "from the latest pre-toss order-book snapshot."
+        ),
+        enabled_market_types=["moneyline"],
+        model_version="v3",
+        toss_mode="pinned",
+        min_edge_pp=4.0,
+        min_market_price=0.10,
+        max_market_price=0.90,
+        lookback_hours=48.0,
+        lookback_hours_min=0.0,
+        starting_bankroll_usdc=1000.0,
+        post_toss_eligible=True,
         enabled=True,
     ),
     # Wave 6 W3: fade-the-underdog. Inverts the V3 pick - when the model would

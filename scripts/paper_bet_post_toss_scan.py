@@ -31,8 +31,6 @@ Where:
 from __future__ import annotations
 
 import argparse
-import hashlib
-import json
 import logging
 import sys
 from datetime import datetime, timezone
@@ -47,7 +45,7 @@ from src.integrations.polymarket.upcoming import (
     find_upcoming_cricket_events, attach_db_team_ids,
 )
 from src.integrations.polymarket.paper_inputs import (
-    get_recent_xi, get_default_venue_for_team,
+    compute_xi_signature, get_recent_xi, get_default_venue_for_team,
 )
 from src.integrations.polymarket.paper_strategies import (
     STRATEGIES, kelly_stake_usdc, get_strategy_bankroll,
@@ -75,17 +73,6 @@ def _parse_xi_arg(arg: Optional[str]) -> Optional[List[int]]:
         except ValueError:
             raise SystemExit(f"--xi value must be comma-separated integers, got: {tok!r}")
     return out
-
-
-def _xi_signature(t1_bat: List[int], t1_bowl: List[int],
-                  t2_bat: List[int], t2_bowl: List[int]) -> str:
-    """Stable hash of the four lineup arrays. Stored alongside post-toss
-    bets so we can later detect XI changes between scans."""
-    payload = json.dumps({
-        "t1_bat": t1_bat, "t1_bowl": t1_bowl,
-        "t2_bat": t2_bat, "t2_bowl": t2_bowl,
-    }, sort_keys=True)
-    return hashlib.sha1(payload.encode()).hexdigest()[:12]
 
 
 def _load_fixture(fixture_key: str) -> Optional[Dict[str, Any]]:
@@ -219,7 +206,7 @@ def post_toss_scan(
         summary["error"] = msg
         return summary
 
-    xi_sig = _xi_signature(t1_bat, t1_bowl, t2_bat, t2_bowl)
+    xi_sig = compute_xi_signature(t1_bat, t1_bowl, t2_bat, t2_bowl)
     summary["xi_signature"] = xi_sig
 
     # ---- Run V2 (no toss model) and V3 (PINNED toss) ----
@@ -303,6 +290,9 @@ def post_toss_scan(
             t1_pred = (v2_t1_prob + v3_t1_prob) / 2.0
         else:
             continue
+        if strat.blend_weight is not None:
+            weight = max(0.0, min(1.0, strat.blend_weight))
+            t1_pred = weight * t1_pred + (1.0 - weight) * market_price_t1
         t2_pred = 1.0 - t1_pred
 
         # Decide which side to back
@@ -321,7 +311,7 @@ def post_toss_scan(
             market_price = market_price_t2
             edge_pp = edge_t2
 
-        if edge_pp < strat.min_edge_pp:
+        if edge_pp < strat.min_edge_pp and strat.name != "fav_band_60_85":
             summary["bets_skipped"].append({
                 "strategy": strat.name,
                 "reason": f"edge {edge_pp:.1f}pp < {strat.min_edge_pp:.1f}pp threshold",
@@ -329,21 +319,57 @@ def post_toss_scan(
                 "market_price": market_price,
             })
             continue
+        if strat.name == "fav_band_60_85" and edge_pp < -5.0:
+            summary["bets_skipped"].append({"strategy": strat.name, "reason": "model disagrees with favourite"})
+            continue
         if not (strat.min_market_price <= market_price <= strat.max_market_price):
             summary["bets_skipped"].append({
                 "strategy": strat.name,
                 "reason": f"market_price {market_price:.3f} outside lottery filter",
             })
             continue
+        if strat.min_model_prob is not None and model_prob < strat.min_model_prob:
+            summary["bets_skipped"].append({"strategy": strat.name, "reason": "below-min-model-prob"})
+            continue
+        if strat.max_model_prob is not None and model_prob > strat.max_model_prob:
+            summary["bets_skipped"].append({"strategy": strat.name, "reason": "above-max-model-prob"})
+            continue
+        if (strat.max_model_minus_fill_pp is not None
+                and edge_pp > strat.max_model_minus_fill_pp):
+            summary["bets_skipped"].append({"strategy": strat.name, "reason": "model-fill-gap"})
+            continue
 
         # Place
         with get_db_connection() as conn:
+            if strat.name == "v3_toss_reprice":
+                kickoff = fix.get("scheduled_start_estimate")
+                kickoff_iso = kickoff.isoformat() if hasattr(kickoff, "isoformat") else str(kickoff or "")
+                snapshot = conn.execute(
+                    """SELECT midpoint FROM mm_market_snapshots
+                       WHERE token_id = ? AND ts < ? AND midpoint IS NOT NULL
+                       ORDER BY ts DESC LIMIT 1""",
+                    (side_token_id, kickoff_iso),
+                ).fetchone()
+                if snapshot is None or abs(market_price - float(snapshot["midpoint"])) > 0.02:
+                    summary["bets_skipped"].append({
+                        "strategy": strat.name, "reason": "market-moved-from-pre-toss-snapshot",
+                    })
+                    continue
             if _already_bet(conn, strat.name, fixture_key, ml.get("market_id") or "",
                             side_label or "", phase="post_toss"):
                 summary["bets_skipped"].append({"strategy": strat.name, "reason": "already-placed-this-phase"})
                 continue
             bankroll_now = get_strategy_bankroll(strat.name, conn)
-            stake = kelly_stake_usdc(model_prob, market_price, bankroll_now, strat)
+            if strat.flat_stake_frac is not None:
+                stake = min(
+                    strat.flat_stake_frac * bankroll_now,
+                    strat.max_stake_usdc,
+                    bankroll_now * 0.25,
+                )
+                if stake < strat.min_stake_usdc:
+                    stake = 0.0
+            else:
+                stake = kelly_stake_usdc(model_prob, market_price, bankroll_now, strat)
             if stake <= 0:
                 summary["bets_skipped"].append({"strategy": strat.name, "reason": "kelly-stake-zero"})
                 continue

@@ -337,7 +337,7 @@
         <div class="pt-total-value" id="pt-total-bankroll">--</div>
     </div>
     <div class="pt-total-cell">
-        <div class="pt-total-label">Realised P&amp;L</div>
+        <div class="pt-total-label">Held-to-settlement P&amp;L</div>
         <div class="pt-total-value" id="pt-total-pnl">--</div>
     </div>
     <div class="pt-total-cell">
@@ -359,7 +359,8 @@
                 <th>Model</th>
                 <th>Edge</th>
                 <th style="text-align:right">Bankroll</th>
-                <th style="text-align:right">P&amp;L</th>
+                <th style="text-align:right">Held P&amp;L</th>
+                <th style="text-align:right">Cashout P&amp;L</th>
                 <th style="text-align:right">ROI</th>
                 <th style="text-align:right">Bets</th>
                 <th style="text-align:right">Settled</th>
@@ -367,7 +368,7 @@
                 <th style="text-align:right">Open</th>
             </tr>
         </thead>
-        <tbody id="pt-strat-body"><tr><td colspan="10" style="color:var(--text-muted);text-align:center;padding:1rem">Loading...</td></tr></tbody>
+        <tbody id="pt-strat-body"><tr><td colspan="11" style="color:var(--text-muted);text-align:center;padding:1rem">Loading...</td></tr></tbody>
     </table>
 </div>
 
@@ -535,7 +536,8 @@
                 <td>${s.model_version}</td>
                 <td>${s.min_edge_pp}pp</td>
                 <td style="text-align:right" class="${pnlClass(s.bankroll - s.starting)}">${fmtMoney(s.bankroll)}</td>
-                <td style="text-align:right" class="${pnlClass(s.realised_pnl)}">${fmtMoney(s.realised_pnl)}</td>
+                <td style="text-align:right" class="${pnlClass(s.held_pnl)}">${fmtMoney(s.held_pnl)}</td>
+                <td style="text-align:right" class="${pnlClass(s.cashout_pnl)}">${fmtMoney(s.cashout_pnl)}</td>
                 <td style="text-align:right" class="${pnlClass(s.roi_pct || 0)}">${fmtPct(s.roi_pct, 2)}</td>
                 <td style="text-align:right">${s.n_bets}</td>
                 <td style="text-align:right">${s.n_settled}</td>
@@ -545,8 +547,8 @@
         }
         const totals = d.totals || {};
         document.getElementById('pt-total-bankroll').textContent = fmtMoney(totals.bankroll);
-        document.getElementById('pt-total-pnl').textContent = fmtMoney(totals.realised_pnl);
-        document.getElementById('pt-total-pnl').className = 'pt-total-value ' + (totals.realised_pnl >= 0 ? 'positive' : 'negative');
+        document.getElementById('pt-total-pnl').textContent = fmtMoney(totals.held_pnl);
+        document.getElementById('pt-total-pnl').className = 'pt-total-value ' + (totals.held_pnl >= 0 ? 'positive' : 'negative');
         document.getElementById('pt-total-roi').textContent = fmtPct(totals.roi_pct, 2);
         document.getElementById('pt-total-roi').className = 'pt-total-value ' + (totals.roi_pct >= 0 ? 'positive' : 'negative');
         document.getElementById('pt-total-open').textContent = fmtMoney(totals.open_size);

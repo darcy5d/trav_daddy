@@ -604,6 +604,74 @@ class V2Simulator:
             "team2_batter_ids": list(team2_batter_ids),
         }
 
+    def simulate_from_state(
+        self,
+        n_matches: int,
+        team1_batter_ids: List[int],
+        team1_bowler_ids: List[int],
+        team2_batter_ids: List[int],
+        team2_bowler_ids: List[int],
+        *,
+        innings: int,
+        runs: int,
+        wickets: int,
+        legal_balls: int,
+        target: Optional[int] = None,
+        max_overs: Optional[int] = None,
+        venue_id: Optional[int] = None,
+        team1_id: Optional[int] = None,
+        team2_id: Optional[int] = None,
+        seed: Optional[int] = None,
+    ) -> Dict:
+        """Estimate win probability from a live innings state.
+
+        The existing hierarchical simulator supplies a Monte-Carlo distribution
+        for the remaining scoring rate.  We scale that distribution to the
+        legal balls remaining and anchor it to the observed score/wickets. This
+        keeps live state separate from pre-match simulations while avoiding
+        mutation of the trained per-ball model interface.
+        """
+        if innings not in (1, 2):
+            raise ValueError("innings must be 1 or 2")
+        if runs < 0 or wickets < 0 or legal_balls < 0:
+            raise ValueError("runs, wickets, and legal_balls must be non-negative")
+        max_overs = max_overs or overs_for_format(self.format_type)
+        total_balls = max_overs * 6
+        if legal_balls > total_balls:
+            raise ValueError("legal_balls exceeds match length")
+        if innings == 2 and (target is None or target <= 0):
+            raise ValueError("a positive target is required for a chase")
+
+        baseline = self.simulate_matches(
+            n_matches, team1_batter_ids, team1_bowler_ids,
+            team2_batter_ids, team2_bowler_ids, max_overs=max_overs,
+            venue_id=venue_id, team1_id=team1_id, team2_id=team2_id, seed=seed,
+        )
+        fraction_remaining = max(0.0, (total_balls - legal_balls) / total_balls)
+        wicket_drag = max(0.05, 1.0 - 0.075 * min(wickets, 9))
+        if innings == 2:
+            remaining = baseline["team2_scores"] * fraction_remaining * wicket_drag
+            team1_won = (runs + remaining) < int(target)
+        else:
+            projected_total = runs + baseline["team1_scores"] * fraction_remaining * wicket_drag
+            # Baseline second-innings scores are used as the opponent's
+            # remaining-rate distribution, preserving simulator variance.
+            team1_won = baseline["team2_scores"] < (projected_total + 1)
+        raw = float(team1_won.mean())
+        params = self.calibration.get(self.format_type, self.gender)
+        calibrated = float(calibrate_probabilities(np.array([raw]), params)[0])
+        return {
+            "n_matches": n_matches,
+            "team1_win_prob": calibrated,
+            "team2_win_prob": 1.0 - calibrated,
+            "team1_win_prob_raw": raw,
+            "team2_win_prob_raw": 1.0 - raw,
+            "state": {
+                "innings": innings, "runs": runs, "wickets": wickets,
+                "legal_balls": legal_balls, "target": target,
+            },
+        }
+
     # ------------------------------------------------------------------
     # Inner: hierarchical innings simulation
     # ------------------------------------------------------------------

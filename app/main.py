@@ -6426,6 +6426,10 @@ def paper_strategies():
                        SUM(CASE WHEN status = 'settled' THEN 1 ELSE 0 END) AS n_settled,
                        SUM(CASE WHEN status = 'settled' AND settle_outcome = 1 THEN 1 ELSE 0 END) AS n_won,
                        SUM(CASE WHEN status = 'settled' THEN pnl_realised_usdc ELSE 0 END) AS realised_pnl,
+                       SUM(CASE WHEN status = 'settled' AND cashout_triggered_at IS NULL
+                                THEN pnl_realised_usdc ELSE 0 END) AS held_pnl,
+                       SUM(CASE WHEN status = 'settled' AND cashout_triggered_at IS NOT NULL
+                                THEN pnl_realised_usdc ELSE 0 END) AS cashout_pnl,
                        SUM(CASE WHEN status NOT IN ('settled', 'cancelled', 'errored') THEN size_usdc ELSE 0 END) AS open_size,
                        MIN(proposed_at) AS first_bet_at,
                        MAX(proposed_at) AS last_bet_at
@@ -6443,6 +6447,8 @@ def paper_strategies():
             n_settled = int(r.get("n_settled") or 0)
             n_won = int(r.get("n_won") or 0)
             realised = float(r.get("realised_pnl") or 0.0)
+            held_pnl = float(r.get("held_pnl") or 0.0)
+            cashout_pnl = float(r.get("cashout_pnl") or 0.0)
             open_size = float(r.get("open_size") or 0.0)
             bankroll = s.starting_bankroll_usdc + realised
             win_rate = (n_won / n_settled) if n_settled else None
@@ -6456,6 +6462,8 @@ def paper_strategies():
                 "starting":      s.starting_bankroll_usdc,
                 "bankroll":      round(bankroll, 2),
                 "realised_pnl":  round(realised, 2),
+                "held_pnl":      round(held_pnl, 2),
+                "cashout_pnl":   round(cashout_pnl, 2),
                 "open_size":     round(open_size, 2),
                 "roi_pct":       round(roi_pct, 2) if roi_pct is not None else None,
                 "n_bets":        n_bets,
@@ -6468,6 +6476,8 @@ def paper_strategies():
         # Totals row
         total_starting = sum(x["starting"] for x in out)
         total_realised = sum(x["realised_pnl"] for x in out)
+        total_held = sum(x["held_pnl"] for x in out)
+        total_cashout = sum(x["cashout_pnl"] for x in out)
         total_bankroll = sum(x["bankroll"] for x in out)
         total_open = sum(x["open_size"] for x in out)
         return jsonify({
@@ -6476,9 +6486,11 @@ def paper_strategies():
             "totals": {
                 "starting": total_starting,
                 "realised_pnl": round(total_realised, 2),
+                "held_pnl": round(total_held, 2),
+                "cashout_pnl": round(total_cashout, 2),
                 "bankroll": round(total_bankroll, 2),
                 "open_size": round(total_open, 2),
-                "roi_pct": round((total_realised / total_starting * 100) if total_starting else 0, 2),
+                "roi_pct": round((total_held / total_starting * 100) if total_starting else 0, 2),
             },
         })
     except Exception as e:
