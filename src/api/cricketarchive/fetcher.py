@@ -73,6 +73,10 @@ class PoliteFetcher:
         self._counter_lock = counter_lock or threading.Lock()
         # Look more like a real browser navigation to reduce bot heuristics.
         self.session.headers.setdefault("Referer", str(config.get("base_url", "")) + "/")
+        # Explicitly disable all proxies — we never want traffic routed through
+        # a local sandbox proxy (e.g. Cursor's 127.0.0.1:50981) even if environment
+        # variables or system proxy settings happen to point at one.
+        self.session.proxies.update({"http": "", "https": ""})
 
     # -- robots -----------------------------------------------------------------
     def _robots_for(self, url: str) -> RobotFileParser:
@@ -170,6 +174,7 @@ class PoliteFetcher:
                 # Re-create the session so we get a fresh TCP connection.
                 self.session = requests.Session()
                 self.session.headers.update({"Referer": str(self.cfg.get("base_url", "")) + "/"})
+                self.session.proxies.update({"http": "", "https": ""})
                 continue
 
             if resp.status_code in (403, 429):

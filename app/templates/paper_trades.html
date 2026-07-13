@@ -614,6 +614,10 @@
         const t2 = parts[2] ? parts[2].toUpperCase() : '?';
         return `${t1} vs ${t2}`;
     }
+    function fixtureDisplayName(betsOrBet, fixtureKey) {
+        const sample = Array.isArray(betsOrBet) ? (betsOrBet[0] || {}) : (betsOrBet || {});
+        return sample.fixture_display || fixturePrettyName(fixtureKey || sample.fixture_key);
+    }
     function tournamentPrefixLabel(fixture_key) {
         const prefix = (fixture_key || '').split('-')[0] || '';
         const map = {
@@ -760,7 +764,7 @@
                     <span class="pt-card-chevron">\u25B6</span>
                     <div class="pt-card-title">
                         <div class="pt-card-title-main">
-                            ${fixturePrettyName(fx.key)}
+                            ${fixtureDisplayName(fx.bets, fx.key)}
                             <span class="pt-ko-badge ${ko.cls}">${ko.label}</span>
                             <span style="color:var(--text-muted);font-size:0.7rem;font-weight:400">${tournamentPrefixLabel(fx.key)}</span>
                         </div>
@@ -887,7 +891,7 @@
                 fxRow.innerHTML = `
                     <span class="pt-card-chevron">\u25B6</span>
                     <div class="pt-fixture-row-head">
-                        <span class="pt-fixture-name">${fixturePrettyName(fx.fk)}</span>
+                        <span class="pt-fixture-name">${fixtureDisplayName(fx.bets, fx.fk)}</span>
                         <span class="pt-fixture-tag">${tournamentPrefixLabel(fx.fk)}</span>
                     </div>
                     <div class="pt-fixture-meta">

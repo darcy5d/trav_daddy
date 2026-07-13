@@ -200,6 +200,23 @@ def has_active_model(gender: str, format_type: str) -> bool:
 # Web Routes
 # ============================================================================
 
+@app.route('/healthz', methods=['GET'])
+def healthz():
+    """Lightweight DB-health probe for the watchdog.
+
+    Runs only a trivial in-process query (no CLOB / external calls) so it stays
+    sub-second and reflects THIS Flask process's ability to reach SQLite. A
+    process-level SQLite wedge (see scripts/watchdog_flask.sh) surfaces here as
+    a 503 even though a fresh external connection would succeed.
+    """
+    try:
+        with get_db_connection() as conn:
+            conn.execute("SELECT 1")
+        return jsonify({"db_ok": True}), 200
+    except Exception as e:
+        return jsonify({"db_ok": False, "error": str(e)}), 503
+
+
 @app.route('/')
 def index():
     """Home page with quick stats."""
@@ -5785,6 +5802,27 @@ def _enrich_betting_bets(conn, bets: List[Dict[str, Any]]) -> None:
     _enrich_bets_with_sizing_context(bets)
 
 
+def _enrich_paper_bets(conn, bets: List[Dict[str, Any]]) -> None:
+    """Attach human-readable fixture team names to paper bet rows in-place.
+
+    Mirrors the display-name part of _enrich_betting_bets but skips live-only
+    sizing/TWAP context so paper strategies aren't mixed with real-bankroll logic.
+    """
+    from src.integrations.polymarket.bet_display_enrichment import (
+        get_gamma_market_cached,
+        prefetch_gamma_markets,
+    )
+
+    market_ids = _gamma_market_ids_for_enrichment(bets)
+    prefetch_gamma_markets(market_ids)
+
+    gamma_by_market: Dict[str, Any] = {}
+    for mid in market_ids:
+        gamma_by_market[mid] = get_gamma_market_cached(mid)
+
+    _enrich_bets_with_fixture_meta(bets, gamma_by_market)
+
+
 @app.route('/api/betting/bets', methods=['GET'])
 def betting_bets():
     """Wave 5.8.3: Live bets (card UI) — mirrors /api/paper/bets for real bets.
@@ -6485,6 +6523,7 @@ def paper_bets():
             cur = conn.cursor()
             cur.execute(sql, params)
             bets = [dict(r) for r in cur.fetchall()]
+            _enrich_paper_bets(conn, bets)
         return jsonify({"success": True, "bets": bets, "n": len(bets)})
     except Exception as e:
         logger.error(f"Error in /api/paper/bets: {e}")

@@ -42,9 +42,28 @@ logger = logging.getLogger("ca_all_t20")
 SEASON_BASE = "https://cricketarchive.com/Archive/Seasons/"
 
 FULL_MEMBERS = ["IND", "AUS", "ENG", "RSA", "PAK", "NZ", "SL", "WI", "BAN", "ZIM", "IRE", "AFG"]
-MAJOR_ASSOCIATES = ["NED", "SCO", "UAE", "NEP", "USA", "CAN", "HK", "OMA", "PNG", "NAM",
-                    "KEN", "JER", "GUE", "BER", "ITA", "GER", "DEN", "SGP", "MAS", "THA",
-                    "QAT", "KSA", "BHR", "KWT", "KUW", "KOR", "JPN", "KEN", "KEN"]
+
+# All ICC T20I-affiliated associate nations (comprehensive list, 404s are cheap)
+MAJOR_ASSOCIATES = [
+    # Already covered in prior run (will be skipped via progress file)
+    "NED", "SCO", "UAE", "NEP", "USA", "CAN", "HK", "OMA", "PNG", "NAM",
+    "KEN", "JER", "GUE", "BER", "ITA", "GER", "DEN", "SGP", "MAS", "THA",
+    "QAT", "KSA", "BHR", "KWT", "KOR", "JPN",
+    # Africa
+    "UGA", "TAN", "NIG", "GHA", "RWA", "BOT", "ZAM", "SLE", "CMR",
+    "ETH", "LES", "MAU", "MOZ", "SWZ", "MLW", "CIV", "SEN",
+    # Americas
+    "BAH", "CAY", "BLZ", "ARG", "BRA", "CHI", "PAN", "MEX", "TCI",
+    "SUR", "CRC", "VIN", "LCA", "GRN", "ANT", "DOM",
+    # Asia
+    "MLD", "BHU", "MYA", "PHI", "KUW",
+    # East Asia-Pacific
+    "SAM", "VAN", "FIJ", "COK", "TON", "INS", "VAT",
+    # Europe
+    "NOR", "AUT", "FRA", "SPN", "ROM", "BEL", "GIB", "IOM",
+    "CZE", "SWE", "FIN", "POR", "GRC", "CYP", "MLT", "TUR",
+    "EST", "LAT", "LTU", "HUN", "POL", "SVK", "CRO", "BUL", "SRB",
+]
 # de-dup while preserving order
 def _uniq(seq):
     seen = set(); out = []
@@ -75,6 +94,8 @@ def main() -> int:
     ap.add_argument("--end", type=int, default=2026)
     ap.add_argument("--include-women", action="store_true")
     ap.add_argument("--out", default=str(Path(CRICKETARCHIVE_CONFIG["cache_dir"]) / "all_t20_events.txt"))
+    ap.add_argument("--progress", default=None,
+                    help="Path to progress JSON (default: <out>.progress.json)")
     args = ap.parse_args()
 
     if args.countries == "full":
@@ -84,9 +105,11 @@ def main() -> int:
     else:
         countries = [c.strip().upper() for c in args.countries.split(",") if c.strip()]
 
-    cache_dir = Path(CRICKETARCHIVE_CONFIG["cache_dir"])
-    progress_path = cache_dir / "all_t20_discovery_progress.json"
     out_path = Path(args.out)
+    if args.progress:
+        progress_path = Path(args.progress)
+    else:
+        progress_path = out_path.with_suffix(".progress.json")
     progress = json.loads(progress_path.read_text()) if progress_path.exists() else {"done": [], "counts": {}}
     done = set(tuple(x) for x in progress["done"])
     scorecards = set()

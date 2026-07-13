@@ -7,7 +7,9 @@
 # after a crash/reboot until manually restarted.
 #
 # Decision order (conservative — a duplicate Flask just fails to bind 5001):
-#   1. If something is already serving on the port -> exit (Flask is fine).
+#   1. If the port is served AND /healthz reports the DB is reachable -> exit.
+#      If the port is served but the DB is wedged (disk I/O error), kill it and
+#      restart (subject to an anti-flap cooldown).
 #   2. Otherwise, start a fresh Flask process.
 #
 # Usage:
@@ -21,6 +23,12 @@ LOG="${REPO_ROOT}/logs/flask.log"
 WATCHDOG_LOG="${REPO_ROOT}/logs/watchdog_flask.log"
 PID_FILE="${REPO_ROOT}/logs/flask.pid"
 PORT="${FLASK_PORT:-5001}"
+
+# DB-health hardening (Wave 6): detect a wedged-but-alive Flask (process-level
+# SQLite "disk I/O error" state) and restart it, not just a dead port.
+HEALTH_MARKER="${REPO_ROOT}/logs/flask_health_restart.ts"
+HEALTH_LOG_WINDOW_MIN=4          # log-scan lookback for backup signal
+HEALTH_COOLDOWN_MIN=10           # anti-flap: min gap between health restarts
 
 mkdir -p "${REPO_ROOT}/logs"
 
@@ -42,11 +50,112 @@ sys.exit(0 if s.connect_ex(("127.0.0.1", port)) == 0 else 1)
 PYEOF
 }
 
-# 1. If the port is already served, Flask (or something) is up — leave it.
+db_probe() {
+    # Probe the in-process DB health endpoint. Prints exactly one token:
+    #   healthy     -> /healthz answered db_ok=true (HTTP 200)
+    #   unhealthy   -> /healthz answered db_ok=false (HTTP 503) — DB is wedged
+    #   unreachable -> no/garbled response (still booting, hung, or too slow)
+    "${PYTHON}" - "${PORT}" <<'PYEOF' 2>/dev/null
+import sys, json, urllib.request, urllib.error
+port = sys.argv[1]
+url = f"http://127.0.0.1:{port}/healthz"
+try:
+    with urllib.request.urlopen(url, timeout=5) as r:
+        data = json.loads(r.read().decode("utf-8", "replace"))
+        print("healthy" if data.get("db_ok") else "unhealthy")
+except urllib.error.HTTPError as e:
+    try:
+        data = json.loads(e.read().decode("utf-8", "replace"))
+        print("unhealthy" if data.get("db_ok") is False else "unreachable")
+    except Exception:
+        print("unhealthy" if e.code == 503 else "unreachable")
+except Exception:
+    print("unreachable")
+PYEOF
+}
+
+recent_db_errors() {
+    # Returns 0 if a 'disk I/O error' line appears in LOG within the last
+    # HEALTH_LOG_WINDOW_MIN minutes. Time-bounded so old, already-recovered
+    # errors near the tail don't trigger a restart. Log timestamps are local
+    # ("%Y-%m-%d %H:%M:%S"), matched against local now().
+    "${PYTHON}" - "${LOG}" "${HEALTH_LOG_WINDOW_MIN}" <<'PYEOF' >/dev/null 2>&1
+import sys, os, re, datetime
+path, minutes = sys.argv[1], int(sys.argv[2])
+if not os.path.exists(path):
+    sys.exit(1)
+cutoff = datetime.datetime.now() - datetime.timedelta(minutes=minutes)
+with open(path, "rb") as f:
+    try:
+        f.seek(-2_000_000, os.SEEK_END)   # only scan the last ~2MB
+    except OSError:
+        f.seek(0)
+    lines = f.read().decode("utf-8", "replace").splitlines()
+pat = re.compile(r"^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})")
+for ln in lines:
+    if "disk I/O error" not in ln:
+        continue
+    m = pat.match(ln)
+    if not m:
+        continue
+    try:
+        t = datetime.datetime.strptime(m.group(1), "%Y-%m-%d %H:%M:%S")
+    except ValueError:
+        continue
+    if t >= cutoff:
+        sys.exit(0)
+sys.exit(1)
+PYEOF
+}
+
+health_restart_allowed() {
+    # Anti-flap: allow a health-triggered restart only if the last one was more
+    # than HEALTH_COOLDOWN_MIN ago (so a genuinely broken DB doesn't thrash).
+    [[ -f "${HEALTH_MARKER}" ]] || return 0
+    local last now
+    last="$(cat "${HEALTH_MARKER}" 2>/dev/null || echo 0)"
+    now="$(date +%s)"
+    [[ "${last}" =~ ^[0-9]+$ ]] || return 0
+    (( now - last >= HEALTH_COOLDOWN_MIN * 60 ))
+}
+
+mark_health_restart() { date +%s > "${HEALTH_MARKER}"; }
+
+# 1. If the port is already served, Flask (or something) is up. Confirm it can
+#    actually reach the DB before declaring it healthy; a wedged Flask keeps the
+#    port open but every request 500s with "disk I/O error".
 if port_alive; then
     NEW_PID="$(pgrep -f 'flask --app app.main' 2>/dev/null | head -1 || true)"
     [[ -n "${NEW_PID}" ]] && echo "${NEW_PID}" > "${PID_FILE}"
-    exit 0
+
+    PROBE="$(db_probe)"
+    UNHEALTHY=0
+    REASON=""
+    if [[ "${PROBE}" == "unhealthy" ]]; then
+        UNHEALTHY=1
+        REASON="/healthz reported db_ok=false"
+    elif [[ "${PROBE}" != "healthy" ]] && recent_db_errors; then
+        # Probe unreachable/too-slow AND the log shows fresh disk I/O errors:
+        # treat as wedged. A bare unreachable with no recent errors is left
+        # alone (likely still importing TF on a cold start).
+        UNHEALTHY=1
+        REASON="/healthz unreachable + recent disk I/O errors in flask.log"
+    fi
+
+    if [[ "${UNHEALTHY}" -eq 0 ]]; then
+        exit 0
+    fi
+
+    if ! health_restart_allowed; then
+        echo "[$(ts)] WARN flask DB-unhealthy (${REASON}) but within ${HEALTH_COOLDOWN_MIN}m anti-flap window; not restarting" >> "${WATCHDOG_LOG}"
+        exit 0
+    fi
+
+    echo "[$(ts)] flask DB-unhealthy (${REASON}); killing for restart" >> "${WATCHDOG_LOG}"
+    mark_health_restart
+    pkill -f 'flask --app app.main' 2>/dev/null || true
+    sleep 3
+    # Fall through to the start-fresh block below.
 fi
 
 # 2. Nothing listening: start a fresh Flask. Clean stale PID file first.

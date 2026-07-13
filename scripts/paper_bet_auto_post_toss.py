@@ -1460,6 +1460,13 @@ def main() -> int:
     n_spawns_total = 0
     n_live_spawns_total = 0
 
+    # DB-health heartbeat state (surfaced in the status file for the watchdog).
+    # db_last_ok_utc only advances on a successful in-process probe, so the
+    # watchdog can tell a wedged-but-alive daemon from a healthy one.
+    db_ok = True
+    db_error: Optional[str] = None
+    db_last_ok_utc: Optional[str] = None
+
     logger.info(
         f"Auto-toss daemon starting (poll_interval={args.poll_interval}s, "
         f"window=[T-{args.lookback_min}m, T+{args.lookahead_min}m], "
@@ -1470,6 +1477,22 @@ def main() -> int:
         while not _SHUTDOWN:
             iter_started = time.time()
             n_iters += 1
+
+            # In-process DB-health probe. A process-level SQLite wedge shows up
+            # here (fresh get_db_connection() inside THIS process fails) even
+            # though an external probe would succeed; the watchdog restarts us
+            # when db_ok flips false. Cheap: a single SELECT 1.
+            try:
+                with get_db_connection() as _hc:
+                    _hc.execute("SELECT 1")
+                db_ok = True
+                db_error = None
+                db_last_ok_utc = datetime.now(timezone.utc).isoformat()
+            except Exception as _db_exc:
+                db_ok = False
+                db_error = str(_db_exc)
+                logger.error(f"DB health probe failed: {_db_exc}")
+
             try:
                 iter_summary = run_single_iteration(
                     handled_set, args.lookback_min, args.lookahead_min,
@@ -1512,6 +1535,9 @@ def main() -> int:
             _write_status({
                 "pid": os.getpid(),
                 "running": True,
+                "db_ok": db_ok,
+                "db_error": db_error,
+                "db_last_ok_utc": db_last_ok_utc,
                 "iter_count": n_iters,
                 "spawns_total": n_spawns_total,
                 "spawns_this_iter": spawns_this_iter,
@@ -1550,6 +1576,9 @@ def main() -> int:
         _write_status({
             "pid": os.getpid(),
             "running": False,
+            "db_ok": db_ok,
+            "db_error": db_error,
+            "db_last_ok_utc": db_last_ok_utc,
             "iter_count": n_iters,
             "spawns_total": n_spawns_total,
             "live_spawns_total": n_live_spawns_total,
