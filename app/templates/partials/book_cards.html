@@ -1,0 +1,35 @@
+{# Open or settled card section. The page fills the list. No fetch. #}
+<style>
+    .book-section { margin-top: 1.5rem; }
+    .book-section h2 {
+        font-size: 1.1rem; margin: 0 0 0.5rem 0; font-weight: 700;
+        background: var(--gradient-1);
+        -webkit-background-clip: text; -webkit-text-fill-color: transparent; background-clip: text;
+        display: inline-block;
+    }
+    .book-section-header {
+        display: flex; justify-content: space-between; align-items: flex-start;
+        gap: 0.6rem; flex-wrap: wrap; margin-bottom: 0.6rem;
+    }
+    .book-section-subtitle { color: var(--text-muted); font-weight: 400; font-size: 0.85rem; }
+    .book-section-header h2 .book-section-subtitle {
+        background: none; -webkit-text-fill-color: var(--text-muted); color: var(--text-muted); font-weight: 400;
+    }
+    .book-section-controls { display: flex; gap: 0.5rem; align-items: center; flex-wrap: wrap; }
+    .book-card-list { display: flex; flex-direction: column; gap: 0.5rem; }
+    .book-empty, .pt-empty, .lb-empty {
+        padding: 1.5rem; text-align: center; color: var(--text-muted); font-size: 0.85rem;
+        background: var(--bg-secondary); border: 1px solid var(--border-color); border-radius: 12px;
+    }
+</style>
+<section class="book-section" id="{{ book_cards.section_id }}">
+    <div class="book-section-header">
+        <h2>{{ book_cards.title }}{% if book_cards.note %} <span class="book-section-subtitle">{{ book_cards.note }}</span>{% endif %} <span class="book-section-subtitle" id="{{ book_cards.count_id }}"></span></h2>
+        <div class="book-section-controls">
+            <div class="book-filter-chips {{ book_cards.chips_class }}" id="{{ book_cards.chips_id }}"></div>
+        </div>
+    </div>
+    <div id="{{ book_cards.body_id }}" class="book-card-list {{ book_cards.body_class }}">
+        <div class="book-empty">{{ book_cards.empty }}</div>
+    </div>
+</section>

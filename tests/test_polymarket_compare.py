@@ -79,6 +79,27 @@ class TestPolymarketComparisonService(unittest.TestCase):
         self.assertAlmostEqual(payload["probabilities"]["market_implied_pct"], 54.0)
         self.assertAlmostEqual(payload["probabilities"]["edge_pct_points"], 7.2)
 
+    def test_compare_fixture_ignores_side_markets_of_same_event(self):
+        now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
+        common = {"startDate": "2026-11-09T01:00:00Z", "outcomes": '["New Zealand", "India"]'}
+        toss = {**common, "id": "toss", "sportsMarketType": "cricket_toss_winner",
+                "question": "India Tour of New Zealand ODIs: New Zealand vs India - Who wins the toss?",
+                "slug": "crint-nzl-ind-2026-11-09-toss-winner", "clobTokenIds": ["toss-nz", "toss-ind"]}
+        ml = {**common, "id": "ml", "sportsMarketType": "moneyline",
+              "question": "India Tour of New Zealand ODIs: New Zealand vs India",
+              "slug": "crint-nzl-ind-2026-11-09", "clobTokenIds": ["ml-nz", "ml-ind"]}
+        book = {"bids": [{"price": "0.41"}], "asks": [{"price": "0.43"}], "timestamp": now_ms}
+        service = PolymarketComparisonService(
+            client=_FakePolymarketClient([toss, ml], {t: book for t in ("toss-nz", "ml-nz")}),
+            market_cache_ttl_sec=999,
+        )
+        payload = service.compare_fixture(
+            team1="New Zealand", team2="India", series="ODI",
+            start_utc="2026-11-09T01:00:00Z", model_team1_win_pct=55.0, model_team2_win_pct=45.0,
+        )
+        self.assertEqual(payload["linked_market"]["market_id"], "ml")
+        self.assertEqual(payload["selection"]["token_id"], "ml-nz")
+
     def test_compare_fixture_no_match(self):
         unrelated_market = {
             "id": "m2",

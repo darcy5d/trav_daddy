@@ -344,6 +344,27 @@ clone for `<REPO_ROOT>` and your virtualenv dir (`venv311` on Apple Silicon, or
     <VENV>/bin/python scripts/inplay_cashout_scan.py >> logs/cashout_scan.log 2>&1
 ```
 
+### Winner redemption
+
+Resolved winning tokens are not spendable until redeemed into pUSD. The
+redeemer only submits positions that Polymarket's Data API marks
+`redeemable`; it never trades, sells, or claims merely pending positions.
+
+First review the plan:
+
+```bash
+"$VENV"/bin/python scripts/redeem_winners.py
+```
+
+After installing the Node dependencies (`npm install`) and setting
+`POLYMARKET_RELAYER_URL`, enable `BETTING_AUTO_REDEEM_ENABLED=1`, then schedule
+the independent gasless worker:
+
+```cron
+*/5 * * * * cd <REPO_ROOT> && \
+    <VENV>/bin/python scripts/redeem_winners.py --apply >> logs/redeem_winners.log 2>&1
+```
+
 **Backtesting the cashout strategy:**
 
 ```bash

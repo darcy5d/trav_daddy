@@ -82,13 +82,41 @@ GENERIC_TEAM_WORDS = {
     "club",
 }
 
+# Substring -> Polymarket slug prefix. Checked in insertion order, so more
+# specific keys (women's variants) must come before their men's substrings.
 SERIES_PREFIX_ALIASES = {
+    "wpl": "crwpl20",
+    "women s premier league": "crwpl20",
     "ipl": "cricipl",
     "indian premier league": "cricipl",
     "psl": "cricpsl",
     "pakistan super league": "cricpsl",
-    "international": "cricint",
-    "t20 international": "cricint",
+    "wbbl": "cricwbbl",
+    "women s big bash": "cricwbbl",
+    "bbl": "cricbbl",
+    "big bash": "cricbbl",
+    "caribbean premier league": "criccpl",
+    "major league cricket": "cricmlc",
+    "the hundred": "crichundred",
+    "t20 blast": "crict20blast",
+    "international league t20": "cricilt20",
+    "ilt20": "cricilt20",
+    "international": "crint",
+    "t20i": "crint",
+    "odi": "crint",
+}
+
+# Polymarket's international slug tokens (ISO-3166 alpha-3 style); first-3-
+# letters of the name is wrong for most of these.
+POLYMARKET_TEAM_CODES = {
+    "afghanistan": "afg", "australia": "aus", "bangladesh": "bgd", "canada": "can",
+    "england": "gbr", "hong kong": "hon", "india": "ind", "ireland": "irl",
+    "japan": "jpn", "kenya": "ken", "malaysia": "mys", "namibia": "nam",
+    "nepal": "npl", "netherlands": "nld", "new zealand": "nzl", "oman": "omn",
+    "pakistan": "pak", "papua new guinea": "png", "scotland": "sco",
+    "south africa": "zaf", "sri lanka": "lka", "thailand": "tha", "uganda": "uga",
+    "united arab emirates": "are", "united states of america": "usa",
+    "west indies": "wst", "zimbabwe": "zwe",
 }
 
 
@@ -203,10 +231,12 @@ def _fuzzy_score(team_name: str, text: str) -> float:
 
 
 def _extract_market_start(market: Dict[str, Any]) -> Optional[datetime]:
+    # Gamma's `startDate` is when the market was listed, not kickoff.
     candidates = [
-        market.get("startDate"),
         market.get("gameStartTime"),
+        market.get("eventStartTime"),
         market.get("startTime"),
+        market.get("startDate"),
         market.get("endDate"),
     ]
     for value in candidates:
@@ -220,6 +250,10 @@ def _team_code(team_name: str) -> str:
     tokens = _tokenize(team_name)
     if not tokens:
         return ""
+    base = " ".join(t for t in tokens if t not in ("women", "w"))
+    if base in POLYMARKET_TEAM_CODES:
+        suffix = "w" if len(tokens) > len(base.split()) else ""
+        return POLYMARKET_TEAM_CODES[base] + suffix
     meaningful = [tok for tok in tokens if tok not in GENERIC_TEAM_WORDS]
     source = meaningful[0] if meaningful else tokens[0]
     return source[:3]
@@ -421,9 +455,37 @@ class PolymarketComparisonService:
             if age <= self.market_cache_ttl_sec and self._cached_markets:
                 return self._cached_markets
 
-        markets = self.client.get_markets(limit=500, active=True, closed=False)
-        if not isinstance(markets, list):
-            markets = []
+        # Gamma caps `limit` at 100 and the generic /markets feed has no cricket
+        # in its first page, so build the pool from open cricket events and tag
+        # each market with its parent event (used by find_event_markets).
+        markets: List[Dict[str, Any]] = []
+        for offset in range(0, 2000, 100):
+            try:
+                events = self.client.get_events(
+                    limit=100, offset=offset, tag_slug="cricket", closed=False, active=True,
+                )
+            except Exception:
+                break
+            if not isinstance(events, list) or not events:
+                break
+            for ev in events:
+                for m in ev.get("markets") or []:
+                    if isinstance(m, dict):
+                        markets.append({
+                            **m,
+                            "eventId": str(ev.get("id") or ""),
+                            "eventSlug": ev.get("slug"),
+                            "eventTitle": ev.get("title"),
+                            "eventStartTime": ev.get("startTime"),
+                        })
+            if len(events) < 100:
+                break
+        if not markets:
+            try:
+                fallback = self.client.get_markets(limit=100, active=True, closed=False)
+            except Exception:
+                fallback = []
+            markets = fallback if isinstance(fallback, list) else []
         self._cached_markets = markets
         self._cached_at = now
         return markets
@@ -492,7 +554,13 @@ class PolymarketComparisonService:
         if model_team1_win_pct is not None and model_team2_win_pct is not None:
             model_side_win_pct = model_team1_win_pct if normalize_team_name(selected_side) == normalize_team_name(team1) else model_team2_win_pct
 
-        markets = self._get_markets_cached()
+        # The cricket pool holds every market of each event (toss, top batter,
+        # ...); those share the team names, so link the head-to-head view to
+        # match moneylines only.
+        markets = [
+            m for m in self._get_markets_cached()
+            if self._is_match_moneyline_candidate(m)
+        ]
         linked_market, confidence = select_best_market(
             markets=markets,
             team1=team1,
@@ -502,7 +570,10 @@ class PolymarketComparisonService:
         )
         fallback_used = False
         if linked_market is None:
-            slug_markets = self._get_markets_by_slug_candidates(team1, team2, start_utc, series)
+            slug_markets = [
+                m for m in self._get_markets_by_slug_candidates(team1, team2, start_utc, series)
+                if self._is_match_moneyline_candidate(m)
+            ]
             if slug_markets:
                 linked_market, confidence = select_best_market(
                     markets=slug_markets,
@@ -710,6 +781,15 @@ class PolymarketComparisonService:
             unique.append(m)
         return unique
 
+    def _is_match_moneyline_candidate(self, market: Dict[str, Any]) -> bool:
+        """True unless the market is known to be something other than the
+        two-team match moneyline (side markets, Yes/No 3-way legs). Legacy
+        markets without `sportsMarketType` stay eligible when unclassified."""
+        smt = str(market.get("sportsMarketType") or "").strip().lower()
+        if smt:
+            return self._classify_market_type(market) == MARKET_TYPE_MONEYLINE
+        return self._classify_market_type(market) in (None, MARKET_TYPE_MONEYLINE)
+
     def _classify_market_type(self, market: Dict[str, Any]) -> Optional[str]:
         """Classify a Polymarket market into one of the cricket types.
 
@@ -718,7 +798,21 @@ class PolymarketComparisonService:
         a 2-outcome market with non-Yes/No labels is treated as a moneyline
         (this catches the "Team A vs. Team B" Polymarket events that only
         list team names as outcomes without a verb in the title).
+        Gamma's `sportsMarketType`, when present, takes precedence.
         """
+        smt = str(market.get("sportsMarketType") or "").strip().lower()
+        if smt:
+            if smt == "moneyline":
+                outcomes = _coerce_list(market.get("outcomes"))
+                is_yes_no = {normalize_team_name(str(o)) for o in outcomes} == {"yes", "no"}
+                return None if is_yes_no else MARKET_TYPE_MONEYLINE
+            return {
+                "cricket_toss_winner": MARKET_TYPE_TOSS_WINNER,
+                "cricket_completed_match": MARKET_TYPE_COMPLETED,
+                "cricket_team_top_batter": MARKET_TYPE_TOP_BATTER,
+                "cricket_most_sixes": MARKET_TYPE_MOST_SIXES,
+                "cricket_toss_match_double": MARKET_TYPE_TOSS_MATCH_DOUBLE,
+            }.get(smt)
         text_parts = [
             str(market.get("question") or ""),
             str(market.get("title") or ""),

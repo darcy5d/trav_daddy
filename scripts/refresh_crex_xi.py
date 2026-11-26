@@ -47,67 +47,6 @@ from src.integrations.polymarket.paper_inputs import (
 )
 
 
-def _get_team_avg_elo(conn, team_id: int, gender: str) -> float:
-    """Return the team's current T20 ELO as a seed for stub players.
-
-    Falls back to 1500 (league average) if no ELO record exists.
-    """
-    elo_col = f"elo_t20_{gender}"
-    try:
-        cur = conn.cursor()
-        cur.execute(
-            f"SELECT COALESCE(tce.{elo_col}, 1500) "
-            f"FROM team_current_elo tce WHERE tce.team_id = ?",
-            (team_id,),
-        )
-        row = cur.fetchone()
-        return float(row[0]) if row else 1500.0
-    except Exception:
-        return 1500.0
-
-
-def _insert_stub_player(conn, name: str, team_id: int, gender: str) -> Optional[int]:
-    """Insert a stub player seeded at the team's average T20 ELO.
-
-    Returns the new player_id or None on failure.
-    These stubs allow the simulator to run with a full 11 rather than
-    skipping the fixture entirely. The stub ELO is the team average, which
-    is a neutral prior — not pessimistic, not optimistic.
-    """
-    try:
-        cur = conn.cursor()
-        # Fetch team name for country field
-        cur.execute("SELECT name FROM teams WHERE team_id = ?", (team_id,))
-        team_row = cur.fetchone()
-        team_name = team_row["name"] if team_row else None
-
-        elo = _get_team_avg_elo(conn, team_id, gender)
-        elo_bat_col  = f"batting_elo_t20_{gender}"
-        elo_bowl_col = f"bowling_elo_t20_{gender}"
-        elo_ovr_col  = f"overall_elo_t20_{gender}"
-
-        cur.execute(
-            "INSERT INTO players (name, country, is_active) VALUES (?, ?, 1)",
-            (name, team_name),
-        )
-        new_id = cur.lastrowid
-
-        cur.execute(
-            f"INSERT OR IGNORE INTO player_current_elo "
-            f"    (player_id, {elo_bat_col}, {elo_bowl_col}, {elo_ovr_col}) "
-            f"VALUES (?, ?, ?, ?)",
-            (new_id, elo, elo, elo),
-        )
-        conn.commit()
-        logger.info(
-            f"  [STUB] Inserted '{name}' for team {team_name} "
-            f"as player_id={new_id} ELO={elo:.0f}"
-        )
-        return new_id
-    except Exception as exc:
-        logger.warning(f"  [STUB] Failed to insert stub for '{name}': {exc}")
-        return None
-
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
@@ -204,34 +143,14 @@ def refresh_fixture(
             )
             continue
 
-        # Fill any unresolved slots with stubs seeded at team-average ELO.
-        # This lets the sim run with a full 11 rather than skipping the fixture.
-        if n_matched < n_input and not dry_run:
-            matched_set = set(player_ids)
-            # Build name→id map for matched players
-            matched_names = set()
-            cur = conn.cursor()
-            for pid in player_ids:
-                cur.execute("SELECT name FROM players WHERE player_id=?", (pid,))
-                r = cur.fetchone()
-                if r:
-                    matched_names.add(r["name"].lower())
-
-            for unmatched_name in xi_names:
-                if len(player_ids) >= 11:
-                    break
-                if not unmatched_name or unmatched_name.lower() in matched_names:
-                    continue
-                stub_id = _insert_stub_player(conn, unmatched_name, team_id, gender)
-                if stub_id:
-                    player_ids.append(stub_id)
-                    n_matched += 1
-
+        # Unresolved names are left out rather than filled with new stub
+        # players: stubs have no history, and a fresh stub was inserted on
+        # every run. Consumers require 11 mapped ids (check_confirmed_xi).
         if not dry_run:
             _upsert_cache_row(conn, fkey, team_id, player_ids, n_matched, n_input, dry_run)
             logger.info(
                 f"  [{side}] cache updated for {fkey} team {team_id} "
-                f"({n_matched}/{n_input} matched + stubs)"
+                f"({n_matched}/{n_input} matched)"
             )
         else:
             logger.info(

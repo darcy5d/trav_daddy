@@ -1,0 +1,21 @@
+{# Fixtures table shell. Toss submit stays on the page. No scan URL here. #}
+<section class="book-section" id="{{ book_upcoming.section_id }}">
+    <h2>Upcoming Fixtures <span class="book-section-subtitle">{{ book_upcoming.subtitle }}</span></h2>
+    <p class="book-lede">{{ book_upcoming.note }}</p>
+    <table class="book-table" id="{{ book_upcoming.table_id }}">
+        <thead>
+            <tr>
+                <th>Match</th>
+                <th>Format</th>
+                <th id="{{ book_upcoming.kickoff_id }}">Kickoff</th>
+                <th>Market (T1 / T2)</th>
+                <th class="num">{{ book_upcoming.pre_label }}</th>
+                <th class="num">{{ book_upcoming.post_label }}</th>
+                <th></th>
+            </tr>
+        </thead>
+        <tbody id="{{ book_upcoming.body_id }}">
+            <tr><td colspan="7" class="book-muted" style="text-align:center;padding:1rem">Loading...</td></tr>
+        </tbody>
+    </table>
+</section>

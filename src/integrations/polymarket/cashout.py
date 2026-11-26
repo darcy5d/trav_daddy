@@ -51,12 +51,17 @@ from __future__ import annotations
 import json
 import logging
 import sqlite3
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, Optional
 
 from src.integrations.polymarket import PolymarketClient
-from src.integrations.polymarket.sell_execution import marketable_sell
+from src.integrations.polymarket.sell_execution import (
+    _parse_book_bids,
+    _vwap_for_shares,
+    marketable_sell,
+    sell_execution_config,
+)
 from src.integrations.odds.polymarket_compare import POLYMARKET_TAKER_FEE
 
 logger = logging.getLogger(__name__)
@@ -67,6 +72,9 @@ logger = logging.getLogger(__name__)
 # risk_gate._exit_health_block(). Mirrors the daily_data_refresh status file.
 CASHOUT_HEARTBEAT_FILE = (
     Path(__file__).resolve().parents[3] / "data" / "paper_trading" / "cashout_scan_status.json"
+)
+LIVE_FAIR_VALUES_FILE = (
+    Path(__file__).resolve().parents[3] / "data" / "paper_trading" / "live_fair_values.json"
 )
 
 
@@ -80,6 +88,22 @@ def read_cashout_heartbeat() -> Optional[Dict[str, Any]]:
         with CASHOUT_HEARTBEAT_FILE.open("r") as f:
             return json.load(f)
     except Exception:
+        return None
+
+
+def _paper_fair_value(token_id: str) -> Optional[float]:
+    """Read a fresh paper-only in-play fair value, if the poller produced one."""
+    try:
+        payload = json.loads(LIVE_FAIR_VALUES_FILE.read_text())
+        item = (payload.get("values") or {}).get(token_id)
+        if not item:
+            return None
+        updated = _parse_iso_ts(item.get("updated_at"))
+        if updated is None or (datetime.now(timezone.utc) - updated).total_seconds() > 300:
+            return None
+        value = float(item["fair_value"])
+        return value if 0.0 < value < 1.0 else None
+    except (OSError, ValueError, TypeError, KeyError):
         return None
 
 
@@ -350,9 +374,10 @@ def _insert_partial_cashout_sell_row(
             status, mode, bet_kind, strategy_label, phase,
             pnl_realised_usdc,
             cashout_triggered_at, cashout_price, cashout_pnl_usdc,
-            cashout_threshold_used, cashout_order_id, cashout_reason
+            cashout_threshold_used, cashout_order_id, cashout_reason,
+            paper_cohort
         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'SELL', ?, ?, ?, ?,
-                  'settled', 'auto', 'real', ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                  'settled', 'auto', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             now, now, now, now,
@@ -361,13 +386,94 @@ def _insert_partial_cashout_sell_row(
             _g("side_label"), avg_price, avg_price, 0.0,
             round(entry_cost_sold, 4), round(fee, 4),
             avg_price, round(entry_cost_sold, 6),
-            _g("strategy_label"), _g("phase"),
+            _g("bet_kind", "real"), _g("strategy_label"), _g("phase"),
             cashout_pnl,
             now, avg_price, cashout_pnl,
             return_ratio, cashout_oid, reason,
+            # Inherit the parent BUY row's cohort so a PARTIAL cashout SELL row
+            # stays inside the same cohort as the position it belongs to.
+            _g("paper_cohort"),
         ),
     )
     return int(cur.lastrowid)
+
+
+def _claim_real_sell(conn: sqlite3.Connection, bet_id: int, expected_fill_size: float) -> Optional[str]:
+    """Commit a short-lived claim so a second scan cannot sell the same stake.
+
+    The claim is released if the exchange sell does not fill. A claim older
+    than 10 minutes can be taken over, so a crash mid-sell does not stick
+    the position forever. Returns the claim token, or None if another worker
+    holds a fresh claim.
+    """
+    now = _utc_now_iso()
+    token = f"pending:{now}"
+    stale_before = (
+        datetime.now(timezone.utc) - timedelta(minutes=10)
+    ).isoformat()
+    cur = conn.execute(
+        """
+        UPDATE bet_ledger
+           SET cashout_order_id = ?
+         WHERE bet_id = ?
+           AND status = 'filled'
+           AND fill_size_usdc IS NOT NULL
+           AND ABS(fill_size_usdc - ?) < 0.01
+           AND (
+                cashout_order_id IS NULL
+                OR cashout_order_id = ''
+                OR (
+                    cashout_order_id LIKE 'pending:%'
+                    AND substr(cashout_order_id, 9) < ?
+                )
+           )
+        """,
+        (token, bet_id, float(expected_fill_size), stale_before),
+    )
+    if cur.rowcount != 1:
+        conn.rollback()
+        return None
+    conn.commit()
+    return token
+
+
+def _release_real_sell_claim(conn: sqlite3.Connection, bet_id: int, token: str) -> None:
+    conn.execute(
+        """
+        UPDATE bet_ledger
+           SET cashout_order_id = NULL
+         WHERE bet_id = ?
+           AND status = 'filled'
+           AND cashout_order_id = ?
+        """,
+        (bet_id, token),
+    )
+    conn.commit()
+
+
+def _open_stake_unchanged(conn: sqlite3.Connection, bet_id: int, expected_fill_size: float) -> bool:
+    """Take the write lock and confirm this open stake is still the one we priced.
+
+    Two cashout scans overlap (every 3 minutes, and again 90s later). Both used
+    to read the same filled BUY, then each insert a SELL tranche. A no-op
+    UPDATE locks the row; the waiter re-checks the WHERE after the first
+    commit, so a second booking of the same stake returns False.
+    """
+    cur = conn.execute(
+        """
+        UPDATE bet_ledger
+           SET fill_size_usdc = fill_size_usdc
+         WHERE bet_id = ?
+           AND status = 'filled'
+           AND fill_size_usdc IS NOT NULL
+           AND ABS(fill_size_usdc - ?) < 0.01
+        """,
+        (bet_id, float(expected_fill_size)),
+    )
+    if cur.rowcount == 1:
+        return True
+    conn.rollback()
+    return False
 
 
 def execute_cashout(
@@ -390,8 +496,10 @@ def execute_cashout(
       * Full fill          -> the BUY row is marked 'settled' with the actual
                               avg fill price and PnL.
 
-    For paper bets (bet_kind='paper') or dry_run=True the CLOB is skipped and a
-    full fill at `cashout_price` is simulated in-DB only.
+    Paper bets use the visible bid book to simulate a marketable fill. The
+    simulated fill is capped at displayed depth and priced at bid-side VWAP
+    down to the configured slippage floor. Dry runs retain their no-order
+    behavior but use the same conservative book model when available.
 
     Args:
         cashout_price: Current CLOB midpoint — the reference for the marketable
@@ -425,17 +533,59 @@ def execute_cashout(
     order_response: Optional[Dict[str, Any]] = None
     cashout_oid: Optional[str] = None
     if is_simulated:
-        # Paper / dry-run: simulate a full fill at the current midpoint.
-        filled_shares = total_shares
-        avg_price = float(cashout_price)
-        proceeds = total_shares * avg_price
+        if poly_client is None:
+            poly_client = PolymarketClient()
+        try:
+            book = poly_client.get_clob_order_book(token_id)
+            bids_desc = _parse_book_bids(book)
+        except Exception as exc:
+            return {
+                "success": False,
+                "bet_id": bet_id,
+                "error": f"paper-book-fetch-failed: {exc}",
+                "is_simulated": True,
+                "filled_shares": 0.0,
+            }
+        if not bids_desc:
+            return {
+                "success": False,
+                "bet_id": bet_id,
+                "error": "paper-no-bids",
+                "is_simulated": True,
+                "filled_shares": 0.0,
+            }
+
+        cfg = sell_execution_config()
+        floor_price = max(0.0, float(cashout_price) - cfg["max_slippage_cents"])
+        visible_shares = sum(size for price, size in bids_desc if price >= floor_price)
+        filled_shares = min(total_shares, visible_shares)
+        if filled_shares <= 0:
+            return {
+                "success": False,
+                "bet_id": bet_id,
+                "error": "paper-no-bids-within-slippage",
+                "is_simulated": True,
+                "filled_shares": 0.0,
+            }
+        _, avg_price = _vwap_for_shares(bids_desc, filled_shares, floor_price)
+        proceeds = filled_shares * avg_price
         logger.info(
             f"Cashout SIMULATED: bet_id={bet_id} side={bet_kind} "
+            f"shares={filled_shares:.4f}/{total_shares:.4f} "
             f"return_ratio={avg_price / fill_price:.3f}x"
         )
     else:
         if poly_client is None:
             poly_client = PolymarketClient()
+        claim = _claim_real_sell(conn, bet_id, float(fill_size_usdc))
+        if claim is None:
+            return {
+                "success": False,
+                "bet_id": bet_id,
+                "error": "stake-changed-or-already-closed",
+                "is_simulated": False,
+                "filled_shares": 0.0,
+            }
         # A stop-loss is a forced exit: liquidate progressively into whatever
         # bids exist down to the ruin floor instead of holding for the tight
         # profit-take slippage (which rotted collapsing positions to ~0).
@@ -450,6 +600,7 @@ def execute_cashout(
             min_exit_price=stop_min_exit,
         )
         if not sell.get("success"):
+            _release_real_sell_claim(conn, bet_id, claim)
             logger.info(
                 f"Cashout SELL did not fill for bet_id={bet_id}: "
                 f"{sell.get('reason')} (holding, will retry)"
@@ -479,6 +630,18 @@ def execute_cashout(
     cashout_pnl = round(proceeds - entry_cost_sold - fee, 4)
     return_ratio = avg_price / fill_price if fill_price else 0.0
     is_full = filled_fraction >= 1.0 - 1e-6
+
+    if is_simulated and not _open_stake_unchanged(conn, bet_id, float(fill_size_usdc)):
+        logger.info(
+            f"Cashout skipped bet_id={bet_id}: open stake changed or already closed"
+        )
+        return {
+            "success": False,
+            "bet_id": bet_id,
+            "error": "stake-changed-or-already-closed",
+            "is_simulated": is_simulated,
+            "filled_shares": 0.0,
+        }
 
     if is_full:
         # --- Full exit: settle the BUY row with the real fill ---
@@ -558,7 +721,8 @@ def execute_cashout(
         conn.execute(
             "UPDATE bet_ledger "
             "SET fill_size_usdc = ?, "
-            "    exit_cost_usdc = COALESCE(exit_cost_usdc, 0.0) + ? "
+            "    exit_cost_usdc = COALESCE(exit_cost_usdc, 0.0) + ?, "
+            "    cashout_order_id = NULL "
             "WHERE bet_id = ?",
             (max(0.0, new_fill), round(float(entry_cost_sold), 6), bet_id),
         )
@@ -587,6 +751,7 @@ def scan_for_cashouts(
     conn: Optional[sqlite3.Connection] = None,
     poly_client: Optional[PolymarketClient] = None,
     dry_run: bool = False,
+    default_threshold: Optional[float] = None,
 ) -> Dict[str, Any]:
     """Check all filled bets for cashout / stop-loss eligibility and execute.
 
@@ -657,21 +822,29 @@ def scan_for_cashouts(
         token_id = bet["polymarket_token_id"]
         fill_price = float(bet["fill_price"])
 
-        # Tiered profit-take threshold — None for coin-flip / favourite buckets.
-        threshold = tiered_cashout_threshold(fill_price)
+        # A daemon-level override is retained for manual experiments. With no
+        # override, preserve the existing tiered policy exactly.
+        threshold = default_threshold if default_threshold is not None else tiered_cashout_threshold(fill_price)
 
         # Nothing to do for this bet if profit-take holds AND stop-loss is off.
         if threshold is None and not stop_enabled:
             continue
 
-        # Fetch current price (needed for either trigger).
+        # Paper trigger evaluation uses the executable best bid, whereas real
+        # positions retain the existing midpoint trigger semantics.
         clob_attempts += 1
         try:
-            mid_resp = poly_client.get_clob_midpoint(token_id)
-            current_price_raw = (
-                mid_resp.get("mid") or mid_resp.get("midpoint")
-                if isinstance(mid_resp, dict) else None
-            )
+            is_paper = (bet["bet_kind"] if "bet_kind" in bet.keys() else "real") == "paper"
+            if is_paper:
+                book = poly_client.get_clob_order_book(token_id)
+                bids = _parse_book_bids(book)
+                current_price_raw = bids[0][0] if bids else None
+            else:
+                mid_resp = poly_client.get_clob_midpoint(token_id)
+                current_price_raw = (
+                    mid_resp.get("mid") or mid_resp.get("midpoint")
+                    if isinstance(mid_resp, dict) else None
+                )
             if current_price_raw is None:
                 logger.debug(f"  bet_id={bet_id}: no midpoint in response {mid_resp!r}")
                 clob_successes += 1  # reachable, just no actionable midpoint
@@ -686,7 +859,10 @@ def scan_for_cashouts(
         # the two are mutually exclusive by price (a ratio >= ~1.2 vs a price
         # at/under the floor) so ordering is safe either way.
         reason: Optional[str] = None
-        if threshold is not None and evaluate_cashout(bet, current_price, threshold):
+        fair_value = _paper_fair_value(token_id) if is_paper else None
+        if fair_value is not None and current_price > fair_value + 0.02:
+            reason = "profit"
+        elif threshold is not None and evaluate_cashout(bet, current_price, threshold):
             reason = "profit"
         elif stop_enabled and evaluate_stop_loss(bet, current_price, stop_cfg, now):
             reason = "stop"

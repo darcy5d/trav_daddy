@@ -91,6 +91,7 @@ def place_bet(
     toss_chose_to: Optional[str] = None,
     kickoff_at: Optional[str] = None,
     model_snapshot: Optional[str] = None,
+    max_acceptable_price: Optional[float] = None,
 ) -> Dict[str, Any]:
     """Run risk gate + place market order + insert/update bet ledger row.
 
@@ -182,6 +183,7 @@ def place_bet(
             side=side,
             amount_usdc=size_usdc,
             order_type="FOK",
+            max_price=max_acceptable_price,
         )
     except Exception as exc:
         logger.error(f"CLOB order failed: {exc}")

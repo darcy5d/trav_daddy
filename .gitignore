@@ -40,6 +40,10 @@ env/
 .env.local
 .env.*.local
 
+# Local Node runtime and installed relayer dependencies
+.tools/
+node_modules/
+
 # Data files (large files should not be committed)
 data/raw/
 data/processed/
@@ -49,6 +53,8 @@ data/diagnostics/
 *.zip
 *.csv
 *.json
+!package.json
+!package-lock.json
 *.keras
 *.npz
 !src/data/schema.sql
@@ -109,3 +115,15 @@ temp/
 
 # Local operational restart notes (machine-specific P&L, dates, env)
 RESTART_SUMMARY.md
+
+# macOS duplicate files (created when copying files with conflicting names)
+* 2.py
+* 2.sh
+* 2.sql
+* 2.html
+* 2.md
+* 2.example
+* 2
+
+# macOS metadata
+.metadata_never_index

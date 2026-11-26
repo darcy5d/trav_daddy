@@ -1,0 +1,151 @@
+{# Shared tile grids and strategies table. No fetch, no order controls.
+   The caller passes book_layout. There is no paper default. #}
+<style>
+    .book-layout { margin-top: 0.4rem; }
+    .book-tiles {
+        display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+        gap: 0.6rem; margin-bottom: 0.7rem;
+    }
+    .book-tile {
+        padding: 0.7rem 0.9rem; border: 1px solid var(--border-color); border-radius: 8px;
+        background: var(--bg-secondary);
+    }
+    .book-tile-label { color: var(--text-muted); font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.5px; }
+    .book-tile-note { color: var(--text-muted); font-size: 0.68rem; margin-top: 0.15rem; }
+    .book-tile-value { font-size: 1.5rem; font-weight: 700; margin-top: 0.2rem; }
+    .book-tile-value.positive { color: var(--accent-primary); }
+    .book-tile-value.negative { color: #ef4444; }
+    .book-section h2 {
+        font-size: 1.1rem; margin: 0.4rem 0 0.5rem 0; font-weight: 700;
+        background: var(--gradient-1);
+        -webkit-background-clip: text; -webkit-text-fill-color: transparent; background-clip: text;
+        display: inline-block;
+    }
+    .book-section-note { color: var(--text-muted); font-size: 0.75rem; margin: 0.2rem 0 0.5rem 0; }
+    .book-table-scroll { overflow-x: auto; max-width: 100%; }
+    .book-table { width: 100%; border-collapse: collapse; font-size: 0.78rem; }
+    .book-table td:first-child { max-width: 22rem; }
+    .book-table th, .book-table td {
+        padding: 0.4rem 0.5rem; border-bottom: 1px solid rgba(55,65,81,0.4);
+        text-align: left; vertical-align: top;
+    }
+    .book-table th {
+        color: var(--text-muted); font-weight: 600; text-transform: uppercase;
+        letter-spacing: 0.4px; font-size: 0.65rem;
+    }
+    .book-table td.num, .book-table th.num { text-align: right; font-variant-numeric: tabular-nums; }
+    .book-table tr.disabled { opacity: 0.5; }
+    .book-table tr.book-footer td { border-top: 2px solid var(--border-color); font-weight: 600; }
+    .book-table td.book-sample-wait,
+    .book-table td.book-significance { text-align: right; white-space: nowrap; font-variant-numeric: tabular-nums; }
+    .book-evidence {
+        display: inline-block; margin-top: 0.2rem; padding: 0.05rem 0.4rem;
+        border-radius: 999px; font-size: 0.62rem; font-weight: 700;
+        letter-spacing: 0.3px; text-transform: uppercase;
+    }
+    .book-evidence-none { color: var(--text-muted); border: 1px solid rgba(148,163,184,0.45); }
+    .book-evidence-dangerous { color: #ef4444; border: 1px solid rgba(239,68,68,0.55); }
+    .book-evidence-robust { color: #f59e0b; border: 1px solid rgba(245,158,11,0.65); }
+    .book-evidence-confident { color: var(--accent-primary); border: 1px solid var(--accent-primary); }
+    .book-pos { color: var(--accent-primary); }
+    .book-neg { color: #ef4444; }
+    .book-muted { color: var(--text-muted); }
+    .book-badge {
+        display: inline-block; padding: 0.08rem 0.45rem; border-radius: 999px;
+        font-size: 0.62rem; font-weight: 700; margin-left: 0.35rem; vertical-align: middle;
+    }
+    .book-badge.on  { background: rgba(16, 185, 129, 0.18); color: var(--accent-primary); }
+    .book-badge.off { background: rgba(107, 114, 128, 0.25); color: var(--text-muted); }
+</style>
+<section class="book-layout" id="{{ book_layout.section_id }}"
+    data-book="{{ book_layout.book }}"
+    data-total-id="{{ book_layout.total_id }}"
+    data-cashout-id="{{ book_layout.cashout_id }}"
+    data-held-id="{{ book_layout.held_id }}"
+    data-open-id="{{ book_layout.open_id }}"
+    data-bankroll-roi-id="{{ book_layout.bankroll_roi_id }}"
+    data-stake-roi-id="{{ book_layout.stake_roi_id }}"
+    data-settled-id="{{ book_layout.settled_id }}"
+    data-win-id="{{ book_layout.win_id }}"
+    data-body-id="{{ book_layout.body_id }}"
+    data-footer-name="{{ book_layout.footer_name }}"
+    data-footer-note="{{ book_layout.footer_note }}"
+    data-empty="{{ book_layout.empty_copy }}">
+    <div class="book-tiles">
+        <div class="book-tile">
+            <div class="book-tile-label" title="Held P&amp;L plus cashout P&amp;L">Total P&amp;L</div>
+            <div class="book-tile-note">Held plus cashout</div>
+            <div class="book-tile-value" id="{{ book_layout.total_id }}">--</div>
+        </div>
+        <div class="book-tile">
+            <div class="book-tile-label">Cashout P&amp;L</div>
+            <div class="book-tile-note">Cashed out before the match</div>
+            <div class="book-tile-value" id="{{ book_layout.cashout_id }}">--</div>
+        </div>
+        <div class="book-tile">
+            <div class="book-tile-label">Held P&amp;L</div>
+            <div class="book-tile-note">Held to the match result</div>
+            <div class="book-tile-value" id="{{ book_layout.held_id }}">--</div>
+        </div>
+        <div class="book-tile">
+            <div class="book-tile-label" title="{{ book_layout.open_title }}">Open stake</div>
+            <div class="book-tile-note">{{ book_layout.open_note }}</div>
+            <div class="book-tile-value" id="{{ book_layout.open_id }}">--</div>
+        </div>
+    </div>
+    <div class="book-section">
+        <div class="book-tiles">
+            <div class="book-tile">
+                <div class="book-tile-label" title="{{ book_layout.bankroll_roi_title }}">Bankroll ROI</div>
+                <div class="book-tile-note">{{ book_layout.bankroll_roi_note }}</div>
+                <div class="book-tile-value" id="{{ book_layout.bankroll_roi_id }}">--</div>
+            </div>
+            <div class="book-tile">
+                <div class="book-tile-label" title="P&amp;L divided by settled size_usdc. Not the bankroll denominator.">Stake ROI</div>
+                <div class="book-tile-note">P&amp;L ÷ settled size_usdc</div>
+                <div class="book-tile-value" id="{{ book_layout.stake_roi_id }}">--</div>
+            </div>
+            <div class="book-tile">
+                <div class="book-tile-label">Settled bets</div>
+                <div class="book-tile-note">Settled in this book</div>
+                <div class="book-tile-value" id="{{ book_layout.settled_id }}">--</div>
+            </div>
+            <div class="book-tile">
+                <div class="book-tile-label" title="{{ book_layout.win_title }}">Win%</div>
+                <div class="book-tile-note">{{ book_layout.win_note }}</div>
+                <div class="book-tile-value" id="{{ book_layout.win_id }}">--</div>
+            </div>
+        </div>
+        {% if book_layout.section_note %}
+        <p class="book-section-note">{{ book_layout.section_note }}</p>
+        {% endif %}
+        <h2>Strategies</h2>
+        <div class="book-table-scroll">
+        <table class="book-table" id="{{ book_layout.table_id }}">
+            <thead>
+                <tr>
+                    <th>Strategy</th>
+                    <th>Model</th>
+                    <th>Edge</th>
+                    <th class="num" title="{{ book_layout.bankroll_col_title }}">Bankroll</th>
+                    <th class="num">Held P&amp;L</th>
+                    <th class="num">Cashout P&amp;L</th>
+                    <th class="num" title="Held P&amp;L plus cashout P&amp;L">Total P&amp;L</th>
+                    <th class="num" title="{{ book_layout.bankroll_roi_col_title }}">Bankroll ROI</th>
+                    <th class="num" title="P&amp;L divided by settled size_usdc">Stake ROI</th>
+                    <th class="num">Bets</th>
+                    <th class="num">Settled</th>
+                    <th class="num" title="{{ book_layout.win_title }}">Win%</th>
+                    <th class="num" title="{{ book_layout.open_title }}">Open</th>
+                    <th class="num" title="{{ book_layout.sample_wait_title }}">Sample wait</th>
+                    <th class="num" title="{{ book_layout.significance_title }}">One-sided p</th>
+                </tr>
+            </thead>
+            <tbody id="{{ book_layout.body_id }}">
+                <tr><td colspan="15" class="book-muted" style="text-align:center;padding:1rem">Loading...</td></tr>
+            </tbody>
+        </table>
+        </div>
+    </div>
+</section>
+<script src="{{ url_for('static', filename='book_layout.js') }}"></script>

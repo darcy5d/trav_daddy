@@ -57,11 +57,12 @@ from src.integrations.polymarket.upcoming import (
     find_upcoming_cricket_events,
     attach_db_team_ids,
 )
+from config import V2V3_SIM_CONFIG
 from src.integrations.polymarket.paper_inputs import (
     get_recent_xi,
-    get_cached_xi,
     get_default_venue_for_team,
     compute_xi_signature,
+    XI_HISTORICAL_PROXY,
 )
 from src.integrations.polymarket.paper_strategies import (
     PaperStrategy,
@@ -107,16 +108,18 @@ def _live_excluded_prefix(fixture: Dict[str, Any]) -> bool:
     leagues, while leaving paper scanners — which never call this — untouched
     so the league keeps accruing paper bets for a confirmation window. Existing
     positions can still be reduced/exited (those sells run before this guard).
+
+    Allowlist: a prefix missing from BETTING_LEAGUE_POLICY (or with live=False)
+    is excluded, so newly listed Polymarket leagues never go live by default.
+    Fails closed if config can't be read.
     """
-    try:
-        from config import BETTING_CONFIG
-        excluded = BETTING_CONFIG.get("live_exclude_prefixes", []) or []
-    except Exception:  # pragma: no cover
-        return False
-    if not excluded:
-        return False
     prefix = (fixture.get("tournament_prefix") or "").lower()
-    return prefix in excluded
+    try:
+        from config import BETTING_CONFIG, is_live_league
+    except Exception:  # pragma: no cover
+        return True
+    excluded = BETTING_CONFIG.get("live_exclude_prefixes", []) or []
+    return prefix in excluded or not is_live_league(prefix)
 
 
 def effective_min_market_price(strat) -> float:
@@ -255,7 +258,11 @@ def get_live_strategy_bankroll(strategy_name: str, conn) -> float:
 
 
 def _sim_team1_win_prob(simulator, fixture: Dict[str, Any], conn) -> Optional[float]:
-    """Run a sim and return P(team1 wins). Caches XI lookups in fixture dict."""
+    """Run a sim and return P(team1 wins). Caches XI lookups in fixture dict.
+
+    Pre-toss lineups come from each team's last match; CREX's pre-toss XI is a
+    prediction that recalls fewer of the declared players (see paper_bet_scan).
+    """
     if "_xi_cache" not in fixture:
         fixture["_xi_cache"] = {}
     cache = fixture["_xi_cache"]
@@ -265,22 +272,10 @@ def _sim_team1_win_prob(simulator, fixture: Dict[str, Any], conn) -> Optional[fl
     t2 = fixture["team2_id"]
 
     if "t1" not in cache:
-        fkey = fixture.get("fixture_key", "")
-        crex_t1 = get_cached_xi(conn, fkey, t1)
-        crex_t2 = get_cached_xi(conn, fkey, t2)
-        if crex_t1 is not None:
-            cache["t1"] = crex_t1
-            logger.info(f"  [XI] team1 from crex_xi_cache ({fkey})")
-        else:
-            cache["t1"] = get_recent_xi(conn, t1, fmt, gender)
-            logger.info(f"  [XI] team1 from historical (crex cache miss/stale)")
-        if crex_t2 is not None:
-            cache["t2"] = crex_t2
-            logger.info(f"  [XI] team2 from crex_xi_cache ({fkey})")
-        else:
-            cache["t2"] = get_recent_xi(conn, t2, fmt, gender)
-            logger.info(f"  [XI] team2 from historical (crex cache miss/stale)")
-        cache["venue"] = get_default_venue_for_team(conn, t1, fmt, gender)
+        cache["t1"] = get_recent_xi(conn, t1, fmt, gender)
+        cache["t2"] = get_recent_xi(conn, t2, fmt, gender)
+        cache["venue"] = fixture.get("venue_id") or get_default_venue_for_team(conn, t1, fmt, gender)
+        fixture["_xi_status"] = XI_HISTORICAL_PROXY
     t1_bat, t1_bowl = cache["t1"]
     t2_bat, t2_bowl = cache["t2"]
     venue_id = cache["venue"]
@@ -296,9 +291,10 @@ def _sim_team1_win_prob(simulator, fixture: Dict[str, Any], conn) -> Optional[fl
     fixture["_xi_signature"] = compute_xi_signature(t1_bat, t1_bowl, t2_bat, t2_bowl)
 
     result = simulator.simulate_matches(
-        300, t1_bat, t1_bowl, t2_bat, t2_bowl,
+        V2V3_SIM_CONFIG["n_sims"], t1_bat, t1_bowl, t2_bat, t2_bowl,
         venue_id=venue_id, team1_id=t1, team2_id=t2,
         use_toss=True, toss_field_prob=0.65, seed=42,
+        batting_order=V2V3_SIM_CONFIG["batting_order"],
     )
     return float(result["team1_win_prob"])
 
@@ -815,6 +811,9 @@ def scan_and_place_live_bets(
                         side="BUY",
                         size_usdc=stake,
                         requested_mode="auto",
+                        # Never let an uncapped FOK walk the ask ladder past
+                        # the price the strategy is willing to pay.
+                        max_acceptable_price=max_acceptable_price,
                         strategy_label=strat.name,
                         bankroll_at_proposal=bankroll_now,
                         phase="pre_toss",

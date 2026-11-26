@@ -41,6 +41,55 @@ SUPPORTED_FORMATS = ["T20", "ODI"]
 CRICKET_DATA_API_KEY = os.getenv("CRICKET_DATA_API_KEY")
 CRICKET_DATA_BASE_URL = "https://api.cricapi.com/v1"
 
+# CricketArchive (subscription site — PERSONAL-USE enrichment only).
+# ToS has no anti-automation clause, and robots.txt permits the /Archive/* data
+# paths for normal user agents, but the copyright clause forbids redistribution
+# and the "detrimental to use" catch-all means we MUST be gentle. Hence: present
+# as a normal browser, honour the robots `*` disallow list, rate-limit hard,
+# cache every page on disk (fetch each URL once, ever), and never redistribute
+# the raw scraped data. Credentials live in .env (gitignored) — never committed.
+CRICKETARCHIVE_CONFIG = {
+    "enabled": os.getenv("CRICKETARCHIVE_ENABLED", "false").lower() == "true",
+    "username": os.getenv("CRICKETARCHIVE_USERNAME"),
+    "password": os.getenv("CRICKETARCHIVE_PASSWORD"),
+    # Data/content lives on cricketarchive.com; auth/paywall is on my.cricketarchive.com.
+    "base_url": os.getenv("CRICKETARCHIVE_BASE_URL", "https://cricketarchive.com"),
+    "auth_base_url": os.getenv("CRICKETARCHIVE_AUTH_BASE_URL", "https://my.cricketarchive.com"),
+    "login_url": os.getenv("CRICKETARCHIVE_LOGIN_URL", "https://my.cricketarchive.com/"),
+    # Politeness controls (be gentle to avoid the ToS "detrimental to use" catch-all).
+    # RATE PHILOSOPHY: the per-request delay is the primary politeness mechanism.
+    # The daily cap is NOT the governor — it's just a runaway-bug safety net set
+    # intentionally high. With 3 parallel workers at 6-12 s/request the effective
+    # rate is ~20 req/min (~29,000/day), well within polite territory and proven
+    # stable over multi-day runs at ~0.7% 403 rate.
+    # NOTE: 2.5-5s rate triggered intermittent 403s early on; 6-12s has been
+    # robust across 30k+ requests. The fetcher adds adaptive slowdown on top.
+    "min_delay_sec": float(os.getenv("CRICKETARCHIVE_MIN_DELAY", "6.0")),
+    "max_delay_sec": float(os.getenv("CRICKETARCHIVE_MAX_DELAY", "12.0")),
+    # High cap = effectively no daily limit; rely on the delay to govern rate.
+    # Set CRICKETARCHIVE_MAX_PER_DAY in env to a lower value during testing.
+    "max_requests_per_day": int(os.getenv("CRICKETARCHIVE_MAX_PER_DAY", "100000")),
+    "request_timeout_sec": float(os.getenv("CRICKETARCHIVE_TIMEOUT", "30")),
+    # Throttle-resilience: retry 403/429 with exponential backoff, and adaptively
+    # slow the base rate when throttled (decays back down on sustained success).
+    "max_retries": int(os.getenv("CRICKETARCHIVE_MAX_RETRIES", "4")),
+    "backoff_base_sec": float(os.getenv("CRICKETARCHIVE_BACKOFF_BASE", "20")),
+    "user_agent": os.getenv(
+        "CRICKETARCHIVE_USER_AGENT",
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+    ),
+    # On-disk cache + saved login session (both under the gitignored data/raw/).
+    "cache_dir": RAW_DATA_DIR / "cricketarchive",
+    "auth_state_path": RAW_DATA_DIR / "cricketarchive" / "auth_state.json",
+    # Isolated CA datastore — DELIBERATELY separate from cricket.db so the archive
+    # can be harvested, audited and experimented on without touching the trusted
+    # production database (gitignored via *.db).
+    "archive_db_path": BASE_DIR / "ca_archive.db",
+    # Re-use a saved login session for this many hours before forcing re-login.
+    "auth_max_age_hours": float(os.getenv("CRICKETARCHIVE_AUTH_MAX_AGE_HOURS", "168")),
+}
+
 # Market integrations (Wave 2: read-path readiness; Wave 5 Phase 6a: write-path)
 POLYMARKET_CONFIG = {
     "enabled": os.getenv("POLYMARKET_ENABLED", "false").lower() == "true",
@@ -69,9 +118,10 @@ POLYMARKET_CONFIG = {
 # marginal, forward-test first; NO-GO = insufficient data, don't bet blind.
 #
 # To toggle a league on/off for live, flip its "live" flag (and update "reason").
-# Any prefix with live=False is added to live_exclude_prefixes below. Prefixes
-# NOT listed here are treated as live-eligible by default (blocklist posture) —
-# add new leagues here as the coverage tool surfaces them.
+# Allowlist posture (2026-11-07): only prefixes listed here with live=True may
+# place REAL bets. Any prefix NOT listed (new Polymarket leagues, typos, stale
+# taxonomy) is paper-only until someone adds it here with live=True — see
+# is_live_league(). Paper scanners are unaffected.
 BETTING_LEAGUE_POLICY = {
     # --- GO: well-covered, live-eligible -------------------------------------
     "crint":    {"live": True,  "verdict": "GO",        "reason": "Internationals: 94% team-match, deep history, 99% player-vocab."},
@@ -104,7 +154,34 @@ BETTING_LEAGUE_POLICY = {
     "cricshpageeza":  {"live": False, "verdict": "NO-GO", "reason": "Shpageeza (Afghanistan): 38% team-match."},
     "crict20blastl2w":{"live": False, "verdict": "NO-GO", "reason": "Blast League 2 Women: no match history in DB."},
     "cricapl":        {"live": False, "verdict": "NO-GO", "reason": "Andhra Premier League: 0% team-match, no history."},
+    # --- 2026-11-07 Polymarket mapping audit: explicit paper-only entries for
+    # leagues observed live/in the ledger with wrong or missing team mappings.
+    # (Unlisted prefixes are paper-only anyway; these document why.)
+    "cricadt10":      {"live": False, "verdict": "NO-GO", "reason": "Abu Dhabi T10: 0/6 teams in DB; previous fuzzy matches were wrong (UAE Bulls->Barisal Bulls)."},
+    "cricmcat20":     {"live": False, "verdict": "NO-GO", "reason": "Singer-MCA T20 (SL corporate): teams not in DB."},
+    "cricmukono":     {"live": False, "verdict": "NO-GO", "reason": "Mukono Super Smash (Uganda): teams not in DB."},
+    "cricjclt10":     {"live": False, "verdict": "NO-GO", "reason": "JCL T10: teams not in DB; previous fuzzy matches were wrong."},
+    "crickerala":     {"live": False, "verdict": "NO-GO", "reason": "Kuwait Kerala PL: teams not in DB."},
+    "crickcct20":     {"live": False, "verdict": "NO-GO", "reason": "KCC T20: teams not in DB."},
+    "cricppl":        {"live": False, "verdict": "NO-GO", "reason": "Pondicherry PL: teams not in DB."},
+    "cricdpl":        {"live": False, "verdict": "NO-GO", "reason": "Delhi PL: teams not in DB."},
+    "crict20max":     {"live": False, "verdict": "NO-GO", "reason": "T20 Max (QLD grade): teams not in DB."},
+    "crictopend":     {"live": False, "verdict": "NO-GO", "reason": "Top End T20: academy/A sides, not modelled."},
+    "cricwcl":        {"live": False, "verdict": "NO-GO", "reason": "World Championship of Legends: legends sides, not modelled."},
+    "cricgsl":        {"live": False, "verdict": "NO-GO", "reason": "Global Super League: exhibition XIs."},
+    "cricranji":      {"live": False, "verdict": "NO-GO", "reason": "Ranji Trophy: first-class (3-way market), no model."},
+    "cricshield":     {"live": False, "verdict": "NO-GO", "reason": "Sheffield Shield: first-class (3-way market), no model."},
+    "crichksixes":    {"live": False, "verdict": "NO-GO", "reason": "Hong Kong Sixes: 6-a-side format, not modelled."},
+    "criccsat20w":    {"live": False, "verdict": "PAPER-ONLY", "reason": "CSA T20 Women: teams resolve but have ~no women's history in DB."},
+    "cricnpl":        {"live": False, "verdict": "PAPER-ONLY", "reason": "Nepal PL: 5/6 teams in DB with thin history; paper-confirm first."},
+    "cricwbbl":       {"live": False, "verdict": "PAPER-ONLY", "reason": "WBBL: mappings correct; not yet reviewed for live."},
 }
+
+
+def is_live_league(prefix: str) -> bool:
+    """True iff `prefix` is explicitly allow-listed for REAL-money betting."""
+    entry = BETTING_LEAGUE_POLICY.get((prefix or "").strip().lower())
+    return bool(entry and entry.get("live", False))
 
 # Wave 5 Phase 6c: Live betting risk gate config.
 # All caps are enforced server-side in src/integrations/polymarket/risk_gate.py;
@@ -172,6 +249,8 @@ BETTING_CONFIG = {
     #   1. every BETTING_LEAGUE_POLICY entry with live=False (the documented gate
     #      result — NO-GO leagues + deliberate paper-confirms), and
     #   2. any extra prefixes in BETTING_LIVE_EXCLUDE_PREFIXES (ad-hoc override).
+    # Prefixes absent from the policy table are ALSO live-blocked (allowlist);
+    # that check lives in is_live_league(), since the set is open-ended.
     # Edit the league policy table above to toggle a competition on/off.
     "live_exclude_prefixes": sorted(
         {p for p, v in BETTING_LEAGUE_POLICY.items() if not v.get("live", False)}
@@ -202,6 +281,21 @@ BETTING_CONFIG = {
         m.strip() for m in os.getenv("BETTING_AUTO_MARKETS", "moneyline").split(",") if m.strip()
     ],
     "kill_switch": os.getenv("BETTING_KILL_SWITCH", "0").strip() in ("1", "true", "True", "TRUE"),
+    # Winner redemption is a separate, gasless accounting operation. It never
+    # opens or closes market risk, so it is intentionally independent of the
+    # trading mode and kill switch. It still ships disabled until explicitly
+    # armed in .env after a dry-run review.
+    "auto_redeem_enabled": os.getenv("BETTING_AUTO_REDEEM_ENABLED", "0").strip()
+    in ("1", "true", "True", "TRUE"),
+    "auto_redeem_min_value_usdc": float(
+        os.getenv("BETTING_AUTO_REDEEM_MIN_VALUE_USDC", "0.01")
+    ),
+    "auto_redeem_batch_limit": int(
+        os.getenv("BETTING_AUTO_REDEEM_BATCH_LIMIT", "10")
+    ),
+    "auto_redeem_timeout_seconds": int(
+        os.getenv("BETTING_AUTO_REDEEM_TIMEOUT_SECONDS", "120")
+    ),
     # Phase 7 scale-up gate thresholds (used by the dashboard "graduate envelope" flow).
     "scale_up_min_settled_bets": int(os.getenv("BETTING_SCALE_MIN_BETS", "50")),
     "scale_up_max_brier_drift": float(os.getenv("BETTING_SCALE_MAX_BRIER_DRIFT", "0.02")),
@@ -309,6 +403,14 @@ SIMULATION_CONFIG = {
     "num_simulations": 10000,  # Number of match simulations to run
     "confidence_level": 0.95,  # For confidence intervals
     "chunk_size": 1000,  # Simulations per chunk for progress updates
+}
+
+# Pre-match V2/V3 simulations in the paper/live scanners. 4,000 sims keep the
+# Monte Carlo SD of P(team1) under 1pp. Before the toss the batting order is
+# unknown, so "symmetric" runs half the sims with each side batting first.
+V2V3_SIM_CONFIG = {
+    "n_sims": int(os.getenv("V2V3_N_SIMS", "4000")),
+    "batting_order": os.getenv("V2V3_BATTING_ORDER", "symmetric"),
 }
 
 # Performance / Parallelism Configuration (Apple M2 Pro optimization)

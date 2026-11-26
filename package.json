@@ -1,0 +1,13 @@
+{
+  "name": "indias-dad-polymarket-ops",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "redeem-winners": "node scripts/redeem_resolved_positions.mjs"
+  },
+  "dependencies": {
+    "@polymarket/builder-relayer-client": "^0.0.10",
+    "dotenv": "^16.6.1",
+    "viem": "^2.31.4"
+  }
+}

@@ -26,6 +26,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import os
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -39,11 +40,13 @@ from src.integrations.polymarket.upcoming import (
     find_upcoming_cricket_events,
     attach_db_team_ids,
 )
+from config import V2V3_SIM_CONFIG
 from src.integrations.polymarket.paper_inputs import (
-    get_recent_xi,
-    get_cached_xi,
+    get_pretoss_xi,
     get_default_venue_for_team,
     compute_xi_signature,
+    XI_HISTORICAL_PROXY,
+    XI_PREDICTED,
 )
 from src.integrations.polymarket.paper_strategies import (
     STRATEGIES,
@@ -52,12 +55,30 @@ from src.integrations.polymarket.paper_strategies import (
     kelly_stake_usdc,
     get_strategy_bankroll,
 )
+from src.integrations.polymarket.paper_cohorts import new_paper_cohort_value
+from src.integrations.polymarket.venue_resolver import resolve_fixture_venue
+from src.integrations.odds.polymarket_compare import POLYMARKET_TAKER_FEE
 
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
 )
 logger = logging.getLogger(__name__)
+COMPETITION_GATE_FILE = Path(__file__).resolve().parent.parent / "data/paper_trading/competition_gate.json"
+MODEL_DRIVEN_STRATEGIES = {"v3_marg_3pp", "consensus_5pp", "v2_diag_2pp", "blend_v3_w25"}
+
+
+def _competition_gate_allows(strategy: PaperStrategy, fixture: Dict[str, Any]) -> bool:
+    """Apply the self-updating gate to model strategies only; absent data is permissive."""
+    if strategy.name not in MODEL_DRIVEN_STRATEGIES:
+        return True
+    try:
+        payload = json.loads(COMPETITION_GATE_FILE.read_text())
+        prefix = fixture.get("tournament_prefix") or ""
+        gate = (payload.get("gates") or {}).get(prefix)
+        return gate is None or bool(gate.get("go"))
+    except (OSError, ValueError, TypeError):
+        return True
 
 
 def _strategy_in_window(strategy: PaperStrategy, hours_to_kickoff: float) -> bool:
@@ -181,6 +202,7 @@ def _insert_paper_bet(
     toss_winner_team_id: Optional[int] = None,
     toss_chose_to: Optional[str] = None,
     model_snapshot: Optional[str] = None,
+    xi_status: Optional[str] = None,
 ) -> int:
     """Insert a paper bet at status='filled' (paper fills instantly)."""
     now_iso = datetime.now(timezone.utc).isoformat()
@@ -197,7 +219,7 @@ def _insert_paper_bet(
             status, mode, bet_kind, strategy_label,
             bankroll_at_proposal,
             phase, xi_signature, toss_winner_team_id, toss_chose_to,
-            model_snapshot
+            model_snapshot, kickoff_at, paper_cohort, xi_status
         ) VALUES (
             ?, ?, ?,
             ?, ?, ?,
@@ -208,7 +230,7 @@ def _insert_paper_bet(
             ?, ?, ?, ?,
             ?,
             ?, ?, ?, ?,
-            ?
+            ?, ?, ?, ?
         )
         """,
         (
@@ -216,19 +238,71 @@ def _insert_paper_bet(
             None, fixture["fixture_key"], "moneyline",
             market.get("market_id"), side_token_id,
             side_label, model_prob, market_price, edge_pp,
-            "BUY", stake_usdc, stake_usdc * 0.02,
+            "BUY", stake_usdc, stake_usdc * POLYMARKET_TAKER_FEE,
             market_price, stake_usdc,
             "filled", "manual", "paper", strategy.name,
             bankroll_at_proposal,
             phase, xi_signature, toss_winner_team_id, toss_chose_to,
             model_snapshot,
+            fixture["scheduled_start_estimate"].isoformat()
+            if hasattr(fixture.get("scheduled_start_estimate"), "isoformat")
+            else fixture.get("scheduled_start_estimate"),
+            new_paper_cohort_value(),
+            xi_status,
         ),
     )
     return cur.lastrowid
 
 
+def _fixture_venue(conn, fixture: Dict[str, Any]) -> Optional[int]:
+    """Ground to simulate at.
+
+    Default is team1's most-played ground. With PAPER_VENUE_SOURCE=espn the
+    fixture is looked up in ESPN's fixture list first; a fixture confirmed at
+    a ground with no history simulates at a neutral venue (None).
+    """
+    fallback = fixture.get("venue_id") or get_default_venue_for_team(
+        conn, fixture["team1_id"], fixture["format"], fixture["gender"])
+    if os.environ.get("PAPER_VENUE_SOURCE", "fallback").lower() != "espn":
+        fixture["_venue_source"] = "fallback"
+        return fallback
+    vid, source = resolve_fixture_venue(
+        conn,
+        tournament_name=fixture.get("tournament_name"),
+        match_date=fixture.get("match_date"),
+        espn={
+            "team1_label": fixture.get("team1_label") or fixture.get("team1_db_name") or "",
+            "team2_label": fixture.get("team2_label") or fixture.get("team2_db_name") or "",
+            "gender": fixture["gender"],
+            "kickoff": fixture.get("scheduled_start_estimate"),
+            "match_date": fixture.get("match_date"),
+            "fmt": fixture["format"],
+        },
+    )
+    fixture["_venue_source"] = source
+    if source == "espn_new_ground":
+        return None
+    if vid is None:
+        return fallback
+    if vid != fallback:
+        logger.info(f"  [venue] {source} venue {vid} (fallback was {fallback})")
+    return vid
+
+
+def _cached_fixture_venue(conn, fixture: Dict[str, Any]) -> Optional[int]:
+    """`_fixture_venue` once per fixture, shared by the sims and the match-level model."""
+    if "_venue_resolved" not in fixture:
+        fixture["_venue_resolved"] = _fixture_venue(conn, fixture)
+    return fixture["_venue_resolved"]
+
+
 def _sim_team1_win_prob(simulator, fixture: Dict[str, Any], conn) -> Optional[float]:
-    """Run a sim and return P(team1 wins). Caches XI lookups in fixture dict."""
+    """Run a sim and return P(team1 wins). Caches XI lookups in fixture dict.
+
+    Pre-toss lineups come from get_pretoss_xi: the XI selector where its holdout
+    gate passed, otherwise each team's last match. CREX's pre-toss XI recalls
+    fewer declared players than either, so it is not used here.
+    """
     if "_xi_cache" not in fixture:
         fixture["_xi_cache"] = {}
     cache = fixture["_xi_cache"]
@@ -238,22 +312,11 @@ def _sim_team1_win_prob(simulator, fixture: Dict[str, Any], conn) -> Optional[fl
     t2 = fixture["team2_id"]
 
     if "t1" not in cache:
-        fkey = fixture.get("fixture_key", "")
-        crex_t1 = get_cached_xi(conn, fkey, t1)
-        crex_t2 = get_cached_xi(conn, fkey, t2)
-        if crex_t1 is not None:
-            cache["t1"] = crex_t1
-            logger.info(f"  [XI] team1 from crex_xi_cache ({fkey})")
-        else:
-            cache["t1"] = get_recent_xi(conn, t1, fmt, gender)
-            logger.info(f"  [XI] team1 from historical (crex cache miss/stale)")
-        if crex_t2 is not None:
-            cache["t2"] = crex_t2
-            logger.info(f"  [XI] team2 from crex_xi_cache ({fkey})")
-        else:
-            cache["t2"] = get_recent_xi(conn, t2, fmt, gender)
-            logger.info(f"  [XI] team2 from historical (crex cache miss/stale)")
-        cache["venue"] = get_default_venue_for_team(conn, t1, fmt, gender)
+        day = fixture.get("scheduled_start_estimate") or fixture.get("match_date")
+        *cache["t1"], pred1 = get_pretoss_xi(conn, t1, fmt, gender, day)
+        *cache["t2"], pred2 = get_pretoss_xi(conn, t2, fmt, gender, day)
+        cache["venue"] = _cached_fixture_venue(conn, fixture)
+        fixture["_xi_status"] = XI_PREDICTED if (pred1 and pred2) else XI_HISTORICAL_PROXY
     t1_bat, t1_bowl = cache["t1"]
     t2_bat, t2_bowl = cache["t2"]
     venue_id = cache["venue"]
@@ -267,9 +330,10 @@ def _sim_team1_win_prob(simulator, fixture: Dict[str, Any], conn) -> Optional[fl
     fixture["_xi_signature"] = compute_xi_signature(t1_bat, t1_bowl, t2_bat, t2_bowl)
 
     result = simulator.simulate_matches(
-        300, t1_bat, t1_bowl, t2_bat, t2_bowl,
+        V2V3_SIM_CONFIG["n_sims"], t1_bat, t1_bowl, t2_bat, t2_bowl,
         venue_id=venue_id, team1_id=t1, team2_id=t2,
         use_toss=True, toss_field_prob=0.65, seed=42,
+        batting_order=V2V3_SIM_CONFIG["batting_order"],
     )
     return float(result["team1_win_prob"])
 
@@ -290,7 +354,7 @@ def scan_and_place_paper_bets(
         "bets_skipped": [],
     }
 
-    enabled_strats = get_enabled_strategies()
+    enabled_strats = [s for s in get_enabled_strategies() if "pre_toss" in s.phases]
     if strategy_filter:
         enabled_strats = [s for s in enabled_strats if s.name in strategy_filter]
     if not enabled_strats:
@@ -303,6 +367,15 @@ def scan_and_place_paper_bets(
 
     needs_v2 = any(s.model_version in ("v2", "consensus") for s in enabled_strats)
     needs_v3 = any(s.model_version in ("v3", "consensus") for s in enabled_strats)
+    match_predictor = None
+    if any(s.model_version == "match_tv" for s in enabled_strats):
+        from src.models.match_level.model import load_predictor
+        try:
+            match_predictor = load_predictor()
+        except Exception as exc:
+            logger.warning(f"  match-level model load failed: {exc}")
+        if match_predictor is None:
+            logger.warning("  match-level model unavailable; match_tv strategies skipped")
 
     logger.info(f"Scanning Polymarket for upcoming cricket fixtures (next {hours_ahead}h)...")
     pm_client = PolymarketClient()
@@ -355,9 +428,20 @@ def scan_and_place_paper_bets(
 
         # Run sims - regardless of dry-run, we want to log what the model said.
         # Only the DB-write at the end is gated by dry_run.
+        match_tv_t1_prob: Optional[float] = None
         with get_db_connection() as conn:
-            need_v2_now = needs_v2 or any(s.model_version == "consensus" for s in eligible)
-            need_v3_now = needs_v3 or any(s.model_version == "consensus" for s in eligible)
+            need_v2_now = any(s.model_version in ("v2", "consensus") for s in eligible)
+            need_v3_now = any(s.model_version in ("v3", "consensus") for s in eligible)
+            if match_predictor is not None and any(s.model_version == "match_tv" for s in eligible):
+                if match_predictor.allowed("team_venue_xgb", fix.get("tournament_prefix")):
+                    try:
+                        venue_id = _cached_fixture_venue(conn, fix)
+                        match_tv_t1_prob = match_predictor.predict_fixture(
+                            "team_venue_xgb", team1_id=fix["team1_id"], team2_id=fix["team2_id"],
+                            fmt=fmt, gender=gender, venue_id=venue_id, date=kickoff,
+                        )
+                    except Exception as exc:
+                        logger.warning(f"  match-level predict failed for {fix['fixture_key']}: {exc}")
             if need_v2_now:
                 if sg_key not in sim_v2:
                     from src.models.vectorized_nn_sim_v2 import V2Simulator, V2SimulatorConfig
@@ -386,7 +470,7 @@ def scan_and_place_paper_bets(
                     except Exception as exc:
                         logger.warning(f"  V3 sim failed for {fix['fixture_key']}: {exc}")
 
-        if v2_t1_prob is None and v3_t1_prob is None:
+        if v2_t1_prob is None and v3_t1_prob is None and match_tv_t1_prob is None:
             summary["fixtures_skipped_no_lineup"] += 1
             continue
 
@@ -398,6 +482,8 @@ def scan_and_place_paper_bets(
             logger.info(f"    V2 P(team1)={v2_t1_prob*100:.1f}%")
         if v3_t1_prob is not None:
             logger.info(f"    V3 P(team1)={v3_t1_prob*100:.1f}%")
+        if match_tv_t1_prob is not None:
+            logger.info(f"    match_tv P(team1)={match_tv_t1_prob*100:.1f}%")
         ml = fix["moneyline"]
         logger.info(f"    Market: " + "  ".join(
             f"{o['label']}={o['last_price']:.3f}" for o in ml["outcomes"] if o["last_price"] is not None
@@ -417,6 +503,12 @@ def scan_and_place_paper_bets(
 
         # For each eligible strategy, decide if and which side to back
         for strat in eligible:
+            if not _competition_gate_allows(strat, fix):
+                summary["bets_skipped"].append({
+                    "strategy": strat.name, "fixture": fix["fixture_key"],
+                    "reason": "competition-quality-gate",
+                })
+                continue
             # Get the model probabilities this strategy uses
             if strat.model_version == "v2":
                 if v2_t1_prob is None:
@@ -436,8 +528,15 @@ def scan_and_place_paper_bets(
                     logger.info(f"    [{strat.name}] V2/V3 disagree on side; skip")
                     continue
                 t1_pred = (v2_t1_prob + v3_t1_prob) / 2.0
+            elif strat.model_version == "match_tv":
+                if match_tv_t1_prob is None:
+                    continue
+                t1_pred = match_tv_t1_prob
             else:
                 continue
+            if strat.blend_weight is not None:
+                weight = max(0.0, min(1.0, strat.blend_weight))
+                t1_pred = weight * t1_pred + (1.0 - weight) * market_price_t1
             t2_pred = 1.0 - t1_pred
 
             # Compute edge per side
@@ -465,6 +564,24 @@ def scan_and_place_paper_bets(
             # (model edge >= min_edge_pp). This is where held-to-settle ROI is
             # deeply negative, so backing the favourite is the tested signal.
             is_fade = bool(getattr(strat, "fade", False))
+            is_fav_band = strat.name == "fav_band_60_85"
+            if is_fav_band:
+                # This is explicitly a price-band experiment, not a positive
+                # model-edge strategy. Back the market favourite only while V3
+                # remains within 5pp of its quoted probability.
+                if market_price_t1 >= market_price_t2:
+                    side_label, side_token_id = t1_outcome.get("label"), t1_outcome.get("token_id")
+                    model_prob, market_price = t1_pred, market_price_t1
+                else:
+                    side_label, side_token_id = t2_outcome.get("label"), t2_outcome.get("token_id")
+                    model_prob, market_price = t2_pred, market_price_t2
+                edge_pp = (model_prob - market_price) * 100
+                if edge_pp < -5.0:
+                    summary["bets_skipped"].append({
+                        "strategy": strat.name, "fixture": fix["fixture_key"],
+                        "reason": f"model disagrees with favourite by {-edge_pp:.1f}pp",
+                    })
+                    continue
             if is_fade:
                 if market_price >= strat.fade_max_model_price:
                     summary["bets_skipped"].append({
@@ -496,7 +613,7 @@ def scan_and_place_paper_bets(
 
             # Apply edge / price gate. For fades the model-conviction gate above
             # already ran; the backed favourite has negative model edge by design.
-            if not is_fade and edge_pp < strat.min_edge_pp:
+            if not is_fade and not is_fav_band and edge_pp < strat.min_edge_pp:
                 summary["bets_skipped"].append({
                     "strategy": strat.name, "fixture": fix["fixture_key"],
                     "reason": f"edge {edge_pp:.1f}pp < {strat.min_edge_pp:.1f}pp",
@@ -526,6 +643,16 @@ def scan_and_place_paper_bets(
                     "side_label": side_label,
                 })
                 continue
+            if (
+                strat.max_model_minus_fill_pp is not None
+                and not is_fade
+                and edge_pp > strat.max_model_minus_fill_pp
+            ):
+                summary["bets_skipped"].append({
+                    "strategy": strat.name, "fixture": fix["fixture_key"],
+                    "reason": f"model/fill gap {edge_pp:.1f}pp exceeds guard",
+                })
+                continue
 
             # Idempotent dedup
             with get_db_connection() as conn:
@@ -545,7 +672,7 @@ def scan_and_place_paper_bets(
                         "reason": "bankroll-exhausted",
                     })
                     continue
-                if is_fade and strat.flat_stake_frac is not None:
+                if (is_fade or is_fav_band) and strat.flat_stake_frac is not None:
                     # Flat-fraction sizing: model Kelly is ~0 on the negative-edge
                     # favourite we back when fading.
                     raw = strat.flat_stake_frac * bankroll_now
@@ -574,6 +701,7 @@ def scan_and_place_paper_bets(
                         model_prob, market_price, edge_pp, stake, bankroll_now,
                         xi_signature=fix.get("_xi_signature"),
                         model_snapshot=model_snapshot,
+                        xi_status=None if strat.model_version == "match_tv" else fix.get("_xi_status"),
                     )
                     conn.commit()
                     logger.info(

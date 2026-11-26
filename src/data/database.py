@@ -724,6 +724,86 @@ def init_capital_flows(db_path: Optional[Path] = None) -> bool:
         return False
 
 
+def init_redemption_attempts(db_path: Optional[Path] = None) -> bool:
+    """Create the append-only on-chain winner-redemption audit table."""
+    if db_path is None:
+        db_path = DATABASE_PATH
+
+    schema_path = Path(__file__).parent / "schema_v14_redemptions.sql"
+    if not schema_path.exists():
+        logger.error(f"Schema file not found: {schema_path}")
+        return False
+
+    try:
+        with get_db_connection(db_path) as conn:
+            conn.executescript(schema_path.read_text())
+            logger.info("Winner-redemption audit schema (V14) initialized")
+        return True
+    except Exception as e:
+        logger.error(f"Failed to initialize winner-redemption audit schema: {e}")
+        import traceback
+
+        traceback.print_exc()
+        return False
+
+
+def init_xi_status_column(db_path: Optional[Path] = None) -> bool:
+    """V16: add bet_ledger.xi_status, the lineup the model saw for that bet.
+
+    Values: 'historical_proxy' (recent-XI from the team's last matches),
+    'crex_confirmed' (post-toss CREX XI, all 11 mapped for both sides),
+    'historical_fallback' (post-toss, CREX XI missing/unmapped/suspect),
+    'predicted_xi' / 'predicted_fallback' (the same two cases with the XI
+    selector's lineup instead of the last-match XI),
+    'espn_confirmed' (post-toss match_full: both ESPN rosters were exactly 11
+    and no ball had been bowled; not a CREX XI and not a predicted lineup).
+    Idempotent; adds only the column.
+    """
+    if db_path is None:
+        db_path = DATABASE_PATH
+    try:
+        with get_db_connection(db_path) as conn:
+            if not _column_exists(conn, "bet_ledger", "xi_status"):
+                conn.execute("ALTER TABLE bet_ledger ADD COLUMN xi_status TEXT")
+                logger.info("Added bet_ledger.xi_status column")
+        return True
+    except Exception as e:
+        logger.error(f"Failed to add bet_ledger.xi_status: {e}")
+        return False
+
+
+def init_paper_cohort(db_path: Optional[Path] = None) -> bool:
+    """V15: add bet_ledger.paper_cohort so paper P&L can be split by cohort.
+
+    Idempotent. Safe to call on every app startup. Adds ONLY the column and its
+    partial index; it never tags rows. The one-time legacy backfill is a
+    deliberate, separate, auditable step (scripts/backfill_paper_cohort.py) so a
+    web process import cannot rewrite history.
+    """
+    if db_path is None:
+        db_path = DATABASE_PATH
+
+    schema_path = Path(__file__).parent / "schema_v15_paper_cohort.sql"
+    if not schema_path.exists():
+        logger.error(f"Schema file not found: {schema_path}")
+        return False
+
+    try:
+        with get_db_connection(db_path) as conn:
+            if not _column_exists(conn, "bet_ledger", "paper_cohort"):
+                conn.execute("ALTER TABLE bet_ledger ADD COLUMN paper_cohort TEXT")
+                logger.info("Added bet_ledger.paper_cohort column")
+            conn.executescript(schema_path.read_text())
+            logger.info("Paper cohort schema (V15) initialized")
+        return True
+    except Exception as e:
+        logger.error(f"Failed to initialize paper cohort schema: {e}")
+        import traceback
+
+        traceback.print_exc()
+        return False
+
+
 def upsert_live_model_snapshot(
     conn,
     *,

@@ -294,8 +294,11 @@ def finalize_plan_from_chunks(
     weighted_price_sum = float(agg["weighted_price"] or 0)
     avg_fill = (weighted_price_sum / total_filled_usdc) if total_filled_usdc > 0 else None
 
-    # If chunks are still working, don't change plan/bet status; just refresh
-    # the fill statistics so callers can see in-progress fill totals.
+    # Determine the plan status and update the plan stats. If chunks are still
+    # working, keep the plan in an in-progress state so live orders aren't
+    # spuriously marked completed/cancelled. We still update bet_ledger below so
+    # partial fills are reflected in the portfolio even while other chunks rest
+    # on the book.
     if inflight_count > 0:
         cur.execute(
             """
@@ -305,26 +308,18 @@ def finalize_plan_from_chunks(
             """,
             (filled_count, total_filled_usdc, avg_fill, _utc_now_iso(), plan_id),
         )
-        conn.commit()
-        return {
-            "plan_id": plan_id,
-            "bet_id": None,
-            "plan_status": "in_progress",
-            "filled_usdc": round(total_filled_usdc, 4),
-            "bet_updated": False,
-            "skipped": "inflight_chunks_remaining",
-        }
-
-    final_status = "completed" if filled_count > 0 else "cancelled"
-
-    cur.execute(
-        """
-        UPDATE order_plans
-        SET status = ?, chunks_filled = ?, filled_size_usdc = ?, avg_fill_price = ?, updated_at = ?
-        WHERE plan_id = ?
-        """,
-        (final_status, filled_count, total_filled_usdc, avg_fill, _utc_now_iso(), plan_id),
-    )
+        plan_status = "in_progress"
+    else:
+        final_status = "completed" if filled_count > 0 else "cancelled"
+        cur.execute(
+            """
+            UPDATE order_plans
+            SET status = ?, chunks_filled = ?, filled_size_usdc = ?, avg_fill_price = ?, updated_at = ?
+            WHERE plan_id = ?
+            """,
+            (final_status, filled_count, total_filled_usdc, avg_fill, _utc_now_iso(), plan_id),
+        )
+        plan_status = final_status
 
     cur.execute("SELECT bet_ledger_id FROM order_plans WHERE plan_id = ?", (plan_id,))
     plan_row = cur.fetchone()
@@ -416,7 +411,7 @@ def finalize_plan_from_chunks(
     return {
         "plan_id": plan_id,
         "bet_id": bet_id,
-        "plan_status": final_status,
+        "plan_status": plan_status,
         "filled_usdc": round(total_filled_usdc, 4),
         "bet_updated": bet_updated,
     }
