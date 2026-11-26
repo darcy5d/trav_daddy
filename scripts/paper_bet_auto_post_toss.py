@@ -67,7 +67,7 @@ from src.integrations.polymarket.crex_xi import (
     find_crex_match_for_fixture, fetch_xi_from_crex,
 )
 from src.integrations.odds.polymarket_compare import PolymarketComparisonService
-from src.api.crex_scraper import CREXScraper
+from src.api.crex_scraper import CREXScraper, CREX_TEAM_CODES
 from src.utils.name_matcher import match_abbreviated_name
 
 
@@ -179,14 +179,117 @@ def _resolve_xi_to_ids(
     return ids, matched, len(xi_names)
 
 
+def _short_code_candidates(toss_winner_str: str) -> List[str]:
+    """CREX toss token, as itself and with a women's -W removed.
+
+    "UGN-W" and "UGNW" yield UGN. "LBL" stays LBL. "ADS-W" yields ADS.
+    A full team name yields nothing.
+    """
+    raw = toss_winner_str.upper().replace(" ", "")
+    if raw.endswith("-W") and raw[:-2].isalpha() and 2 <= len(raw) - 2 <= 4:
+        base = raw[:-2]
+        return [base, base + "W"]
+    compact = raw.replace("-", "")
+    if not compact.isalpha() or not 2 <= len(compact) <= 5:
+        return []
+    cands = [compact]
+    if compact.endswith("W") and len(compact) >= 4:
+        cands.append(compact[:-1])
+    return list(dict.fromkeys(cands))
+
+
+def _norm_team_phrase(name: str) -> str:
+    text = (name or "").lower().replace("-", " ")
+    text = text.replace("gorkhas", "gurkhas").replace("gorkha", "gurkha")
+    for suffix in (" women", " men"):
+        text = text.replace(suffix, "")
+    return " ".join(text.split())
+
+
+def _phrase_match(side_name: str, canonical: str) -> bool:
+    """True when the fixture side is that team, not merely a shared word."""
+    side = _norm_team_phrase(side_name)
+    canon = _norm_team_phrase(canonical)
+    if not side or not canon:
+        return False
+    if side == canon:
+        return True
+    return f" {canon} " in f" {side} "
+
+
+def _team_abbrs(team_name: str) -> Set[str]:
+    """Abbreviations this daemon already uses for a fixture team name."""
+    if not team_name:
+        return set()
+    return {
+        abbr.upper()
+        for abbr in CREXScraper()._generate_team_abbreviations(team_name, "")
+        if abbr
+    }
+
+
+def _code_hits_name(code: str, name: str) -> bool:
+    """True when this CREX code is that team.
+
+    A generated abbreviation counts. So does a code in the CREX table whose
+    canonical name is this side, including codes the generator never emits
+    (UGN versus UGA, LBL versus LL, RWA versus RW).
+    """
+    if not name:
+        return False
+    if code in _team_abbrs(name):
+        return True
+    canonical = CREX_TEAM_CODES.get(code.lower())
+    return bool(canonical) and _phrase_match(name, canonical)
+
+
+def _match_womens_short_code(
+    toss_winner_str: str,
+    pm_t1: str,
+    pm_t2: str,
+    crex_match,
+    cmp,
+) -> Optional[str]:
+    """Map a CREX short code onto exactly one side of this fixture.
+
+    Women's codes drop -W (ADS-W, UGN-W). A bare code such as LBL is the
+    same lookup. The code has to belong to one side already on the fixture
+    and not the other. Shared words (Melbourne Stars and Renegades) do not
+    count.
+    """
+    cands = _short_code_candidates(toss_winner_str)
+    if not cands:
+        return None
+    crex_t1 = crex_t2 = ""
+    if crex_match is not None:
+        c1 = getattr(crex_match, "team1_name", "") or ""
+        c2 = getattr(crex_match, "team2_name", "") or ""
+        if c1 and pm_t2 and cmp(c1, pm_t2) and not (pm_t1 and cmp(c1, pm_t1)):
+            crex_t1, crex_t2 = c2, c1
+        else:
+            crex_t1, crex_t2 = c1, c2
+
+    def has(names: Tuple[str, str]) -> bool:
+        return any(_code_hits_name(code, name) for name in names for code in cands)
+
+    hit1 = has((pm_t1, crex_t1))
+    hit2 = has((pm_t2, crex_t2))
+    if hit1 and not hit2:
+        return "team1"
+    if hit2 and not hit1:
+        return "team2"
+    return None
+
+
 def _detect_toss_winner_side(
     toss_winner_str: str, fixture: Dict[str, Any], crex_match,
 ) -> Optional[str]:
     """Map the CREX-parsed toss winner string to 'team1' or 'team2'.
 
     `toss_winner_str` may be a full team name ('Punjab Kings'), an
-    abbreviation from CREX live page ('PBKS'), or various other shapes.
-    We try multiple matching strategies in order of confidence.
+    abbreviation from CREX live page ('PBKS'), a women's short code
+    ('ADS-W'), or various other shapes. We try multiple matching
+    strategies in order of confidence.
     """
     if not toss_winner_str:
         return None
@@ -218,6 +321,14 @@ def _detect_toss_winner_side(
         return "team1"
     if pm_t2 and (tw_low in pm_t2.lower() or pm_t2.lower() in tw_low):
         return "team2"
+
+    # Short CREX codes ("ADS-W", "UGN-W", "LBL"). Mapped onto the one fixture
+    # side that owns the code, before the looser alias table.
+    womens_side = _match_womens_short_code(
+        toss_winner_str, pm_t1, pm_t2, crex_match, cmp,
+    )
+    if womens_side:
+        return womens_side
 
     # Strategy 4: known-aliases table for major leagues. CREX live page
     # uses specific team codes that don't always derive from team names

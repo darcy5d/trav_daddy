@@ -23,6 +23,11 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import List, Optional
 
+from src.integrations.polymarket.paper_cohorts import (
+    cohort_filter_sql,
+    resolve_cohort_arg,
+)
+
 
 @dataclass
 class PaperStrategy:
@@ -75,6 +80,11 @@ class PaperStrategy:
     # cannot condition on the toss outcome (V2 sim ignores toss kwargs).
     # Paper bets are always placed regardless of this flag.
     post_toss_eligible: bool = True
+    # Which paper scans evaluate this strategy: "pre_toss" (paper_bet_scan)
+    # and/or "post_toss" (paper_bet_post_toss_scan).
+    phases: List[str] = field(default_factory=lambda: ["pre_toss", "post_toss"])
+    # Post-toss only: skip unless both XIs pass check_confirmed_xi.
+    require_confirmed_xi: bool = False
 
     # Entry timing
     lookback_hours: float = 3.0         # bet within this window before scheduled start
@@ -309,6 +319,68 @@ STRATEGIES: List[PaperStrategy] = [
         max_stake_usdc=50.0,
         post_toss_eligible=False,
     ),
+    # post_edge_20261108 cohort. On the walk-forward holdout from 2026-04-26
+    # V2 beat the decision price only on internationals (crint).
+    PaperStrategy(
+        name="v2_intl_5pp",
+        description=(
+            "V2 (symmetric batting order, 4,000 sims) on internationals only "
+            "(Polymarket prefix crint), 5pp edge, pre-toss. Paper-only."
+        ),
+        enabled_market_types=["moneyline"],
+        enabled_tournament_prefixes=["crint"],
+        min_edge_pp=5.0,
+        model_version="v2",
+        lookback_hours=48.0,
+        lookback_hours_min=0.0,
+        starting_bankroll_usdc=1000.0,
+        kelly_mult=0.5,
+        post_toss_eligible=False,
+        phases=["pre_toss"],
+    ),
+    # Match-level XGBoost on team, form and venue features. Leagues come from
+    # the per-league walk-forward gate (data/models/match_level/league_gate.json);
+    # the scanner also checks that file, so a refit can only narrow the list.
+    PaperStrategy(
+        name="match_tv_5pp",
+        description=(
+            "Match-level team_venue_xgb, pre-toss, 5pp edge, only in leagues "
+            "where it beat the price on the walk-forward holdout "
+            "(crint, cricodc, cricipl; WBBL excluded with 8 holdout fixtures). Paper-only."
+        ),
+        enabled_market_types=["moneyline"],
+        enabled_tournament_prefixes=["crint", "cricodc", "cricipl"],
+        min_edge_pp=5.0,
+        model_version="match_tv",
+        lookback_hours=48.0,
+        lookback_hours_min=0.0,
+        starting_bankroll_usdc=1000.0,
+        kelly_mult=0.5,
+        post_toss_eligible=False,
+        phases=["pre_toss"],
+    ),
+    PaperStrategy(
+        name="match_full_5pp",
+        description=(
+            "Match-level full_xgb (team, venue and playing-XI features), "
+            "post-toss only. A confirmed CREX XI wins and is tagged "
+            "crex_confirmed. Otherwise both ESPN rosters must be exactly 11 "
+            "with no ball bowled yet, tagged espn_confirmed. A squad of 15 "
+            "or 18 is not an XI. If either side is not 11 before a ball, no "
+            "bet. Internationals (crint) only, 5pp edge. Paper-only."
+        ),
+        enabled_market_types=["moneyline"],
+        enabled_tournament_prefixes=["crint"],
+        min_edge_pp=5.0,
+        model_version="match_full",
+        lookback_hours=48.0,
+        lookback_hours_min=0.0,
+        starting_bankroll_usdc=1000.0,
+        kelly_mult=0.5,
+        post_toss_eligible=False,
+        phases=["post_toss"],
+        require_confirmed_xi=True,
+    ),
 ]
 
 
@@ -351,7 +423,7 @@ def kelly_stake_usdc(
     return min(raw_stake, strategy.max_stake_usdc, bankroll_usdc * 0.25)
 
 
-def get_strategy_bankroll(strategy_name: str, conn) -> float:
+def get_strategy_bankroll(strategy_name: str, conn, cohort: Optional[str] = None) -> float:
     """Compute the current paper bankroll for a strategy.
 
     Sum of:
@@ -360,20 +432,26 @@ def get_strategy_bankroll(strategy_name: str, conn) -> float:
 
     Open positions are NOT subtracted (we use bankroll_at_proposal at bet time
     to size; settlement updates bankroll going forward).
+
+    Cohort-scoped (V15): the default is the CURRENT paper cohort, so the legacy
+    calibration holdout cannot inflate the bankroll used for Kelly sizing.
+    Pass an explicit cohort name (or 'all') to widen the window.
     """
     strat = get_strategy(strategy_name)
     if strat is None:
         return 0.0
+    cohort_sql, cohort_params = cohort_filter_sql(resolve_cohort_arg(cohort))
     cur = conn.cursor()
     cur.execute(
-        """
+        f"""
         SELECT COALESCE(SUM(pnl_realised_usdc), 0.0)
         FROM bet_ledger
         WHERE bet_kind = 'paper'
           AND strategy_label = ?
           AND status = 'settled'
+          AND {cohort_sql}
         """,
-        (strategy_name,),
+        [strategy_name, *cohort_params],
     )
     row = cur.fetchone()
     realised = float(row[0]) if row and row[0] is not None else 0.0

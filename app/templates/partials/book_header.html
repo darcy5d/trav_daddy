@@ -1,0 +1,23 @@
+{% macro book_header(title, lede, toast_id) %}
+<style>
+    .book-header {
+        display: flex; justify-content: space-between; align-items: center;
+        margin-bottom: 1rem; flex-wrap: wrap; gap: 0.6rem;
+    }
+    .book-header h1 {
+        margin: 0; font-size: 1.75rem; font-weight: 700;
+        background: var(--gradient-1);
+        -webkit-background-clip: text; -webkit-text-fill-color: transparent; background-clip: text;
+    }
+    .book-actions { display: inline-flex; gap: 0.5rem; align-items: center; flex-wrap: wrap; }
+    .book-lede { color: var(--text-muted); font-size: 0.85rem; margin: -0.3rem 0 0.8rem 0; }
+</style>
+<header class="book-header">
+    <h1>{{ title }}</h1>
+    <div class="book-actions">{{ caller() }}</div>
+</header>
+{% if lede %}
+<p class="book-lede">{{ lede }}</p>
+{% endif %}
+<div id="{{ toast_id }}"></div>
+{% endmacro %}

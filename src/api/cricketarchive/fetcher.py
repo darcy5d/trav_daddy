@@ -60,6 +60,10 @@ class PoliteFetcher:
             config = CRICKETARCHIVE_CONFIG
         self.cfg = config
         self.session = session
+        # Remember the login so a connection reset can rebuild the session
+        # without losing the archive cookie. Rebuilding a bare Session sent
+        # anonymous retries, which the archive answers with 403.
+        self._seed_cookies = list(session.cookies)
         self.cache_dir = Path(config["cache_dir"]) / "html"
         self.cache_dir.mkdir(parents=True, exist_ok=True)
         self._counter_path = Path(config["cache_dir"]) / "request_counter.json"
@@ -135,6 +139,19 @@ class PoliteFetcher:
             time.sleep(delay - elapsed)
         self._last_fetch_ts = time.time()
 
+    def _reset_session(self) -> None:
+        """New TCP connection, same login."""
+        fresh = requests.Session()
+        fresh.headers.update(self.session.headers)
+        fresh.proxies.update({"http": "", "https": ""})
+        # Re-apply the cookies the caller logged in with. The dead session's
+        # jar may also hold anything the server set mid-run, so merge both.
+        for cookie in self._seed_cookies:
+            fresh.cookies.set_cookie(cookie)
+        for cookie in self.session.cookies:
+            fresh.cookies.set_cookie(cookie)
+        self.session = fresh
+
     # -- main entrypoint --------------------------------------------------------
     def get(self, url: str, force: bool = False, cache_only: bool = False) -> str:
         """Return page HTML, from cache when available; otherwise fetch politely.
@@ -155,6 +172,7 @@ class PoliteFetcher:
         max_retries = int(self.cfg.get("max_retries", 4))
         backoff_base = float(self.cfg.get("backoff_base_sec", 20))
         last_exc: Optional[Exception] = None
+        last_status: Optional[int] = None
 
         for attempt in range(max_retries + 1):
             self._check_and_bump_counter()
@@ -171,10 +189,10 @@ class PoliteFetcher:
                                url, wait, attempt + 1, max_retries + 1, conn_err)
                 last_exc = conn_err
                 time.sleep(wait)
-                # Re-create the session so we get a fresh TCP connection.
-                self.session = requests.Session()
-                self.session.headers.update({"Referer": str(self.cfg.get("base_url", "")) + "/"})
-                self.session.proxies.update({"http": "", "https": ""})
+                # Re-create the session so we get a fresh TCP connection, but
+                # carry the login across: a bare Session is anonymous, and the
+                # archive answers that with 403 on every retry.
+                self._reset_session()
                 continue
 
             if resp.status_code in (403, 429):
@@ -185,6 +203,7 @@ class PoliteFetcher:
                                resp.status_code, url, wait, attempt + 1, max_retries + 1,
                                self._extra_delay)
                 last_exc = requests.HTTPError(f"{resp.status_code} for {url}")
+                last_status = resp.status_code
                 time.sleep(wait)
                 continue
 
@@ -192,11 +211,19 @@ class PoliteFetcher:
             html = resp.text
             if any(m in html for m in _PAYWALL_MARKERS):
                 raise NotAuthenticatedError(
-                    f"Got paywall/sign-in for {url} — session expired? Re-run with force_login."
+                    f"Got paywall/sign-in for {url}. The archive cookie was rejected. "
+                    "Open a scorecard in the Cursor browser while signed in; "
+                    "headless login does not receive it."
                 )
             # success: decay the adaptive slowdown
             self._extra_delay = max(0.0, self._extra_delay - 1.0)
             self._cache_path(url).write_text(html, encoding="utf-8")
             return html
 
+        if last_status == 403:
+            raise NotAuthenticatedError(
+                f"HTTP 403 for {url} after {max_retries + 1} attempts. The archive "
+                "rejected this session. Open a scorecard in the Cursor browser while "
+                "signed in, then re-run; headless login does not receive the cookie."
+            )
         raise last_exc or RuntimeError(f"exhausted retries for {url}")

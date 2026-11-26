@@ -10,9 +10,9 @@ Slug taxonomy (observed Apr 2026):
     Most sixes:  cricipl-luc-kkr-2026-04-26-most-sixes-luc
     Top batter:  cricipl-luc-kkr-2026-04-26-team-top-batter-luc
 
-Tournament prefix examples: cricipl, cricpsl, cricbbl, criclcl, cricwpl,
-cricint (international), cricwt (women's tournaments). Generally any slug
-starting with "cric" + 2-5 lowercase letters.
+Tournament prefix examples: cricipl, cricpsl, cricbbl, cricwbbl, crwpl20 (WPL),
+crint (all internationals). The authoritative list is Gamma `/sports`
+(cricket entries carry tag 517); TOURNAMENT_PREFIX_MAP mirrors it.
 
 The match-date in the slug is the TRUE start day. endDate on the Gamma event
 is the settlement deadline (typically a few days after match).
@@ -25,6 +25,7 @@ import logging
 import re
 from collections import defaultdict
 from datetime import datetime, timezone
+from difflib import SequenceMatcher
 from typing import Any, Dict, List, Optional, Tuple
 
 from src.integrations.polymarket import PolymarketClient
@@ -53,30 +54,131 @@ SLUG_SUBMARKET_RE = re.compile(
     rf"^(?P<prefix>cr[a-z0-9]{{2,14}})-(?P<t1>{_TEAM_SLUG})-(?P<t2>{_TEAM_SLUG})-(?P<date>\d{{4}}-\d{{2}}-\d{{2}})-(?P<suffix>.+)$"
 )
 
-# Static prefix -> (cricket_format, gender, human_name) for unambiguous prefixes.
-# `crint` is title-dependent and resolved by `_infer_format_gender_from_title`.
+# Static prefix -> (cricket_format, gender, human_name), mirroring the cricket
+# entries of Gamma `/sports` (refreshed 2026-11-07; 88 `cr*` prefixes).
+# None = title-dependent (internationals and the legacy per-country containers,
+# which mix formats/genders); see `_infer_format_gender_from_title`.
+# T10 / Hundred / sixes formats are routed to the T20 model; first-class and
+# Test cricket is "TEST" (3-way market, no model, never a 2-way moneyline).
 TOURNAMENT_PREFIX_MAP = {
-    "cricipl":   ("T20", "male",   "Indian Premier League"),
-    "cricpsl":   ("T20", "male",   "Pakistan Super League"),
-    "cricbbl":   ("T20", "male",   "Big Bash League"),
-    "cricwbbl":  ("T20", "female", "Women's Big Bash"),
-    "cricwpl":   ("T20", "female", "Women's Premier League"),
-    "criclcl":   ("T20", "male",   "Legends Cricket League"),
-    "crictbcl":  ("T20", "male",   "Brisbane Champions League"),
-    "crint":     None,  # title-dependent; see _infer_format_gender_from_title
-    "cricint":   ("T20", "male",   "International (T20I)"),
-    "cricodi":   ("ODI", "male",   "ODI International"),
-    "cricwt":    ("T20", "female", "Women's T20"),
-    "cricwodi":  ("ODI", "female", "Women's ODI"),
-    "cricbifa":   ("T20", "female", "BIFA Women's"),
-    "cricwt20":   ("T20", "female", "Women's T20"),
-    "cricmlc":    ("T20", "male",   "Major League Cricket"),
-    "crict20blast":  ("T20", "male",   "Vitality T20 Blast"),
-    # Polymarket's observed women's-Blast prefix is "crict20blastw" (suffix -w),
-    # not "crict20wblast"; keep both so either taxonomy resolves.
-    "crict20blastw": ("T20", "female", "Women's Vitality T20 Blast"),
-    "crict20wblast": ("T20", "female", "Women's T20 Blast"),
+    # --- Internationals and legacy country containers (title-dependent) ---
+    "crint":            None,
+    "craus":            None,
+    "crban":            None,
+    "creng":            None,
+    "crind":            None,
+    "crnew":            None,
+    "crpak":            None,
+    "crsou":            None,
+    "cruae":            None,
+    "crbtnmlyhkg20":    None,
+    "cru19wc":          None,
+    "crafgwi20":        ("T20", "male",   "Afghanistan vs West Indies (T20I)"),
+    "crwt20wcgq":       ("T20", "female", "Women's T20 World Cup Qualifier"),
+    # --- Men's T20 franchise / domestic leagues ---
+    "cricipl":          ("T20", "male",   "Indian Premier League"),
+    "cricpsl":          ("T20", "male",   "Pakistan Super League"),
+    "cricbbl":          ("T20", "male",   "Big Bash League"),
+    "cricbpl":          ("T20", "male",   "Bangladesh Premier League"),
+    "criccpl":          ("T20", "male",   "Caribbean Premier League"),
+    "cricsa20":         ("T20", "male",   "SA20"),
+    "cricilt20":        ("T20", "male",   "International League T20"),
+    "cricmlc":          ("T20", "male",   "Major League Cricket"),
+    "crict20lpl":       ("T20", "male",   "Lanka Premier League"),
+    "crict20blast":     ("T20", "male",   "Vitality T20 Blast"),
+    "crichundred":      ("T20", "male",   "The Hundred"),
+    "cricnpl":          ("T20", "male",   "Nepal Premier League"),
+    "cricnt20c":        ("T20", "male",   "National T20 Cup"),
+    "cricpakt20cup":    ("T20", "male",   "Pakistan National T20 Cup"),
+    "criclcl":          ("T20", "male",   "Legends League Cricket"),
+    "cricwcl":          ("T20", "male",   "World Championship of Legends"),
+    "crictbcl":         ("T20", "male",   "T20 Brisbane Champions League"),
+    "cricgsl":          ("T20", "male",   "Global Super League"),
+    "crichksixes":      ("T20", "male",   "Hong Kong Sixes"),
+    "cricapl":          ("T20", "male",   "Andhra Premier League"),
+    "cricassam":        ("T20", "male",   "Assam Premier League"),
+    "cricdpl":          ("T20", "male",   "Delhi Premier League"),
+    "cricetpl":         ("T20", "male",   "European T20 Premier League"),
+    "cricfalcons":      ("T20", "male",   "Falcons Super League T20"),
+    "cricjcl":          ("T20", "male",   "JCL T20"),
+    "crickcct20":       ("T20", "male",   "KCC T20 Summer League"),
+    "crickcl":          ("T20", "male",   "Kerala Cricket League T20"),
+    "crickerala":       ("T20", "male",   "Kuwait Kerala Premier League T20"),
+    "crickpl":          ("T20", "male",   "KPL Indo Nepal T20"),
+    "cricmaharaja":     ("T20", "male",   "Maharaja T20 Trophy"),
+    "cricmajort20":     ("T20", "male",   "Major Clubs T20"),
+    "cricmcat20":       ("T20", "male",   "Singer-MCA Super Premier T20"),
+    "cricmukono":       ("T20", "male",   "Mukono Super Smash T20"),
+    "cricnsk":          ("T20", "male",   "NSK Trophy State T20"),
+    "cricppl":          ("T20", "male",   "Pondicherry Premier League"),
+    "cricsherepunjab":  ("T20", "male",   "Sher-E-Punjab T20"),
+    "cricshpageeza":    ("T20", "male",   "Shpageeza Cricket League"),
+    "crict20max":       ("T20", "male",   "KFC T20 Max"),
+    "crictelangana":    ("T20", "male",   "Telangana T20"),
+    "crictnpl":         ("T20", "male",   "Tamil Nadu Premier League"),
+    "crictopend":       ("T20", "male",   "Top End T20 Series"),
+    "cricupt20":        ("T20", "male",   "Uttar Pradesh T20"),
+    "cricecsbg":        ("T20", "male",   "ECS Bulgaria"),
+    "cricecsch":        ("T20", "male",   "ECS Switzerland"),
+    "cricecseng":       ("T20", "male",   "ECS England"),
+    "cricecspt":        ("T20", "male",   "ECS Portugal"),
+    # NZ Super Smash runs men's and women's competitions under one prefix.
+    "cricsm":           None,
+    # --- T10 (routed to the T20 model) ---
+    "cricadt10":        ("T20", "male",   "Abu Dhabi T10 League"),
+    "criccoppat10":     ("T20", "male",   "Coppa il Mondo T10"),
+    "cricgermant10":    ("T20", "male",   "German Super League Hamburg T10"),
+    "cricnrwt10":       ("T20", "male",   "German Super League NRW T10"),
+    "cricjclt10":       ("T20", "male",   "JCL T10"),
+    "cricthunderbolt":  ("T20", "male",   "Thunderbolt T10 League"),
+    # --- Women's T20 ---
+    "cricwbbl":         ("T20", "female", "Women's Big Bash League"),
+    "crwpl20":          ("T20", "female", "Women's Premier League"),
+    "crict20blastw":    ("T20", "female", "Vitality T20 Blast Women"),
+    "crict20blastl2w":  ("T20", "female", "Vitality T20 Blast Women League 2"),
+    "crichundredw":     ("T20", "female", "The Hundred Women"),
+    "criccsat20w":      ("T20", "female", "CSA T20 Women"),
+    "cricdplw":         ("T20", "female", "Women's Delhi Premier League T20"),
+    "crichkt20w":       ("T20", "female", "Hong Kong T20 Premier League Women"),
+    "cricmaharani":     ("T20", "female", "Maharani Trophy KSCA T20"),
+    "crict20plw":       ("T20", "female", "T20 Premier League Women"),
+    # --- 50-over (List A) ---
+    "cricodc":          ("ODI", "male",   "Metro Bank One Day Cup"),
+    "cricinterprov":    ("ODI", "male",   "Inter-Provincial One Day"),
+    "cricomand50":      ("ODI", "male",   "Oman D50"),
+    "cricdhakadpl":     ("ODI", "male",   "Dhaka Premier Division Cricket League"),
+    "cricodcw":         ("ODI", "female", "Metro Bank One Day Cup Women"),
+    "cricodcl2w":       ("ODI", "female", "Metro Bank One Day Cup Women League 2"),
+    "cricwncl":         ("ODI", "female", "Women's National Cricket League"),
+    "crwncl":           ("ODI", "female", "Women's National Cricket League"),
+    # --- First-class ---
+    "cricranji":        ("TEST", "male",  "Ranji Trophy"),
+    "cricshield":       ("TEST", "male",  "Sheffield Shield"),
+    "cricss":           ("TEST", "male",  "Sheffield Shield"),
+    "cricps":           ("TEST", "male",  "Plunket Shield"),
 }
+
+# Age-group / development-side markers in Polymarket team labels or titles.
+# The DB has only senior teams, so these fixtures must never be matched to a
+# senior side (and are never bet).
+_U19_RE = re.compile(r"\bu(?:nder)?[\s\-]?19s?\b", re.I)
+_DEV_SIDE_RE = re.compile(
+    r"(?:\S\s+A|^England Lions|\bEmerging|\bAcademy|\bHigh Performance|\bDevelopment XI)"
+    r"(?:\s+(?:Women|W))?\s*$",
+    re.I,
+)
+
+
+def infer_age_group(title: str, *labels: Optional[str]) -> str:
+    """'u19', 'a_team' or 'senior' for a fixture, from its title and team labels."""
+    texts = [title or ""] + [l or "" for l in labels]
+    if any(_U19_RE.search(t) for t in texts):
+        return "u19"
+    if any(l and _DEV_SIDE_RE.search(l.strip()) for l in labels):
+        return "a_team"
+    if re.search(r"\bA Team\b|\bunofficial (?:odi|test)s?\b", title or "", re.I):
+        return "a_team"
+    return "senior"
 
 
 def _infer_format_gender_from_title(title: str, prefix: str) -> Tuple[str, str, str]:
@@ -96,11 +198,8 @@ def _infer_format_gender_from_title(title: str, prefix: str) -> Tuple[str, str, 
         return static
 
     title_lower = (title or "").lower()
-    is_women = (
-        "women" in title_lower or "women's" in title_lower
-        or " w " in title_lower or title_lower.endswith(" w")
-        or "u19" in title_lower
-    )
+    # Age group says nothing about gender: "ACC Men's U19 Asia Cup" is male.
+    is_women = bool(re.search(r"\bwom[ae]n(?:'s)?\b|\bwomens\b|\bw\b", title_lower))
     gender = "female" if is_women else "male"
 
     # Format detection: explicit format tokens dominate, otherwise infer from
@@ -130,17 +229,40 @@ def _parse_iso(value: Optional[str]) -> Optional[datetime]:
         return None
 
 
+# Gamma `sportsMarketType` -> our market kind. A "moneyline" with Yes/No
+# outcomes is one leg of a 3-way (win/draw/win) Test or first-class market.
+SPORTS_MARKET_TYPE_MAP = {
+    "moneyline": "moneyline",
+    "cricket_toss_winner": "toss_winner",
+    "cricket_completed_match": "completed_match",
+    "cricket_team_top_batter": "top_batter",
+    "cricket_most_sixes": "most_sixes",
+    "cricket_toss_match_double": "toss_match_double",
+    "cricket_match_to_go_till": "match_to_go_till",
+}
+
+
 def _classify_market_within_event(
     question: str,
     outcomes: List[Any],
     event_slug_kind: str,
+    sports_market_type: Optional[str] = None,
 ) -> str:
-    """Within the bare-slug event, multiple markets coexist. Tell them apart
-    by outcomes + question text, falling back to the slug-derived event kind.
+    """Within the bare-slug event, multiple markets coexist. Gamma's
+    `sportsMarketType` is authoritative; question text / outcomes and the
+    slug-derived event kind are a fallback for markets that lack it.
     """
     q_lower = (question or "").lower()
     outcome_strs = [str(o).lower() for o in outcomes]
     is_yes_no = set(outcome_strs) == {"yes", "no"}
+
+    smt_kind = SPORTS_MARKET_TYPE_MAP.get((sports_market_type or "").strip().lower())
+    if smt_kind == "moneyline":
+        return "moneyline" if (not is_yes_no and len(outcome_strs) == 2) else "moneyline_3way_leg"
+    if smt_kind:
+        return smt_kind
+    if sports_market_type:
+        return "other"
 
     # Sub-market events (slug suffix already classified): trust the slug
     if event_slug_kind in ("toss_match_double", "most_sixes", "top_batter", "toss_winner"):
@@ -314,6 +436,10 @@ def find_upcoming_cricket_events(
                 "team2_label": None,
                 "match_date": date,
                 "scheduled_start_estimate": match_start_est,
+                "age_group": (
+                    "u19" if any(re.search(r"u19\d*$", t) for t in (t1, t2))
+                    else infer_age_group(ev.get("title") or "")
+                ),
                 "moneyline": None,
                 "side_markets": defaultdict(list),
                 "raw_events": [],
@@ -330,6 +456,8 @@ def find_upcoming_cricket_events(
             if t1_label and t2_label:
                 rec["team1_label"] = t1_label
                 rec["team2_label"] = t2_label
+                if rec["age_group"] == "senior":
+                    rec["age_group"] = infer_age_group(title, t1_label, t2_label)
 
         # Extract this event's market(s).
         # NOTE: for the bare-slug event (kind="moneyline" by slug pattern),
@@ -368,6 +496,7 @@ def find_upcoming_cricket_events(
                 question=m.get("question") or "",
                 outcomes=outcomes,
                 event_slug_kind=kind,
+                sports_market_type=m.get("sportsMarketType"),
             )
 
             market_record = {
@@ -427,60 +556,134 @@ def _parse_team_names_from_title(title: str) -> Tuple[Optional[str], Optional[st
     return None, None
 
 
+# Fuzzy fallback acceptance floor (SequenceMatcher ratio on the label core vs
+# the DB name core). High on purpose: a wrong team is far worse than no match,
+# and known spelling variants belong in team_external_ids instead.
+MIN_FUZZY_CONFIDENCE = 0.90
+# Runner-up must trail the best fuzzy candidate by at least this much.
+MIN_FUZZY_MARGIN = 0.05
+_LABEL_STOPWORDS = {"and", "the", "of", "cc", "cricket", "club"}
+_GENDER_SUFFIX_RE = re.compile(r"\s+(?:women|w)$")
+
+
+def polymarket_alias_key(label: str) -> str:
+    """Normalised, gender-neutral key used for team_external_ids lookups."""
+    return _GENDER_SUFFIX_RE.sub("", normalize_team_name(label or "").strip())
+
+
+def _name_core(text: str) -> str:
+    toks = [t for t in polymarket_alias_key(text).split() if t not in _LABEL_STOPWORDS]
+    return " ".join(toks)
+
+
+def _team_gender_matches(cur, team_id: int, gender: str) -> int:
+    cur.execute(
+        "SELECT COUNT(*) FROM matches WHERE (team1_id = ? OR team2_id = ?) AND gender = ?",
+        (team_id, team_id, gender),
+    )
+    return int(cur.fetchone()[0])
+
+
+def _row_to_match(row, method: str, confidence: float) -> Dict[str, Any]:
+    return {
+        "team_id": row[0], "name": row[1], "team_type": row[2],
+        "match_method": method, "confidence": confidence,
+    }
+
+
 def map_team_label_to_db(label: str, fmt: str, gender: str, conn) -> Optional[Dict[str, Any]]:
-    """Map a Polymarket team label to a DB team_id via fuzzy matching."""
+    """Map a Polymarket team label to a DB team, failing closed.
+
+    Order: explicit alias (team_external_ids, source='polymarket') -> exact
+    name (label, or label minus a Women/W suffix) -> strict fuzzy fallback
+    (>= MIN_FUZZY_CONFIDENCE, unambiguous). Every path also requires the team
+    to have match history in the fixture's gender; otherwise returns None.
+    """
     if not label:
         return None
     cur = conn.cursor()
-    norm_label = normalize_team_name(label).strip()
-    if not norm_label:
+    key = polymarket_alias_key(label)
+    if not key:
         return None
-    cur.execute("SELECT team_id, name, team_type FROM teams WHERE LOWER(name) = ?", (norm_label,))
-    row = cur.fetchone()
-    if row:
-        return dict(row)
-    tokens = [t for t in norm_label.split() if len(t) >= 3]
-    if not tokens:
-        return None
-    distinctive = max(tokens, key=len)
+
     cur.execute(
         """
-        SELECT t.team_id, t.name, t.team_type, COUNT(m.match_id) AS recent_matches
-        FROM teams t
-        LEFT JOIN matches m ON (m.team1_id = t.team_id OR m.team2_id = t.team_id)
-            AND m.match_type = ? AND m.gender = ? AND m.date >= '2024-01-01'
-        WHERE LOWER(t.name) LIKE ?
-        GROUP BY t.team_id
-        ORDER BY recent_matches DESC, LENGTH(t.name) ASC
-        LIMIT 5
+        SELECT t.team_id, t.name, t.team_type
+        FROM team_external_ids e
+        JOIN teams t ON t.franchise_id = e.group_id
+        WHERE e.source = 'polymarket' AND e.external_id = ?
+        ORDER BY (t.team_id = t.canonical_team_id) DESC, t.team_id
         """,
-        (fmt, gender, f"%{distinctive}%"),
+        (key,),
     )
-    candidates = [dict(r) for r in cur.fetchall()]
-    if not candidates:
+    for row in cur.fetchall():
+        if _team_gender_matches(cur, row[0], gender) > 0:
+            return _row_to_match(row, "alias", 1.0)
+
+    full = normalize_team_name(label).strip()
+    for name in dict.fromkeys((full, key)):
+        cur.execute("SELECT team_id, name, team_type FROM teams WHERE LOWER(name) = ?", (name,))
+        row = cur.fetchone()
+        if row and _team_gender_matches(cur, row[0], gender) > 0:
+            return _row_to_match(row, "exact", 1.0)
+
+    core = _name_core(label)
+    tokens = [t for t in core.split() if len(t) >= 3]
+    if not tokens:
         return None
-    return candidates[0]
+    clauses = " OR ".join(["LOWER(name) LIKE ?"] * len(tokens))
+    cur.execute(
+        f"SELECT team_id, name, team_type FROM teams WHERE {clauses}",
+        [f"%{t}%" for t in tokens],
+    )
+    scored = sorted(
+        ((SequenceMatcher(a=core, b=_name_core(r[1])).ratio(), r) for r in cur.fetchall()),
+        key=lambda x: -x[0],
+    )
+    if not scored or scored[0][0] < MIN_FUZZY_CONFIDENCE:
+        return None
+    if len(scored) > 1 and scored[0][0] - scored[1][0] < MIN_FUZZY_MARGIN:
+        return None
+    best_score, best = scored[0]
+    if _team_gender_matches(cur, best[0], gender) == 0:
+        return None
+    return _row_to_match(best, "fuzzy", round(best_score, 3))
 
 
 def attach_db_team_ids(events: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    """Attach team1_id + team2_id (DB ids) to each upcoming fixture by fuzzy
-    matching the labels parsed from event titles.
+    """Attach team1_id + team2_id (DB ids) to each upcoming fixture.
 
-    Format/gender for each fixture is taken from TOURNAMENT_PREFIX_MAP entries
-    on the fixture itself.
+    Fixtures are left unmatched (ids None, `unmatched_reason` set) when they
+    are U19 / A-team / development fixtures (the DB has only senior sides),
+    when either label fails `map_team_label_to_db`, or when both labels
+    resolve to the same team. Every scanner skips fixtures without both ids.
     """
-    from src.data.database import get_connection, get_db_connection
+    from src.data.database import get_db_connection
     out = []
     with get_db_connection() as conn:
         for ev in events:
             fmt = ev.get("format", "T20")
             gender = ev.get("gender", "male")
-            t1_match = map_team_label_to_db(ev["team1_label"], fmt, gender, conn) if ev.get("team1_label") else None
-            t2_match = map_team_label_to_db(ev["team2_label"], fmt, gender, conn) if ev.get("team2_label") else None
             ev_out = dict(ev)
+            age_group = ev.get("age_group", "senior")
+            if age_group != "senior":
+                t1_match = t2_match = None
+                reason = f"age_group={age_group}"
+            else:
+                t1_match = map_team_label_to_db(ev["team1_label"], fmt, gender, conn) if ev.get("team1_label") else None
+                t2_match = map_team_label_to_db(ev["team2_label"], fmt, gender, conn) if ev.get("team2_label") else None
+                reason = None
+                if t1_match and t2_match and t1_match["team_id"] == t2_match["team_id"]:
+                    t1_match = t2_match = None
+                    reason = "both labels resolved to the same team"
+                elif not (t1_match and t2_match):
+                    reason = "team label unresolved"
             ev_out["team1_id"] = t1_match["team_id"] if t1_match else None
             ev_out["team1_db_name"] = t1_match["name"] if t1_match else None
+            ev_out["team1_match_method"] = t1_match["match_method"] if t1_match else None
             ev_out["team2_id"] = t2_match["team_id"] if t2_match else None
             ev_out["team2_db_name"] = t2_match["name"] if t2_match else None
+            ev_out["team2_match_method"] = t2_match["match_method"] if t2_match else None
+            ev_out["unmatched_reason"] = reason
             out.append(ev_out)
     return out

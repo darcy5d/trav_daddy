@@ -4,8 +4,16 @@
 Once the toss is decided (and optionally a confirmed XI is published),
 re-run the simulators for that fixture with:
     - V3 in PINNED toss mode (the actual toss winner + their decision)
-    - V2 with no toss change (V2 doesn't model toss)
-    - Optional XI overrides for one or both teams
+    - V2 with the actual batting order (V2 has no toss feature)
+    - The CREX XIs, only when both pass check_confirmed_xi; otherwise the
+      unconfirmed pre-toss XI (get_pretoss_xi), and bets are flagged
+      xi_status='predicted_fallback' or 'historical_fallback'
+    - The match-level full_xgb model with that confirmed CREX XI
+      (xi_status='crex_confirmed'), or, when CREX has not confirmed one,
+      with both ESPN summary rosters at exactly 11 and no ball bowled yet
+      (xi_status='espn_confirmed'). A squad list is not an XI. If either
+      side is not 11 before a ball, match_full is skipped. No saved ESPN
+      event means no summary request.
 
 For each strategy, place a NEW paper bet tagged phase='post_toss' if the
 post-toss edge crosses the strategy's threshold. Pre-toss bets stay
@@ -44,8 +52,12 @@ from src.integrations.polymarket import PolymarketClient
 from src.integrations.polymarket.upcoming import (
     find_upcoming_cricket_events, attach_db_team_ids,
 )
+from config import V2V3_SIM_CONFIG
 from src.integrations.polymarket.paper_inputs import (
-    compute_xi_signature, get_recent_xi, get_default_venue_for_team,
+    compute_xi_signature, get_pretoss_xi,
+    check_confirmed_xi, select_bowlers_from_xi,
+    match_full_lineup, match_full_espn_ok, espn_confirmed_sides,
+    XI_CREX_CONFIRMED, XI_HISTORICAL_FALLBACK, XI_PREDICTED_FALLBACK,
 )
 from src.integrations.polymarket.paper_strategies import (
     STRATEGIES, kelly_stake_usdc, get_strategy_bankroll,
@@ -53,7 +65,7 @@ from src.integrations.polymarket.paper_strategies import (
 from src.integrations.odds.polymarket_compare import PolymarketComparisonService
 
 from scripts.paper_bet_scan import (
-    _already_bet, _insert_paper_bet, _moneyline_outcome_for_team,
+    _already_bet, _insert_paper_bet, _moneyline_outcome_for_team, _cached_fixture_venue,
 )
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -141,63 +153,60 @@ def post_toss_scan(
     gender = fix["gender"]
     t1, t2 = fix["team1_id"], fix["team2_id"]
 
-    def _derive_bowlers(xi: List[int]) -> List[int]:
-        """Heuristic: if XI override has >= 5 entries, take the last 5 as
-        the bowlers (positions 7-11 in an XI typically include all-rounders
-        and specialist bowlers). Caller already validated XI has 11+ batters."""
-        if len(xi) >= 11:
-            return xi[6:11]   # batting positions 7-11 = mostly bowlers
-        if len(xi) >= 5:
-            return xi[-5:]    # last 5 of whatever we have
-        return []
-
+    # match_full sees the CREX XI when both sides are confirmed. Otherwise it
+    # sees ESPN rosters of exactly 11 with no ball bowled, tagged espn_confirmed.
+    # A squad is not an XI. The V2/V3 lineup still follows get_pretoss_xi.
+    match_full_pair = None  # (t1_bat, t2_bat, xi_status)
+    match_full_sig = None
     with get_db_connection() as conn:
-        # Always pull recent-XI as a fallback (cheap, avoids the "10/11 names
-        # matched -> insufficient lineup" trap when CREX returned 11 but our
-        # name resolver only resolved 10 of them).
-        recent_t1_bat, recent_t1_bowl = get_recent_xi(conn, t1, fmt, gender)
-        recent_t2_bat, recent_t2_bowl = get_recent_xi(conn, t2, fmt, gender)
-        venue_id = get_default_venue_for_team(conn, t1, fmt, gender)
+        venue_id = _cached_fixture_venue(conn, fix)
 
-        # Apply XI override only if we have FULL 11; otherwise log and fall
-        # through to the recent-XI proxy. Better to use a slightly stale
-        # lineup than to crash.
-        if team1_xi_override and len(team1_xi_override) >= 11:
-            t1_bat = team1_xi_override[:11]
-            t1_bowl = _derive_bowlers(team1_xi_override)
-            if len(t1_bowl) < 5:
-                # Pad with recent bowlers not already in the XI batters
-                seen = set(t1_bat)
-                for p in recent_t1_bowl:
-                    if p not in seen and len(t1_bowl) < 5:
-                        t1_bowl.append(p)
-                        seen.add(p)
-            logger.info(f"  Using team1 XI override: {len(t1_bat)} batters, {len(t1_bowl)} bowlers")
+        # The CREX XI is used only when BOTH sides pass check_confirmed_xi
+        # (11 mapped players with history, plausible overlap with the last XI).
+        # Mixing a confirmed side with a proxy side would bias the sim.
+        ok1, why1 = check_confirmed_xi(conn, team1_xi_override, t1, fmt, gender)
+        ok2, why2 = check_confirmed_xi(conn, team2_xi_override, t2, fmt, gender)
+        if ok1 and ok2:
+            t1_bat = list(team1_xi_override[:11])
+            t2_bat = list(team2_xi_override[:11])
+            t1_bowl = select_bowlers_from_xi(conn, t1_bat, fmt, gender)
+            t2_bowl = select_bowlers_from_xi(conn, t2_bat, fmt, gender)
+            xi_status = XI_CREX_CONFIRMED
+            logger.info("  Using confirmed CREX XIs for both sides")
+            match_full_pair = match_full_lineup(True, t1_bat, t2_bat, None, None)
         else:
-            if team1_xi_override:
-                logger.warning(
-                    f"  team1 XI override only has {len(team1_xi_override)} names "
-                    f"(<11); falling back to recent-XI proxy"
+            day = fix.get("scheduled_start_estimate") or fix.get("match_date")
+            t1_bat, t1_bowl, pred1 = get_pretoss_xi(conn, t1, fmt, gender, day)
+            t2_bat, t2_bowl, pred2 = get_pretoss_xi(conn, t2, fmt, gender, day)
+            xi_status = XI_PREDICTED_FALLBACK if (pred1 and pred2) else XI_HISTORICAL_FALLBACK
+            logger.warning(f"  XI not confirmed (team1: {why1}; team2: {why2}); using unconfirmed XI, "
+                           f"bets flagged {xi_status}")
+            t1_label = fix.get("team1_label") or fix.get("team1_db_name") or ""
+            t2_label = fix.get("team2_label") or fix.get("team2_db_name") or ""
+            sides = espn_confirmed_sides(
+                conn, t1_label, t2_label, gender, fmt,
+                fix.get("scheduled_start_estimate") or fix.get("match_date"),
+            )
+            match_full_pair = match_full_lineup(
+                False, None, None,
+                sides[0] if sides else None,
+                sides[1] if sides else None,
+            )
+            if match_full_pair is not None and sides is not None:
+                b1 = select_bowlers_from_xi(conn, sides[0], fmt, gender)
+                b2 = select_bowlers_from_xi(conn, sides[1], fmt, gender)
+                match_full_sig = compute_xi_signature(sides[0], b1, sides[1], b2)
+                logger.info(
+                    "  match_full XI from ESPN rosters of 11 before a ball "
+                    f"(xi_status={match_full_pair[2]})"
                 )
-            t1_bat, t1_bowl = recent_t1_bat, recent_t1_bowl
-
-        if team2_xi_override and len(team2_xi_override) >= 11:
-            t2_bat = team2_xi_override[:11]
-            t2_bowl = _derive_bowlers(team2_xi_override)
-            if len(t2_bowl) < 5:
-                seen = set(t2_bat)
-                for p in recent_t2_bowl:
-                    if p not in seen and len(t2_bowl) < 5:
-                        t2_bowl.append(p)
-                        seen.add(p)
-            logger.info(f"  Using team2 XI override: {len(t2_bat)} batters, {len(t2_bowl)} bowlers")
-        else:
-            if team2_xi_override:
-                logger.warning(
-                    f"  team2 XI override only has {len(team2_xi_override)} names "
-                    f"(<11); falling back to recent-XI proxy"
+            else:
+                logger.info(
+                    "  match_full skipped: ESPN does not have 11 and 11 before a ball"
                 )
-            t2_bat, t2_bowl = recent_t2_bat, recent_t2_bowl
+        summary["xi_status"] = xi_status
+        summary["match_full_xi_status"] = match_full_pair[2] if match_full_pair else None
+        summary["xi_check"] = {"team1": why1, "team2": why2}
 
     if len(t1_bat) < 11 or len(t1_bowl) < 5 or len(t2_bat) < 11 or len(t2_bowl) < 5:
         msg = (f"Insufficient lineup data even after fallback: t1 bat={len(t1_bat)} bowl={len(t1_bowl)}, "
@@ -216,11 +225,12 @@ def post_toss_scan(
     logger.info(f"    Loading V2 simulator...")
     from src.models.vectorized_nn_sim_v2 import V2Simulator, V2SimulatorConfig
     sim_v2 = V2Simulator(V2SimulatorConfig(format_type=fmt, gender=gender))
+    toss_loser_team_id = t2 if toss_winner_team_id == t1 else t1
+    bat_first_team_id = toss_loser_team_id if toss_chose_field else toss_winner_team_id
     v2_result = sim_v2.simulate_matches(
-        300, t1_bat, t1_bowl, t2_bat, t2_bowl,
+        V2V3_SIM_CONFIG["n_sims"], t1_bat, t1_bowl, t2_bat, t2_bowl,
         venue_id=venue_id, team1_id=t1, team2_id=t2,
-        use_toss=True, toss_field_prob=(0.65 if not toss_chose_field else 0.35),
-        seed=42,
+        seed=42, toss_bat_first_team_id=bat_first_team_id,
     )
     v2_t1_prob = float(v2_result["team1_win_prob"])
 
@@ -228,7 +238,7 @@ def post_toss_scan(
     from src.models.vectorized_nn_sim_v3 import V3Simulator, V3SimulatorConfig
     sim_v3 = V3Simulator(V3SimulatorConfig(format_type=fmt, gender=gender))
     v3_result = sim_v3.simulate_matches(
-        300, t1_bat, t1_bowl, t2_bat, t2_bowl,
+        V2V3_SIM_CONFIG["n_sims"], t1_bat, t1_bowl, t2_bat, t2_bowl,
         venue_id=venue_id, team1_id=t1, team2_id=t2,
         toss_pinned=True,
         toss_winner_team_id=toss_winner_team_id,
@@ -239,6 +249,24 @@ def post_toss_scan(
 
     summary["v2_team1_win_prob"] = round(v2_t1_prob, 4)
     summary["v3_team1_win_prob"] = round(v3_t1_prob, 4)
+
+    enabled_strats = [s for s in STRATEGIES if s.enabled and "post_toss" in s.phases]
+    match_full_t1_prob: Optional[float] = None
+    if match_full_pair is not None and any(s.model_version == "match_full" for s in enabled_strats):
+        try:
+            from src.models.match_level.model import load_predictor
+            predictor = load_predictor()
+            if predictor is not None and predictor.allowed("full_xgb", fix.get("tournament_prefix")):
+                match_full_t1_prob = predictor.predict_fixture(
+                    "full_xgb", team1_id=t1, team2_id=t2, fmt=fmt, gender=gender,
+                    venue_id=venue_id, date=fix.get("scheduled_start_estimate") or datetime.now(timezone.utc),
+                    xi1=match_full_pair[0], xi2=match_full_pair[1],
+                )
+        except Exception as exc:
+            logger.warning(f"    match-level full_xgb failed: {exc}")
+    if match_full_t1_prob is not None:
+        summary["match_full_team1_win_prob"] = round(match_full_t1_prob, 4)
+        logger.info(f"    match_full P(team1)={match_full_t1_prob*100:.1f}%")
 
     # ---- Compute edges and place bets ----
     ml = fix["moneyline"]
@@ -263,8 +291,14 @@ def post_toss_scan(
     logger.info(f"    Market: {fix['team1_db_name']}={market_price_t1:.3f}  "
                 f"{fix['team2_db_name']}={market_price_t2:.3f}")
 
-    enabled_strats = [s for s in STRATEGIES if s.enabled]
     for strat in enabled_strats:
+        if strat.require_confirmed_xi and xi_status != XI_CREX_CONFIRMED:
+            # match_full may still bet when ESPN showed 11 and 11 before a ball.
+            # That bet is espn_confirmed, never crex_confirmed or predicted.
+            if not match_full_espn_ok(strat.model_version, match_full_pair):
+                reason = "no-espn-xi" if strat.model_version == "match_full" else "xi-not-confirmed"
+                summary["bets_skipped"].append({"strategy": strat.name, "reason": reason})
+                continue
         # Filter checks (format, gender, tournament)
         if strat.enabled_formats and fmt not in strat.enabled_formats:
             summary["bets_skipped"].append({"strategy": strat.name, "reason": f"format {fmt} not enabled"})
@@ -288,6 +322,11 @@ def post_toss_scan(
                 summary["bets_skipped"].append({"strategy": strat.name, "reason": "V2/V3 disagree"})
                 continue
             t1_pred = (v2_t1_prob + v3_t1_prob) / 2.0
+        elif strat.model_version == "match_full":
+            if match_full_t1_prob is None:
+                summary["bets_skipped"].append({"strategy": strat.name, "reason": "match-model-unavailable"})
+                continue
+            t1_pred = match_full_t1_prob
         else:
             continue
         if strat.blend_weight is not None:
@@ -374,31 +413,40 @@ def post_toss_scan(
                 summary["bets_skipped"].append({"strategy": strat.name, "reason": "kelly-stake-zero"})
                 continue
 
+            bet_xi_status = xi_status
+            bet_xi_sig = xi_sig
+            if strat.model_version == "match_full" and match_full_pair is not None:
+                bet_xi_status = match_full_pair[2]
+                if match_full_sig:
+                    bet_xi_sig = match_full_sig
             if dry_run:
                 bet_id = -1
                 logger.info(
                     f"    [{strat.name}] DRY-RUN POST-TOSS: BACK {side_label} @ {market_price:.3f} "
-                    f"size=${stake:.2f}  edge=+{edge_pp:.1f}pp"
+                    f"size=${stake:.2f}  edge=+{edge_pp:.1f}pp  xi_status={bet_xi_status}"
                 )
             else:
                 bet_id = _insert_paper_bet(
                     conn, strat, fix, ml, side_label, side_token_id,
                     model_prob, market_price, edge_pp, stake, bankroll_now,
                     phase="post_toss",
-                    xi_signature=xi_sig,
+                    xi_signature=bet_xi_sig,
                     toss_winner_team_id=toss_winner_team_id,
                     toss_chose_to=chose_to,
+                    xi_status=bet_xi_status,
                 )
                 conn.commit()
                 logger.info(
                     f"    [{strat.name}] POST-TOSS BET #{bet_id}: BACK {side_label} @ {market_price:.3f} "
-                    f"size=${stake:.2f}  edge=+{edge_pp:.1f}pp  bank=${bankroll_now:.2f}"
+                    f"size=${stake:.2f}  edge=+{edge_pp:.1f}pp  bank=${bankroll_now:.2f}  "
+                    f"xi_status={bet_xi_status}"
                 )
             summary["bets_placed"].append({
                 "bet_id": bet_id, "strategy": strat.name, "side_label": side_label,
                 "model_prob": round(model_prob, 4), "market_price": market_price,
                 "edge_pp": round(edge_pp, 2), "stake_usdc": round(stake, 2),
                 "bankroll_at_proposal": round(bankroll_now, 2),
+                "xi_status": bet_xi_status,
             })
 
     summary["finished_at"] = datetime.now(timezone.utc).isoformat()

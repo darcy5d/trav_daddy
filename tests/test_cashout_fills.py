@@ -54,7 +54,8 @@ CREATE TABLE bet_ledger (
     cashout_threshold_used REAL,
     cashout_order_id TEXT,
     cashout_reason TEXT,
-    exit_cost_usdc REAL DEFAULT 0
+    exit_cost_usdc REAL DEFAULT 0,
+    paper_cohort TEXT
 );
 CREATE TABLE order_history (
     polymarket_order_id TEXT PRIMARY KEY, bet_id INTEGER, chunk_id INTEGER,
@@ -188,6 +189,35 @@ def test_partial_real_cashout_books_sell_row_and_keeps_open(db):
     assert sell["cashout_triggered_at"] is not None
     assert sell["cashout_reason"] == "profit"
     assert sell["pnl_realised_usdc"] == pytest.approx(res["cashout_pnl"], rel=1e-3)
+
+
+def test_stale_row_does_not_book_a_second_sell(db):
+    """Overlapping scans both hold the pre-cashout row. Only the first books."""
+    bet = _insert_real_buy(db)
+    fake = FakeClient(bid_price=0.50, fill_fraction=0.5)
+    first = cashout.execute_cashout(bet_row=bet, cashout_price=0.50, conn=db,
+                                     poly_client=fake, reason="profit")
+    assert first["success"] is True and first["partial"] is True
+    second = cashout.execute_cashout(bet_row=bet, cashout_price=0.50, conn=db,
+                                      poly_client=fake, reason="profit")
+    assert second["success"] is False
+    assert second["error"] == "stake-changed-or-already-closed"
+    n_sell = db.execute("SELECT COUNT(*) n FROM bet_ledger WHERE side='SELL'").fetchone()["n"]
+    assert n_sell == 1
+
+
+def test_stale_paper_row_does_not_book_a_second_sell(db):
+    bet = _insert_paper_buy(db)
+    fake = FakeClient(bid_price=0.50, depth=100.0)
+    first = cashout.execute_cashout(bet_row=bet, cashout_price=0.50, conn=db,
+                                     poly_client=fake, reason="profit")
+    assert first["success"] is True and first["partial"] is True
+    second = cashout.execute_cashout(bet_row=bet, cashout_price=0.50, conn=db,
+                                      poly_client=fake, reason="profit")
+    assert second["success"] is False
+    assert second["error"] == "stake-changed-or-already-closed"
+    n_sell = db.execute("SELECT COUNT(*) n FROM bet_ledger WHERE side='SELL'").fetchone()["n"]
+    assert n_sell == 1
 
 
 def test_zero_fill_real_cashout_writes_nothing(db):

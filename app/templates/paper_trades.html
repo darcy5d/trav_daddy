@@ -21,19 +21,6 @@
         background: var(--accent-primary); color: white; border-color: var(--accent-primary);
     }
     .pt-actions button:disabled { opacity: 0.5; cursor: not-allowed; }
-    .pt-totals {
-        display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
-        gap: 0.6rem; margin-bottom: 1rem;
-    }
-    .pt-total-cell {
-        padding: 0.7rem 0.9rem; border: 1px solid var(--border-color); border-radius: 8px;
-        background: var(--bg-secondary);
-    }
-    .pt-total-label { color: var(--text-muted); font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.5px; }
-    .pt-total-value { font-size: 1.5rem; font-weight: 700; margin-top: 0.2rem; }
-    .pt-total-value.positive { color: var(--accent-primary); }
-    .pt-total-value.negative { color: #ef4444; }
-
     .pt-section { margin-top: 1.5rem; }
     .pt-section h2 {
         font-size: 1.1rem; margin: 0 0 0.5rem 0;
@@ -313,8 +300,8 @@
 </style>
 {% endblock %}
 {% block content %}
-<div class="pt-header">
-    <h1>Paper Trades</h1>
+{% from 'partials/book_header.html' import book_header %}
+{% call book_header('Paper Trades', 'Forward-test logging with $1000 per strategy. The scanner runs sims for upcoming Polymarket cricket fixtures and logs paper bets when model edge passes each strategy threshold. No real funds are at risk.', 'pt-toast') %}
     <div class="pt-actions">
         <span id="pt-poller-badge" class="pt-poller-badge pt-poller-off" title="Auto-toss-detection daemon status">Auto-toss: --</span>
         <button id="pt-poller-toggle" title="Start/stop the auto-toss-detection daemon">Start auto-toss</button>
@@ -322,86 +309,82 @@
         <button id="pt-reconcile-now">Reconcile Now (fast)</button>
         <button id="pt-scan-now" class="primary">Run Scan + Reconcile (slow ~3min)</button>
     </div>
-</div>
+{% endcall %}
 
-<p style="color: var(--text-muted); font-size: 0.85rem; margin-top: -0.3rem;">
-    Forward-test logging with $1000 per strategy. The scanner runs sims for upcoming Polymarket cricket fixtures
-    and logs paper bets when model edge passes each strategy's threshold. No real funds are at risk.
-</p>
+{% set book_layout = {
+    'book': 'paper',
+    'section_id': 'pt-strategies-section',
+    'table_id': 'pt-strat-table',
+    'body_id': 'pt-strat-body',
+    'total_id': 'pt-book-total',
+    'cashout_id': 'pt-book-cashout',
+    'held_id': 'pt-book-held',
+    'open_id': 'pt-book-open',
+    'bankroll_roi_id': 'pt-book-bankroll-roi',
+    'stake_roi_id': 'pt-book-stake-roi',
+    'settled_id': 'pt-book-settled',
+    'win_id': 'pt-book-win',
+    'footer_name': 'Paper book',
+    'footer_note': 'Sum across these strategies, excluding retired rows with no bets',
+    'empty_copy': 'No paper strategies',
+    'section_note': '',
+    'open_note': 'Proposed size still open, no P&L yet',
+    'open_title': 'Sum of size_usdc on rows that are not settled, cancelled, or errored.',
+    'bankroll_roi_note': 'Total P&L ÷ sum of $1,000 starts',
+    'bankroll_roi_title': 'Total P&L divided by the sum of each included strategy $1,000 start. Not stake ROI.',
+    'bankroll_col_title': 'Starting $1,000 plus realised P&L',
+    'bankroll_roi_col_title': 'Total P&L divided by this row $1,000 start. Not stake ROI.',
+    'win_note': 'Match wins. Cashouts are not wins.',
+    'win_title': 'Match wins (settle_outcome = 1) divided by settled bets. A cashout is not a win.',
+    'sample_wait_title': 'Days and bets until n80, the count for 80% power at α = 0.05. The line under the wait is settled bets over n80. No certainty: no test, under 11 bets, or p ≥ 0.05. Dangerous: mean return is negative. Robust: p < 0.05 and still short of n80. Confident: p < 0.05 and n80 is met. None of these turns live betting on.',
+    'significance_title': 'Current one-sided p-value of the mean simple return, null of zero. Values under 0.001 are shown as < 0.001. The target is α = 0.05. A p-value under 0.05 rejects a zero mean. It is not the sample-size bar.'
+} %}
+{% include 'partials/book_layout.html' %}
 
-<div id="pt-toast"></div>
+{% set book_chart = {
+    'section_id': 'pt-chart-section',
+    'canvas_id': 'pt-bankroll-chart',
+    'legend_id': 'pt-chart-legend'
+} %}
+{% include 'partials/book_chart.html' %}
 
-<div class="pt-totals" id="pt-totals">
-    <div class="pt-total-cell">
-        <div class="pt-total-label">Total Bankroll</div>
-        <div class="pt-total-value" id="pt-total-bankroll">--</div>
-    </div>
-    <div class="pt-total-cell">
-        <div class="pt-total-label">Held-to-settlement P&amp;L</div>
-        <div class="pt-total-value" id="pt-total-pnl">--</div>
-    </div>
-    <div class="pt-total-cell">
-        <div class="pt-total-label">ROI</div>
-        <div class="pt-total-value" id="pt-total-roi">--</div>
-    </div>
-    <div class="pt-total-cell">
-        <div class="pt-total-label">Open Stakes</div>
-        <div class="pt-total-value" id="pt-total-open">--</div>
-    </div>
-</div>
+{% set book_cards = {
+    'section_id': 'pt-open-section',
+    'title': 'Open Paper Bets',
+    'note': '',
+    'count_id': 'pt-open-count',
+    'chips_id': 'pt-open-filter-chips',
+    'chips_class': 'pt-filter-chips',
+    'body_id': 'pt-open-body',
+    'body_class': 'pt-card-list',
+    'empty': 'No open paper bets'
+} %}
+{% include 'partials/book_cards.html' %}
 
-<div class="pt-section">
-    <h2>Strategies</h2>
-    <table class="pt-table" id="pt-strat-table">
-        <thead>
-            <tr>
-                <th>Strategy</th>
-                <th>Model</th>
-                <th>Edge</th>
-                <th style="text-align:right">Bankroll</th>
-                <th style="text-align:right">Held P&amp;L</th>
-                <th style="text-align:right">Cashout P&amp;L</th>
-                <th style="text-align:right">ROI</th>
-                <th style="text-align:right">Bets</th>
-                <th style="text-align:right">Settled</th>
-                <th style="text-align:right">Win%</th>
-                <th style="text-align:right">Open</th>
-            </tr>
-        </thead>
-        <tbody id="pt-strat-body"><tr><td colspan="11" style="color:var(--text-muted);text-align:center;padding:1rem">Loading...</td></tr></tbody>
-    </table>
-</div>
+{% set book_cards = {
+    'section_id': 'pt-settled-section',
+    'title': 'Recent Settled',
+    'note': '',
+    'count_id': 'pt-settled-count',
+    'chips_id': 'pt-settled-filter-chips',
+    'chips_class': 'pt-filter-chips',
+    'body_id': 'pt-settled-body',
+    'body_class': 'pt-card-list',
+    'empty': 'No settled bets yet'
+} %}
+{% include 'partials/book_cards.html' %}
 
-<div class="pt-section">
-    <h2>Bankroll Over Time</h2>
-    <div class="pt-chart-card">
-        <canvas id="pt-bankroll-chart" class="pt-chart" width="900" height="220"></canvas>
-        <div id="pt-chart-legend" style="margin-top:0.5rem; font-size:0.75rem; display:flex; gap:0.8rem; flex-wrap:wrap;"></div>
-    </div>
-</div>
-
-<div class="pt-section">
-    <h2>Upcoming Fixtures - Post-Toss Re-scan <span style="color:var(--text-muted);font-weight:400;font-size:0.85rem;">(triggers V3 in PINNED toss mode + optional XI override)</span></h2>
-    <p style="color:var(--text-muted);font-size:0.8rem;margin:0 0 0.5rem 0;">
-        Once the toss happens (and ideally the playing XI is announced), click "Toss + Re-scan" to re-sim that fixture
-        with the actual toss outcome. Bets placed via this path are tagged <code>phase='post_toss'</code> so they're
-        analytically distinct from pre-toss bets.
-    </p>
-    <table class="pt-table" id="pt-fixtures-table">
-        <thead>
-            <tr>
-                <th>Match</th>
-                <th>Format</th>
-                <th>Kickoff (UTC)</th>
-                <th>Market (T1 / T2)</th>
-                <th>Pre-toss bets</th>
-                <th>Post-toss bets</th>
-                <th></th>
-            </tr>
-        </thead>
-        <tbody id="pt-fixtures-body"><tr><td colspan="7" style="color:var(--text-muted);text-align:center;padding:1rem">Loading...</td></tr></tbody>
-    </table>
-</div>
+{% set book_upcoming = {
+    'section_id': 'pt-upcoming-section',
+    'subtitle': 'V3 in PINNED toss mode + optional XI override',
+    'note': 'Once the toss happens (and ideally the playing XI is announced), click Toss + Re-scan to re-sim that fixture with the actual toss outcome. Bets placed via this path are tagged phase=post_toss so they are analytically distinct from pre-toss bets.',
+    'table_id': 'pt-fixtures-table',
+    'body_id': 'pt-fixtures-body',
+    'kickoff_id': 'pt-fixtures-kickoff-th',
+    'pre_label': 'Pre-toss bets',
+    'post_label': 'Post-toss bets'
+} %}
+{% include 'partials/book_upcoming.html' %}
 
 <!-- Modal for post-toss form -->
 <div id="pt-toss-modal" style="display:none; position:fixed; inset:0; background:rgba(0,0,0,0.6); z-index:1000; align-items:center; justify-content:center;">
@@ -458,29 +441,6 @@
     </div>
 </div>
 
-<div class="pt-section">
-    <div class="pt-section-header">
-        <h2>Open Paper Bets <span class="pt-section-subtitle" id="pt-open-count"></span></h2>
-        <div class="pt-section-controls">
-            <div class="pt-filter-chips" id="pt-open-filter-chips"></div>
-        </div>
-    </div>
-    <div id="pt-open-body" class="pt-card-list">
-        <div class="pt-empty">No open paper bets</div>
-    </div>
-</div>
-
-<div class="pt-section">
-    <div class="pt-section-header">
-        <h2>Recent Settled <span class="pt-section-subtitle" id="pt-settled-count"></span></h2>
-        <div class="pt-section-controls">
-            <div class="pt-filter-chips" id="pt-settled-filter-chips"></div>
-        </div>
-    </div>
-    <div id="pt-settled-body" class="pt-card-list">
-        <div class="pt-empty">No settled bets yet</div>
-    </div>
-</div>
 
 <script>
 (function() {
@@ -503,18 +463,9 @@
         const sign = v < 0 ? '-' : '';
         return sign + '$' + Math.abs(Number(v)).toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2});
     }
-    function fmtPct(v, places) {
-        if (v === null || v === undefined) return '--';
-        return Number(v).toFixed(places || 1) + '%';
-    }
     function fmtDate(iso) {
         if (!iso) return '--';
         try { return new Date(iso).toLocaleString(); } catch (e) { return iso; }
-    }
-    function pnlClass(v) { return v >= 0 ? 'pt-pl-positive' : 'pt-pl-negative'; }
-    function edgeBadge(pp) {
-        const c = pp >= 5 ? 'pt-edge-high' : pp >= 2 ? 'pt-edge-medium' : 'pt-edge-low';
-        return `<span class="pt-edge-badge ${c}">+${Number(pp).toFixed(1)}pp</span>`;
     }
     function showToast(msg, kind) {
         const t = document.getElementById('pt-toast');
@@ -525,33 +476,7 @@
     async function loadStrategies() {
         const r = await fetch(strategiesUrl);
         const d = await r.json();
-        if (!d.success) throw new Error(d.error || 'failed');
-        const tbody = document.getElementById('pt-strat-body');
-        tbody.innerHTML = '';
-        for (const s of d.strategies) {
-            const tr = document.createElement('tr');
-            if (!s.enabled) tr.className = 'disabled';
-            tr.innerHTML = `
-                <td><strong>${s.name}</strong><br><span style="color:var(--text-muted);font-size:0.7rem">${s.description}</span></td>
-                <td>${s.model_version}</td>
-                <td>${s.min_edge_pp}pp</td>
-                <td style="text-align:right" class="${pnlClass(s.bankroll - s.starting)}">${fmtMoney(s.bankroll)}</td>
-                <td style="text-align:right" class="${pnlClass(s.held_pnl)}">${fmtMoney(s.held_pnl)}</td>
-                <td style="text-align:right" class="${pnlClass(s.cashout_pnl)}">${fmtMoney(s.cashout_pnl)}</td>
-                <td style="text-align:right" class="${pnlClass(s.roi_pct || 0)}">${fmtPct(s.roi_pct, 2)}</td>
-                <td style="text-align:right">${s.n_bets}</td>
-                <td style="text-align:right">${s.n_settled}</td>
-                <td style="text-align:right">${s.win_rate !== null ? fmtPct(s.win_rate * 100, 1) : '--'}</td>
-                <td style="text-align:right">${fmtMoney(s.open_size)}</td>`;
-            tbody.appendChild(tr);
-        }
-        const totals = d.totals || {};
-        document.getElementById('pt-total-bankroll').textContent = fmtMoney(totals.bankroll);
-        document.getElementById('pt-total-pnl').textContent = fmtMoney(totals.held_pnl);
-        document.getElementById('pt-total-pnl').className = 'pt-total-value ' + (totals.held_pnl >= 0 ? 'positive' : 'negative');
-        document.getElementById('pt-total-roi').textContent = fmtPct(totals.roi_pct, 2);
-        document.getElementById('pt-total-roi').className = 'pt-total-value ' + (totals.roi_pct >= 0 ? 'positive' : 'negative');
-        document.getElementById('pt-total-open').textContent = fmtMoney(totals.open_size);
+        paintBookLayout('paper', d);
     }
 
     // ----- Helpers for new card UI -----

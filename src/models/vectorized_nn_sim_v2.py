@@ -68,6 +68,8 @@ from src.features.ball_training_data_v2 import (  # noqa: E402
     FORMAT_ID,
     GENDER_ID,
     LABEL_DOT,
+    LABEL_SINGLE,
+    LABEL_THREE,
     LABEL_SIX,
     LABEL_WICKET,
     LABEL_WIDE,
@@ -101,6 +103,39 @@ OUTCOME_RUNS_V2 = np.array(
     dtype=np.int32,
 )
 
+BATTING_ORDERS = ("team1_first", "team2_first", "symmetric")
+
+# XLA compiles one program per input shape and keeps it for the life of the
+# process. Over-budget refreshes run on however many matches just finished an
+# over, so unpadded batch sizes take almost every value up to n_matches and
+# long-running scanners grow by gigabytes. Padding to these buckets bounds
+# the number of compiled shapes.
+_MIN_BATCH_BUCKET = 64
+
+
+def _batch_bucket(n: int) -> int:
+    bucket = _MIN_BATCH_BUCKET
+    while bucket < n:
+        bucket *= 2
+    return bucket
+
+
+def swap_result_sides(result: Dict) -> Dict:
+    """Relabel a simulate_matches result so team1 <-> team2."""
+    out = dict(result)
+    for key in list(result):
+        if key.startswith("team1_"):
+            other = "team2_" + key[len("team1_"):]
+            if other in result:
+                out[key], out[other] = result[other], result[key]
+        elif key.startswith("avg_team1") or key.startswith("std_team1"):
+            other = key.replace("team1", "team2")
+            out[key], out[other] = result[other], result[key]
+    dq = result.get("dist_quality")
+    if isinstance(dq, dict) and "team1" in dq and "team2" in dq:
+        out["dist_quality"] = dict(dq, team1=dq["team2"], team2=dq["team1"])
+    return out
+
 
 @dataclass
 class V2SimulatorConfig:
@@ -116,6 +151,128 @@ class V2SimulatorConfig:
     # entirely; high values = strict budget enforcement. Tuned via the
     # backtest harness once v2 is trained (Phase 5/6).
     over_budget_alpha: float = 0.4
+    # Scans construct this config with format and gender only, so these
+    # defaults are what paper and live simulations run. A legal 1 or 3
+    # swaps the ends, a wicket brings in the next batter, and each
+    # simulation sees its own chase target.
+    rotate_strike: bool = True
+    own_chase_target: bool = True
+
+
+def shared_chase_target(target_arr, innings: int) -> int:
+    """The one integer currently written onto every simulation."""
+    if innings != 2:
+        return 0
+    if isinstance(target_arr, np.ndarray):
+        return int(target_arr.max()) if target_arr.size else 0
+    return int(target_arr or 0)
+
+
+def feature_target_value(target_arr, innings: int, own_chase_target: bool):
+    """Scalar max when the repair is off, otherwise one target per simulation."""
+    if not own_chase_target:
+        return shared_chase_target(target_arr, innings)
+    if innings != 2:
+        if isinstance(target_arr, np.ndarray):
+            return np.zeros(target_arr.shape, dtype=np.int32)
+        return 0
+    if isinstance(target_arr, np.ndarray):
+        return np.asarray(target_arr)
+    return int(target_arr or 0)
+
+
+def chase_feature_columns(target, innings: int, legal_balls, runs, balls_per_innings: int):
+    """Column 7 (target) and column 8 (required rate) for one innings state.
+
+    A scalar target is the current path: one number on every row, and a
+    required rate only when that number is positive. An array uses each row's
+    own target.
+    """
+    runs = np.asarray(runs, dtype=np.float32)
+    legal_balls = np.asarray(legal_balls, dtype=np.float32)
+    n = int(runs.shape[0])
+    zeros = np.zeros(n, dtype=np.float32)
+    if innings != 2:
+        return zeros, zeros.copy()
+    if isinstance(target, np.ndarray):
+        tgt = np.asarray(target, dtype=np.float32)
+        balls_remaining = np.clip(float(balls_per_innings) - legal_balls, 1, None)
+        runs_needed = np.maximum(0, tgt - runs)
+        rate = np.zeros(n, dtype=np.float32)
+        mask = tgt > 0
+        rate[mask] = runs_needed[mask] * 6.0 / balls_remaining[mask]
+        return tgt, rate
+    tgt_i = int(target)
+    if tgt_i > 0:
+        balls_remaining = np.clip(float(balls_per_innings) - legal_balls, 1, None)
+        runs_needed = np.maximum(0, float(tgt_i) - runs)
+        rate = (runs_needed * 6.0 / balls_remaining).astype(np.float32)
+        return np.full(n, float(tgt_i), dtype=np.float32), rate
+    return zeros, zeros.copy()
+
+
+def strike_after_ball(
+    striker: np.ndarray,
+    non_striker: np.ndarray,
+    next_in: np.ndarray,
+    outcome: np.ndarray,
+    is_wicket: np.ndarray,
+    wkts: np.ndarray,
+    max_batter_idx: int,
+    rotate_strike: bool,
+):
+    """Ends after the ball, before the end-of-over swap.
+
+    Off: the striker becomes wickets+1, which skips the non-striker.
+    On: a legal 1 or 3 swaps the ends, and a wicket brings in `next_in`
+    at the striker's end. `wkts` is already incremented.
+    """
+    striker = np.array(striker, dtype=np.int32, copy=True)
+    non_striker = np.array(non_striker, dtype=np.int32, copy=True)
+    next_in = np.array(next_in, dtype=np.int32, copy=True)
+    if not rotate_strike:
+        wicket_active = np.asarray(is_wicket, dtype=bool) & (np.asarray(wkts) < 10)
+        striker[wicket_active] = np.minimum(np.asarray(wkts)[wicket_active] + 1, max_batter_idx)
+        return striker, non_striker, next_in
+
+    outcome = np.asarray(outcome)
+    odd = (outcome == LABEL_SINGLE) | (outcome == LABEL_THREE)
+    swapped = striker[odd].copy()
+    striker[odd] = non_striker[odd]
+    non_striker[odd] = swapped
+
+    wicket_active = (
+        np.asarray(is_wicket, dtype=bool)
+        & (np.asarray(wkts) < 10)
+        & (next_in <= max_batter_idx)
+    )
+    striker[wicket_active] = np.minimum(next_in[wicket_active], max_batter_idx)
+    next_in[wicket_active] = next_in[wicket_active] + 1
+    return striker, non_striker, next_in
+
+
+def strike_after_over(
+    striker: np.ndarray,
+    non_striker: np.ndarray,
+    outcome: np.ndarray,
+    over_complete: np.ndarray,
+    rotate_strike: bool,
+):
+    """End-of-over swap. Off is a no-op. On swaps unless the ball was a 1 or a 3."""
+    striker = np.array(striker, dtype=np.int32, copy=True)
+    non_striker = np.array(non_striker, dtype=np.int32, copy=True)
+    if not rotate_strike:
+        return striker, non_striker
+    outcome = np.asarray(outcome)
+    end_swap = (
+        np.asarray(over_complete, dtype=bool)
+        & (outcome != LABEL_SINGLE)
+        & (outcome != LABEL_THREE)
+    )
+    swapped = striker[end_swap].copy()
+    striker[end_swap] = non_striker[end_swap]
+    non_striker[end_swap] = swapped
+    return striker, non_striker
 
 
 class V2Simulator:
@@ -218,6 +375,22 @@ class V2Simulator:
         self._predict_compiled = tf.function(
             self._model, jit_compile=True, reduce_retracing=True
         )
+
+    def _predict_head(self, inputs: Dict[str, np.ndarray], head: str) -> np.ndarray:
+        """Run the model on a batch padded to a bucket size; return one head."""
+        n = len(next(iter(inputs.values())))
+        pad = _batch_bucket(n) - n
+        if pad:
+            inputs = {
+                k: np.concatenate([v, np.repeat(v[-1:], pad, axis=0)])
+                for k, v in inputs.items()
+            }
+        tensors = {k: tf.constant(v) for k, v in inputs.items()}
+        try:
+            outputs = self._predict_compiled(tensors, training=False)
+        except Exception:
+            outputs = self._model(tensors, training=False)
+        return outputs[head].numpy()[:n]
 
     @property
     def ball_head_name(self) -> str:
@@ -381,7 +554,7 @@ class V2Simulator:
         legal_balls: np.ndarray,
         runs: np.ndarray,
         wkts: np.ndarray,
-        target: int,
+        target,
         venue_features: np.ndarray,
         bat_team_elo_n: float,
         bowl_team_elo_n: float,
@@ -397,14 +570,11 @@ class V2Simulator:
         is_mid = ((over_idx >= mid_t) & (over_idx < death_t)).astype(np.float32)
         is_death = (over_idx >= death_t).astype(np.float32)
 
-        # Required rate (for innings 2; 0 otherwise)
-        if innings == 2 and target > 0:
-            balls_remaining = balls_for_format(self.format_type) - legal_balls
-            balls_remaining = np.clip(balls_remaining, 1, None)
-            runs_needed = np.maximum(0, target - runs)
-            required_rate = runs_needed * 6.0 / balls_remaining
-        else:
-            required_rate = np.zeros(n_matches, dtype=np.float32)
+        # Required rate (for innings 2; 0 otherwise). A scalar target is one
+        # number on every row. An array is one target per simulation.
+        col_target, required_rate = chase_feature_columns(
+            target, innings, legal_balls, runs, balls_for_format(self.format_type),
+        )
 
         X = np.zeros((n_matches, N_CONTINUOUS), dtype=np.float32)
         # Column order MUST match CONTINUOUS_COLUMNS in ball_training_data_v2.
@@ -415,7 +585,7 @@ class V2Simulator:
         X[:, 4] = legal_balls
         X[:, 5] = runs
         X[:, 6] = wkts
-        X[:, 7] = float(target if innings == 2 else 0)
+        X[:, 7] = col_target
         X[:, 8] = required_rate
         X[:, 9] = era_norm
         X[:, 10] = is_pp
@@ -433,6 +603,9 @@ class V2Simulator:
     # Public API: simulate_matches (mirrors v1's signature)
     # ------------------------------------------------------------------
 
+    def _swap_sides(self) -> None:
+        """Hook for subclasses holding per-team state (V3 toss / XI overlap)."""
+
     def simulate_matches(
         self,
         n_matches: int,
@@ -445,19 +618,133 @@ class V2Simulator:
         team1_id: Optional[int] = None,
         team2_id: Optional[int] = None,
         seed: Optional[int] = None,
-        # Toss-related kwargs accepted for v1-compat but currently not
-        # used by v2 (toss-aware sim is a v2.1 follow-up).
+        # V2's 22-feature vector has no toss column, so `use_toss` and
+        # `toss_field_prob` are accepted for v1 compatibility and unused.
         use_toss: bool = False,
         toss_field_prob: float = 0.65,
         team1_default_elo: Optional[float] = None,
         team2_default_elo: Optional[float] = None,
+        toss_bat_first_team_id: Optional[int] = None,
+        batting_order: str = "team1_first",
     ) -> Dict:
         """Run N hierarchical Monte Carlo simulations of the match.
 
-        Returns a v1-compatible result dict so the backtest harness and
-        the live web path can pick v1 vs v2 behind a single flag in
-        Phase 6.
+        Returns a v1-compatible result dict, always oriented to the caller's
+        team1/team2.
+
+        `batting_order`: `team1_first` is the historical behaviour. Before
+        the toss the batting order is unknown, and the simulated first-innings
+        side wins a different share of games than the chasing side, so
+        `symmetric` runs half the simulations each way. `team2_first` puts
+        team2 in first.
+
+        `toss_bat_first_team_id`: when the toss is known, the id of the side
+        batting first. It overrides `batting_order` when it names team1 or
+        team2 and is ignored otherwise.
         """
+        if batting_order not in BATTING_ORDERS:
+            raise ValueError(f"batting_order must be one of {BATTING_ORDERS}")
+        toss_applied = False
+        if (
+            toss_bat_first_team_id is not None
+            and team1_id is not None
+            and team2_id is not None
+            and int(team1_id) != int(team2_id)
+        ):
+            if int(toss_bat_first_team_id) == int(team1_id):
+                batting_order = "team1_first"
+            elif int(toss_bat_first_team_id) == int(team2_id):
+                batting_order = "team2_first"
+                toss_applied = True
+
+        args = (n_matches, team1_batter_ids, team1_bowler_ids, team2_batter_ids, team2_bowler_ids)
+        kw = dict(
+            max_overs=max_overs, venue_id=venue_id, team1_id=team1_id, team2_id=team2_id,
+            seed=seed, team1_default_elo=team1_default_elo, team2_default_elo=team2_default_elo,
+        )
+        if batting_order == "symmetric":
+            n_first = max(1, n_matches // 2)
+            n_second = max(1, n_matches - n_first)
+            a = self._simulate_in_order("team1_first", n_first, *args[1:], **kw)
+            kw["seed"] = None if seed is None else seed + 1
+            b = self._simulate_in_order("team2_first", n_second, *args[1:], **kw)
+            result = self._merge_results(a, b)
+        else:
+            result = self._simulate_in_order(batting_order, *args, **kw)
+        result["batting_order"] = batting_order
+        result["toss_bat_first_applied"] = toss_applied
+        return result
+
+    def _simulate_in_order(
+        self,
+        order: str,
+        n_matches: int,
+        team1_batter_ids: List[int],
+        team1_bowler_ids: List[int],
+        team2_batter_ids: List[int],
+        team2_bowler_ids: List[int],
+        team1_id: Optional[int] = None,
+        team2_id: Optional[int] = None,
+        team1_default_elo: Optional[float] = None,
+        team2_default_elo: Optional[float] = None,
+        **kw,
+    ) -> Dict:
+        if order == "team1_first":
+            return self._simulate_matches_ordered(
+                n_matches, team1_batter_ids, team1_bowler_ids, team2_batter_ids, team2_bowler_ids,
+                team1_id=team1_id, team2_id=team2_id,
+                team1_default_elo=team1_default_elo, team2_default_elo=team2_default_elo, **kw,
+            )
+        self._swap_sides()
+        try:
+            swapped = self._simulate_matches_ordered(
+                n_matches, team2_batter_ids, team2_bowler_ids, team1_batter_ids, team1_bowler_ids,
+                team1_id=team2_id, team2_id=team1_id,
+                team1_default_elo=team2_default_elo, team2_default_elo=team1_default_elo, **kw,
+            )
+        finally:
+            self._swap_sides()
+        return swap_result_sides(swapped)
+
+    def _merge_results(self, a: Dict, b: Dict) -> Dict:
+        n_a, n_b = a["n_matches"], b["n_matches"]
+        raw = (a["team1_win_prob_raw"] * n_a + b["team1_win_prob_raw"] * n_b) / (n_a + n_b)
+        params = self.calibration.get(self.format_type, self.gender)
+        cal = float(calibrate_probabilities(np.array([raw]), params)[0])
+        out = dict(a)
+        out.update({
+            "n_matches": n_a + n_b,
+            "team1_win_prob": cal,
+            "team2_win_prob": 1.0 - cal,
+            "team1_win_prob_raw": raw,
+            "team2_win_prob_raw": 1.0 - raw,
+        })
+        for side in ("team1", "team2"):
+            scores = np.concatenate([a[f"{side}_scores"], b[f"{side}_scores"]])
+            out[f"{side}_scores"] = scores
+            out[f"avg_{side}_score"] = float(scores.mean())
+            out[f"std_{side}_score"] = float(scores.std())
+            out[f"{side}_score_range"] = (float(np.percentile(scores, 5)), float(np.percentile(scores, 95)))
+            out[f"{side}_player_runs"] = np.concatenate([a[f"{side}_player_runs"], b[f"{side}_player_runs"]])
+            out[f"{side}_sixes"] = np.concatenate([a[f"{side}_sixes"], b[f"{side}_sixes"]])
+        return out
+
+    def _simulate_matches_ordered(
+        self,
+        n_matches: int,
+        team1_batter_ids: List[int],
+        team1_bowler_ids: List[int],
+        team2_batter_ids: List[int],
+        team2_bowler_ids: List[int],
+        max_overs: Optional[int] = None,
+        venue_id: Optional[int] = None,
+        team1_id: Optional[int] = None,
+        team2_id: Optional[int] = None,
+        seed: Optional[int] = None,
+        team1_default_elo: Optional[float] = None,
+        team2_default_elo: Optional[float] = None,
+    ) -> Dict:
+        """Run N hierarchical Monte Carlo simulations with team1 batting first."""
         self._ensure_model_loaded()
         if max_overs is None:
             max_overs = overs_for_format(self.format_type)
@@ -717,6 +1004,8 @@ class V2Simulator:
         wkts = np.zeros(n_matches, dtype=np.int32)
         legal_balls = np.zeros(n_matches, dtype=np.int32)
         current_batter = np.zeros(n_matches, dtype=np.int32)
+        non_striker = np.ones(n_matches, dtype=np.int32)
+        next_in = np.full(n_matches, 2, dtype=np.int32)
         free_hit = np.zeros(n_matches, dtype=bool)
         active = np.ones(n_matches, dtype=bool)
 
@@ -794,7 +1083,9 @@ class V2Simulator:
                 legal_balls=legal_balls.astype(np.float32),
                 runs=runs.astype(np.float32),
                 wkts=wkts.astype(np.float32),
-                target=int(target_arr.max() if isinstance(target_arr, np.ndarray) else 0),
+                target=feature_target_value(
+                    target_arr, innings, self.config.own_chase_target,
+                ),
                 venue_features=venue_features,
                 bat_team_elo_n=bat_team_elo_n,
                 bowl_team_elo_n=bowl_team_elo_n,
@@ -805,18 +1096,14 @@ class V2Simulator:
             )
 
             inputs = {
-                "state": tf.constant(X),
-                "batter_id": tf.constant(current_batter_vocab.astype(np.int32)),
-                "bowler_id": tf.constant(np.full(n_matches, current_bowler_vocab, dtype=np.int32)),
-                "venue_id": tf.constant(np.full(n_matches, venue_vocab, dtype=np.int32)),
-                "batting_team_id": tf.constant(np.full(n_matches, batting_team_vocab, dtype=np.int32)),
-                "bowling_team_id": tf.constant(np.full(n_matches, bowling_team_vocab, dtype=np.int32)),
+                "state": X,
+                "batter_id": current_batter_vocab.astype(np.int32),
+                "bowler_id": np.full(n_matches, current_bowler_vocab, dtype=np.int32),
+                "venue_id": np.full(n_matches, venue_vocab, dtype=np.int32),
+                "batting_team_id": np.full(n_matches, batting_team_vocab, dtype=np.int32),
+                "bowling_team_id": np.full(n_matches, bowling_team_vocab, dtype=np.int32),
             }
-            try:
-                outputs = self._predict_compiled(inputs, training=False)
-            except Exception:
-                outputs = self._model(inputs, training=False)
-            ball_proba = outputs[self.ball_head_name].numpy()  # (n_matches, 9)
+            ball_proba = self._predict_head(inputs, self.ball_head_name)  # (n_matches, 9)
 
             # Hierarchical bias from over budgets
             legal_remaining = np.maximum(1, 6 - legal_balls_in_over)
@@ -885,10 +1172,11 @@ class V2Simulator:
             new_free_hit[is_legal] = False
             free_hit = new_free_hit
 
-            # Move to next batter on wicket
-            wicket_active = is_wicket & (wkts < 10)
-            current_batter[wicket_active] = np.minimum(
-                wkts[wicket_active] + 1, max_batter_idx
+            # Off: striker becomes wickets+1 (the non-striker never faces).
+            # On: rotate on a legal 1 or 3, and bring the next batter in on a wicket.
+            current_batter, non_striker, next_in = strike_after_ball(
+                current_batter, non_striker, next_in, outcome, is_wicket, wkts,
+                max_batter_idx, self.config.rotate_strike,
             )
 
             # Legal-ball counters (innings + over)
@@ -898,6 +1186,11 @@ class V2Simulator:
             # Over completion: 6 legal balls -> reset over state, advance over_idx,
             # resample over budget for matches that just finished an over
             over_complete = is_legal & (legal_balls_in_over >= 6)
+            # End-of-over swap after the ball is counted. Off leaves the ends alone.
+            # A 1 or a 3 already swapped, so those balls do not swap again.
+            current_batter, non_striker = strike_after_over(
+                current_batter, non_striker, outcome, over_complete, self.config.rotate_strike,
+            )
             if over_complete.any():
                 over_idx_next = over_idx.copy()
                 over_idx_next[over_complete] += 1
@@ -983,9 +1276,8 @@ class V2Simulator:
         current_bowler_vocab = bowler_vocab[bowler_idx_now]
         current_batter_elo_n = batter_elo_norms[current_batter]
         current_bowler_elo_n = bowler_elo_norms[bowler_idx_now]
-        target_for_state = (
-            int(target_arr.max() if isinstance(target_arr, np.ndarray) else 0)
-            if innings == 2 else 0
+        target_for_state = feature_target_value(
+            target_arr, innings, self.config.own_chase_target,
         )
         X = self._build_state_features(
             n_matches=n_matches,
@@ -1005,16 +1297,12 @@ class V2Simulator:
             era_norm=era_norm,
         )
         inputs = {
-            "state": tf.constant(X),
-            "batter_id": tf.constant(current_batter_vocab.astype(np.int32)),
-            "bowler_id": tf.constant(np.full(n_matches, current_bowler_vocab, dtype=np.int32)),
-            "venue_id": tf.constant(np.full(n_matches, venue_vocab, dtype=np.int32)),
-            "batting_team_id": tf.constant(np.full(n_matches, batting_team_vocab, dtype=np.int32)),
-            "bowling_team_id": tf.constant(np.full(n_matches, bowling_team_vocab, dtype=np.int32)),
+            "state": X,
+            "batter_id": current_batter_vocab.astype(np.int32),
+            "bowler_id": np.full(n_matches, current_bowler_vocab, dtype=np.int32),
+            "venue_id": np.full(n_matches, venue_vocab, dtype=np.int32),
+            "batting_team_id": np.full(n_matches, batting_team_vocab, dtype=np.int32),
+            "bowling_team_id": np.full(n_matches, bowling_team_vocab, dtype=np.int32),
         }
-        try:
-            outputs = self._predict_compiled(inputs, training=False)
-        except Exception:
-            outputs = self._model(inputs, training=False)
-        over_params = outputs[self.over_head_name].numpy()  # (n_matches, 4)
+        over_params = self._predict_head(inputs, self.over_head_name)  # (n_matches, 4)
         return self._sample_over_targets(over_params, rng)

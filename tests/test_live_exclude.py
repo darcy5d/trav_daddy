@@ -39,7 +39,22 @@ def test_empty_exclude_list_allows_everything():
         assert _live_excluded_prefix({"tournament_prefix": "crict20blast"}) is False
 
 
-def test_missing_prefix_is_not_excluded():
+def test_missing_prefix_fails_closed():
     with patch("config.BETTING_CONFIG", _cfg(["crict20blast"])):
-        assert _live_excluded_prefix({"tournament_prefix": None}) is False
-        assert _live_excluded_prefix({}) is False
+        assert _live_excluded_prefix({"tournament_prefix": None}) is True
+        assert _live_excluded_prefix({}) is True
+
+
+def test_unlisted_prefix_is_live_excluded():
+    with patch("config.BETTING_CONFIG", _cfg([])):
+        assert _live_excluded_prefix({"tournament_prefix": "cricbrandnewleague"}) is True
+        assert _live_excluded_prefix({"tournament_prefix": "cricadt10"}) is True
+
+
+def test_policy_live_false_is_excluded_even_if_not_in_list():
+    policy = {"crint": {"live": True}, "cricwbbl": {"live": False}}
+    with patch("config.BETTING_CONFIG", _cfg([])), \
+            patch("config.BETTING_LEAGUE_POLICY", policy):
+        assert _live_excluded_prefix({"tournament_prefix": "crint"}) is False
+        assert _live_excluded_prefix({"tournament_prefix": "cricwbbl"}) is True
+        assert _live_excluded_prefix({"tournament_prefix": "cricipl"}) is True

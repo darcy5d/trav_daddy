@@ -71,6 +71,7 @@ STATUS_FILE = REPO_ROOT / "data" / "paper_trading" / "v2v3_retrain_status.json"
 PID_FILE = LOG_DIR / "retrain_v2_v3.pid"
 
 PYTHON = str(REPO_ROOT / "venv311" / "bin" / "python")
+V3_RETRAIN_EPOCHS = int(os.getenv("V3_RETRAIN_EPOCHS", "20"))
 
 logging.basicConfig(
     level=logging.INFO,
@@ -206,8 +207,10 @@ def run_v2_v3_pipeline(
         results.append({"step": "build_v3", "skipped": True})
 
     # ── Stage 4: Train V3 model ──
+    # Uncapped runs went 45-50 epochs (~4.9 h) for a val-loss gain of <1%
+    # after epoch 15; early stopping still applies under the cap.
     ok = step(
-        [PYTHON, "scripts/train_cricket_model_v3.py"],
+        [PYTHON, "scripts/train_cricket_model_v3.py", "--epochs", str(V3_RETRAIN_EPOCHS)],
         "train_v3",
     )
     if not ok:

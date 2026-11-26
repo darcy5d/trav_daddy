@@ -106,9 +106,9 @@ class V3Simulator(V2Simulator):
         this_xi: Optional[List[int]] = None,
     ) -> float:
         """Compute fraction of `this_xi` that played in any of the team's 3
-        most-recent matches BEFORE `match_date_str`. Returns 1.0 (assume
-        stable) when inputs are missing - this is the conservative default
-        for live inference.
+        most-recent matches BEFORE `match_date_str`, counting only T20/ODI
+        matches of this gender as the training builder does. Returns 1.0
+        (assume stable) when inputs are missing or the lookup fails.
         """
         if not team_id or not match_date_str or not this_xi:
             return 1.0
@@ -117,16 +117,17 @@ class V3Simulator(V2Simulator):
             conn = get_connection()
             try:
                 cur = conn.cursor()
-                # Find the team's 3 most-recent matches BEFORE this date
                 cur.execute(
                     """
                     SELECT match_id FROM matches
                     WHERE date < ?
                       AND (team1_id = ? OR team2_id = ?)
+                      AND match_type IN ('T20', 'ODI')
+                      AND gender = ?
                     ORDER BY date DESC, match_id DESC
                     LIMIT 3
                     """,
-                    (match_date_str, team_id, team_id),
+                    (match_date_str, team_id, team_id, self.gender),
                 )
                 prior_match_ids = [r["match_id"] for r in cur.fetchall()]
                 if not prior_match_ids:
@@ -239,6 +240,11 @@ class V3Simulator(V2Simulator):
 
         return X
 
+    def _swap_sides(self) -> None:
+        if self._toss_winner_idx is not None:
+            self._toss_winner_idx = np.int8(1 - int(self._toss_winner_idx))
+        self._xi_overlap_team1, self._xi_overlap_team2 = self._xi_overlap_team2, self._xi_overlap_team1
+
     # ------------------------------------------------------------------
     # simulate_matches: thread the toss + xi-overlap kwargs through
     # ------------------------------------------------------------------
@@ -264,6 +270,8 @@ class V3Simulator(V2Simulator):
         toss_winner_team_id: Optional[int] = None,
         toss_chose_field: Optional[bool] = None,
         match_date_for_xi: Optional[str] = None,
+        batting_order: Optional[str] = None,
+        toss_bat_first_team_id: Optional[int] = None,
     ) -> Dict:
         """V3 simulate_matches.
 
@@ -275,10 +283,20 @@ class V3Simulator(V2Simulator):
             toss_chose_field: required when toss_pinned=True; True if toss
                 winner chose to field, False if chose to bat.
             match_date_for_xi: ISO date 'YYYY-MM-DD' for the as-of-date XI
-                lookup. Optional; when None we default xi_overlap to 1.0
-                (assume stable XI). For backtests this should be the actual
-                match date so we don't peek at future matches.
+                lookup. Defaults to today (UTC), which is right for live
+                inference. Training always saw the real overlap, so feeding a
+                constant 1.0 here would be out of distribution. For backtests
+                pass the actual match date so we don't peek at future matches.
+            batting_order: see V2Simulator.simulate_matches. None keeps team1
+                batting first, except with a pinned toss, where the toss
+                decides who bats first so the toss features stay consistent
+                with the innings they describe.
+            toss_bat_first_team_id: passed through to V2 when the toss is not
+                pinned.
         """
+        if match_date_for_xi is None:
+            from datetime import datetime, timezone
+            match_date_for_xi = datetime.now(timezone.utc).strftime("%Y-%m-%d")
         # ---- Prepare V3 toss + xi state BEFORE V2's simulate_matches runs ----
         rng = np.random.default_rng(seed)
 
@@ -306,6 +324,11 @@ class V3Simulator(V2Simulator):
                 self._toss_winner_idx = None
             # toss_chose_field: True -> chose to field (chose_to_bat=0)
             self._chose_to_bat_arr = np.int8(0 if bool(toss_chose_field) else 1)
+            if batting_order is None and self._toss_winner_idx is not None:
+                winner = int(self._toss_winner_idx)
+                first = 1 - winner if bool(toss_chose_field) else winner
+                batting_order = "team1_first" if first == 0 else "team2_first"
+                toss_bat_first_team_id = None
         elif use_toss:
             # Marginalised: encode uncertainty as 0.5. Model has seen 0/1 only at
             # training; this is interpolation but tells the model "we don't know".
@@ -342,6 +365,8 @@ class V3Simulator(V2Simulator):
             toss_field_prob=toss_field_prob,
             team1_default_elo=team1_default_elo,
             team2_default_elo=team2_default_elo,
+            toss_bat_first_team_id=toss_bat_first_team_id,
+            batting_order=batting_order or "team1_first",
         )
 
         # Stamp V3-specific provenance into the result

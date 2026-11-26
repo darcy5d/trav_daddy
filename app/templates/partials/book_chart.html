@@ -1,0 +1,21 @@
+{# Chart shell only. Each page draws its own series. No reference-line value here. #}
+<style>
+    .book-chart-card {
+        padding: 0.6rem; border: 1px solid var(--border-color); border-radius: 8px;
+        background: var(--bg-secondary);
+    }
+    canvas.book-chart {
+        display: block; max-width: 100%; height: 220px;
+        background: rgba(0,0,0,0.05); border-radius: 6px;
+    }
+    .book-chart-legend {
+        margin-top: 0.5rem; font-size: 0.75rem; display: flex; gap: 0.8rem; flex-wrap: wrap;
+    }
+</style>
+<section class="book-section" id="{{ book_chart.section_id }}">
+    <h2>Bankroll Over Time</h2>
+    <div class="book-chart-card">
+        <canvas id="{{ book_chart.canvas_id }}" class="book-chart" width="900" height="220"></canvas>
+        <div id="{{ book_chart.legend_id }}" class="book-chart-legend"></div>
+    </div>
+</section>

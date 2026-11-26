@@ -118,9 +118,10 @@ POLYMARKET_CONFIG = {
 # marginal, forward-test first; NO-GO = insufficient data, don't bet blind.
 #
 # To toggle a league on/off for live, flip its "live" flag (and update "reason").
-# Any prefix with live=False is added to live_exclude_prefixes below. Prefixes
-# NOT listed here are treated as live-eligible by default (blocklist posture) —
-# add new leagues here as the coverage tool surfaces them.
+# Allowlist posture (2026-11-07): only prefixes listed here with live=True may
+# place REAL bets. Any prefix NOT listed (new Polymarket leagues, typos, stale
+# taxonomy) is paper-only until someone adds it here with live=True — see
+# is_live_league(). Paper scanners are unaffected.
 BETTING_LEAGUE_POLICY = {
     # --- GO: well-covered, live-eligible -------------------------------------
     "crint":    {"live": True,  "verdict": "GO",        "reason": "Internationals: 94% team-match, deep history, 99% player-vocab."},
@@ -153,7 +154,34 @@ BETTING_LEAGUE_POLICY = {
     "cricshpageeza":  {"live": False, "verdict": "NO-GO", "reason": "Shpageeza (Afghanistan): 38% team-match."},
     "crict20blastl2w":{"live": False, "verdict": "NO-GO", "reason": "Blast League 2 Women: no match history in DB."},
     "cricapl":        {"live": False, "verdict": "NO-GO", "reason": "Andhra Premier League: 0% team-match, no history."},
+    # --- 2026-11-07 Polymarket mapping audit: explicit paper-only entries for
+    # leagues observed live/in the ledger with wrong or missing team mappings.
+    # (Unlisted prefixes are paper-only anyway; these document why.)
+    "cricadt10":      {"live": False, "verdict": "NO-GO", "reason": "Abu Dhabi T10: 0/6 teams in DB; previous fuzzy matches were wrong (UAE Bulls->Barisal Bulls)."},
+    "cricmcat20":     {"live": False, "verdict": "NO-GO", "reason": "Singer-MCA T20 (SL corporate): teams not in DB."},
+    "cricmukono":     {"live": False, "verdict": "NO-GO", "reason": "Mukono Super Smash (Uganda): teams not in DB."},
+    "cricjclt10":     {"live": False, "verdict": "NO-GO", "reason": "JCL T10: teams not in DB; previous fuzzy matches were wrong."},
+    "crickerala":     {"live": False, "verdict": "NO-GO", "reason": "Kuwait Kerala PL: teams not in DB."},
+    "crickcct20":     {"live": False, "verdict": "NO-GO", "reason": "KCC T20: teams not in DB."},
+    "cricppl":        {"live": False, "verdict": "NO-GO", "reason": "Pondicherry PL: teams not in DB."},
+    "cricdpl":        {"live": False, "verdict": "NO-GO", "reason": "Delhi PL: teams not in DB."},
+    "crict20max":     {"live": False, "verdict": "NO-GO", "reason": "T20 Max (QLD grade): teams not in DB."},
+    "crictopend":     {"live": False, "verdict": "NO-GO", "reason": "Top End T20: academy/A sides, not modelled."},
+    "cricwcl":        {"live": False, "verdict": "NO-GO", "reason": "World Championship of Legends: legends sides, not modelled."},
+    "cricgsl":        {"live": False, "verdict": "NO-GO", "reason": "Global Super League: exhibition XIs."},
+    "cricranji":      {"live": False, "verdict": "NO-GO", "reason": "Ranji Trophy: first-class (3-way market), no model."},
+    "cricshield":     {"live": False, "verdict": "NO-GO", "reason": "Sheffield Shield: first-class (3-way market), no model."},
+    "crichksixes":    {"live": False, "verdict": "NO-GO", "reason": "Hong Kong Sixes: 6-a-side format, not modelled."},
+    "criccsat20w":    {"live": False, "verdict": "PAPER-ONLY", "reason": "CSA T20 Women: teams resolve but have ~no women's history in DB."},
+    "cricnpl":        {"live": False, "verdict": "PAPER-ONLY", "reason": "Nepal PL: 5/6 teams in DB with thin history; paper-confirm first."},
+    "cricwbbl":       {"live": False, "verdict": "PAPER-ONLY", "reason": "WBBL: mappings correct; not yet reviewed for live."},
 }
+
+
+def is_live_league(prefix: str) -> bool:
+    """True iff `prefix` is explicitly allow-listed for REAL-money betting."""
+    entry = BETTING_LEAGUE_POLICY.get((prefix or "").strip().lower())
+    return bool(entry and entry.get("live", False))
 
 # Wave 5 Phase 6c: Live betting risk gate config.
 # All caps are enforced server-side in src/integrations/polymarket/risk_gate.py;
@@ -221,6 +249,8 @@ BETTING_CONFIG = {
     #   1. every BETTING_LEAGUE_POLICY entry with live=False (the documented gate
     #      result — NO-GO leagues + deliberate paper-confirms), and
     #   2. any extra prefixes in BETTING_LIVE_EXCLUDE_PREFIXES (ad-hoc override).
+    # Prefixes absent from the policy table are ALSO live-blocked (allowlist);
+    # that check lives in is_live_league(), since the set is open-ended.
     # Edit the league policy table above to toggle a competition on/off.
     "live_exclude_prefixes": sorted(
         {p for p, v in BETTING_LEAGUE_POLICY.items() if not v.get("live", False)}
@@ -251,6 +281,21 @@ BETTING_CONFIG = {
         m.strip() for m in os.getenv("BETTING_AUTO_MARKETS", "moneyline").split(",") if m.strip()
     ],
     "kill_switch": os.getenv("BETTING_KILL_SWITCH", "0").strip() in ("1", "true", "True", "TRUE"),
+    # Winner redemption is a separate, gasless accounting operation. It never
+    # opens or closes market risk, so it is intentionally independent of the
+    # trading mode and kill switch. It still ships disabled until explicitly
+    # armed in .env after a dry-run review.
+    "auto_redeem_enabled": os.getenv("BETTING_AUTO_REDEEM_ENABLED", "0").strip()
+    in ("1", "true", "True", "TRUE"),
+    "auto_redeem_min_value_usdc": float(
+        os.getenv("BETTING_AUTO_REDEEM_MIN_VALUE_USDC", "0.01")
+    ),
+    "auto_redeem_batch_limit": int(
+        os.getenv("BETTING_AUTO_REDEEM_BATCH_LIMIT", "10")
+    ),
+    "auto_redeem_timeout_seconds": int(
+        os.getenv("BETTING_AUTO_REDEEM_TIMEOUT_SECONDS", "120")
+    ),
     # Phase 7 scale-up gate thresholds (used by the dashboard "graduate envelope" flow).
     "scale_up_min_settled_bets": int(os.getenv("BETTING_SCALE_MIN_BETS", "50")),
     "scale_up_max_brier_drift": float(os.getenv("BETTING_SCALE_MAX_BRIER_DRIFT", "0.02")),
@@ -358,6 +403,14 @@ SIMULATION_CONFIG = {
     "num_simulations": 10000,  # Number of match simulations to run
     "confidence_level": 0.95,  # For confidence intervals
     "chunk_size": 1000,  # Simulations per chunk for progress updates
+}
+
+# Pre-match V2/V3 simulations in the paper/live scanners. 4,000 sims keep the
+# Monte Carlo SD of P(team1) under 1pp. Before the toss the batting order is
+# unknown, so "symmetric" runs half the sims with each side batting first.
+V2V3_SIM_CONFIG = {
+    "n_sims": int(os.getenv("V2V3_N_SIMS", "4000")),
+    "batting_order": os.getenv("V2V3_BATTING_ORDER", "symmetric"),
 }
 
 # Performance / Parallelism Configuration (Apple M2 Pro optimization)

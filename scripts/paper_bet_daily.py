@@ -31,7 +31,7 @@ import sys
 import traceback
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -40,6 +40,10 @@ from src.integrations.polymarket.paper_strategies import (
     STRATEGIES,
     get_strategy_bankroll,
     get_enabled_strategies,
+)
+from src.integrations.polymarket.paper_cohorts import (
+    cohort_filter_sql,
+    resolve_cohort_arg,
 )
 
 
@@ -53,11 +57,17 @@ logger = logging.getLogger(__name__)
 REPORT_DIR = Path(__file__).resolve().parent.parent / "data" / "paper_trading" / "daily_reports"
 
 
-def _strategy_summary(conn) -> Dict[str, Any]:
-    """Build a per-strategy P&L + bankroll table."""
+def _strategy_summary(conn, cohort: Optional[str] = None) -> Dict[str, Any]:
+    """Build a per-strategy P&L + bankroll table.
+
+    Cohort-scoped (V15): defaults to the CURRENT paper cohort so the legacy
+    calibration holdout does not leak into the headline rollup. Pass
+    ``cohort='legacy_pre_edge_20261108'`` (or 'all') for calibration work.
+    """
+    cohort_sql, cohort_params = cohort_filter_sql(resolve_cohort_arg(cohort))
     cur = conn.cursor()
     cur.execute(
-        """
+        f"""
         SELECT strategy_label,
                COUNT(*) AS n_bets,
                SUM(CASE WHEN status = 'settled' THEN 1 ELSE 0 END) AS n_settled,
@@ -68,9 +78,11 @@ def _strategy_summary(conn) -> Dict[str, Any]:
                MAX(proposed_at) AS last_bet_at
         FROM bet_ledger
         WHERE bet_kind = 'paper'
+          AND {cohort_sql}
         GROUP BY strategy_label
         ORDER BY strategy_label
-        """
+        """,
+        cohort_params,
     )
     rows = [dict(r) for r in cur.fetchall()]
     by_strat: Dict[str, Any] = {}

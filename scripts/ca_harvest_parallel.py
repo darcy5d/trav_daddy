@@ -55,7 +55,7 @@ def _get_fetcher() -> PoliteFetcher:
     """Return (or create) the PoliteFetcher for the calling thread."""
     if not hasattr(_thread_local, "fetcher"):
         _thread_local.fetcher = PoliteFetcher(
-            auth._new_session(),
+            auth.ensure_session(),
             counter_lock=_shared_counter_lock,
         )
         logger.debug("Thread %s: new PoliteFetcher created", threading.current_thread().name)
@@ -149,7 +149,7 @@ def main() -> int:
     _shared_counter_lock = threading.Lock()
 
     # ---- Phase 1: expand event URLs → flat scorecard list (fast, mostly cached) ---
-    expand_fetcher = PoliteFetcher(auth._new_session(), counter_lock=_shared_counter_lock)
+    expand_fetcher = PoliteFetcher(auth.ensure_session(), counter_lock=_shared_counter_lock)
 
     if args.scorecard:
         lines = [args.scorecard]

@@ -19,6 +19,48 @@ logger = logging.getLogger(__name__)
 DATA_API_BASE = "https://data-api.polymarket.com"
 
 
+class LiveOrderingDisabled(RuntimeError):
+    """Raised when a real order is attempted while live ordering is disabled.
+
+    Last-line-of-defence guard, independent of every upstream scanner/risk-gate
+    check. A real order may only be submitted when BETTING_MODE=AUTO, the kill
+    switch is released, and the strategy whitelist is non-empty *and* contains
+    the strategy being traded. Anything else refuses here, before the SDK
+    client is even constructed (so nothing is signed and nothing is sent).
+    """
+
+
+def assert_live_ordering_enabled(strategy_label: Optional[str] = None) -> None:
+    """Raise LiveOrderingDisabled unless live ordering is fully armed.
+
+    Mirrors src.integrations.polymarket.risk_gate gate order (kill switch →
+    mode → whitelist) but is deliberately duplicated at the client layer so a
+    refactor of the risk gate cannot reopen the write path by accident.
+    """
+    from config import BETTING_CONFIG
+
+    if BETTING_CONFIG.get("kill_switch"):
+        raise LiveOrderingDisabled(
+            "BETTING_KILL_SWITCH is engaged — refusing to submit a real order."
+        )
+    mode = str(BETTING_CONFIG.get("mode", "OFF")).upper()
+    if mode != "AUTO":
+        raise LiveOrderingDisabled(
+            f"BETTING_MODE={mode} (not AUTO) — refusing to submit a real order."
+        )
+    live = list(BETTING_CONFIG.get("live_strategies", []) or [])
+    if not live:
+        raise LiveOrderingDisabled(
+            "BETTING_LIVE_STRATEGIES is empty — no strategy is live; refusing to "
+            "submit a real order."
+        )
+    if strategy_label is not None and strategy_label not in live:
+        raise LiveOrderingDisabled(
+            f"Strategy '{strategy_label}' is not in BETTING_LIVE_STRATEGIES — "
+            "refusing to submit a real order."
+        )
+
+
 class PolymarketClient:
     """Thin wrapper around Polymarket public + CLOB endpoints.
 
@@ -189,6 +231,31 @@ class PolymarketClient:
     # Wave 5.9: Order-book analysis helpers for TWAP routing
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _book_levels(book: Any) -> tuple[list[dict], list[dict]]:
+        """Return (bids, asks) sorted best-first.
+
+        The CLOB /book endpoint does not promise an order: it returns bids
+        ascending and asks descending, so element 0 is the WORST price on both
+        sides. Reading [0] gave a bid of ~0.001 and an ask of ~0.999 on every
+        market, which pinned the spread near 100pp and meant the routing check
+        `best_ask <= max_acceptable_price` could never pass.
+        """
+        if not isinstance(book, dict):
+            return [], []
+
+        def _sorted(levels: Any, reverse: bool) -> list[dict]:
+            cleaned = []
+            for level in levels or []:
+                try:
+                    price = float(level["price"])
+                except (KeyError, TypeError, ValueError):
+                    continue
+                cleaned.append({"price": price, "size": float(level.get("size", 0) or 0)})
+            return sorted(cleaned, key=lambda l: l["price"], reverse=reverse)
+
+        return _sorted(book.get("bids"), reverse=True), _sorted(book.get("asks"), reverse=False)
+
     def get_book_spread(self, token_id: str) -> Dict[str, Any]:
         """Analyze the order book and return spread/liquidity metrics.
 
@@ -197,19 +264,18 @@ class PolymarketClient:
                 "bid": float or None,         # best bid price
                 "ask": float or None,         # best ask price
                 "spread_pp": float or None,   # spread in percentage points (ask - bid) * 100
-                "best_bid_size": float,       # total size at best bid level
-                "best_ask_size": float,       # total size at best ask level
+                "best_bid_size": float,       # size at best bid level
+                "best_ask_size": float,       # size at best ask level
                 "midpoint": float or None,    # (bid + ask) / 2
             }
         """
         book = self.get_clob_order_book(token_id)
-        bids = book.get("bids", []) if isinstance(book, dict) else []
-        asks = book.get("asks", []) if isinstance(book, dict) else []
+        bids, asks = self._book_levels(book)
 
-        best_bid = float(bids[0]["price"]) if bids else None
-        best_ask = float(asks[0]["price"]) if asks else None
-        best_bid_size = float(bids[0].get("size", 0)) if bids else 0.0
-        best_ask_size = float(asks[0].get("size", 0)) if asks else 0.0
+        best_bid = bids[0]["price"] if bids else None
+        best_ask = asks[0]["price"] if asks else None
+        best_bid_size = bids[0]["size"] if bids else 0.0
+        best_ask_size = asks[0]["size"] if asks else 0.0
 
         spread_pp = None
         midpoint = None
@@ -242,7 +308,7 @@ class PolymarketClient:
             }
         """
         book = self.get_clob_order_book(token_id)
-        asks = book.get("asks", []) if isinstance(book, dict) else []
+        _bids, asks = self._book_levels(book)
 
         if not asks:
             return {
@@ -259,8 +325,8 @@ class PolymarketClient:
         levels_consumed = 0
 
         for level in asks:
-            price = float(level["price"])
-            level_size_shares = float(level.get("size", 0))
+            price = level["price"]
+            level_size_shares = level["size"]
             level_cost_capacity = level_size_shares * price
 
             if remaining <= 0:
@@ -274,7 +340,7 @@ class PolymarketClient:
             levels_consumed += 1
 
         vwap = (total_cost / total_shares) if total_shares > 0 else None
-        best_ask = float(asks[0]["price"]) if asks else None
+        best_ask = asks[0]["price"] if asks else None
         slippage_pp = ((vwap - best_ask) * 100.0) if (vwap and best_ask) else None
 
         return {
@@ -286,16 +352,16 @@ class PolymarketClient:
         }
 
     def get_asks_below_price(self, token_id: str, max_price: float) -> List[Dict[str, Any]]:
-        """Return all ask levels priced at or below `max_price`.
+        """Return all ask levels priced at or below `max_price`, cheapest first.
 
         Each entry: {"price": float, "size": float (shares)}
         """
         book = self.get_clob_order_book(token_id)
-        asks = book.get("asks", []) if isinstance(book, dict) else []
+        _bids, asks = self._book_levels(book)
         return [
-            {"price": float(a["price"]), "size": float(a.get("size", 0))}
+            {"price": a["price"], "size": a["size"]}
             for a in asks
-            if float(a["price"]) <= max_price
+            if a["price"] <= max_price
         ]
 
     # ------------------------------------------------------------------
@@ -371,6 +437,7 @@ class PolymarketClient:
         side: str,
         amount_usdc: float,
         order_type: str = "FOK",
+        max_price: Optional[float] = None,
     ) -> Dict[str, Any]:
         """Place a market order (FOK = fill-or-kill, FAK = fill-and-kill).
 
@@ -379,10 +446,14 @@ class PolymarketClient:
             side: "BUY" or "SELL" (case-insensitive).
             amount_usdc: USD-equivalent stake size.
             order_type: "FOK" (default) or "FAK".
+            max_price: Optional ceiling for a BUY. Without it the SDK walks the
+                ask ladder as deep as the stake requires, so a thin book fills
+                at whatever the worst level costs.
 
         Returns:
             CLOB API response dict (includes `orderID`, status, fill details).
         """
+        assert_live_ordering_enabled()
         client = self._get_clob_sdk_client()
         from py_clob_client_v2 import OrderType, Side, MarketOrderArgsV2
         side_const = Side.BUY if side.upper() == "BUY" else Side.SELL
@@ -399,6 +470,7 @@ class PolymarketClient:
             side=side_const,
             order_type=order_type_enum,
             user_usdc_balance=user_usdc_balance,
+            price=float(max_price) if (max_price is not None and side.upper() == "BUY") else 0,
         )
         signed = client.create_market_order(args)
         return client.post_order(signed, order_type_enum)
@@ -421,6 +493,7 @@ class PolymarketClient:
         Returns:
             CLOB API response dict.
         """
+        assert_live_ordering_enabled()
         client = self._get_clob_sdk_client()
         from py_clob_client_v2 import OrderType, Side, OrderArgs
         side_const = Side.BUY if side.upper() == "BUY" else Side.SELL

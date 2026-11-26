@@ -125,6 +125,14 @@ try:
 except Exception as _exc:  # pragma: no cover - logged but non-fatal at import time
     logger.warning(f"Capital flows schema init failed at startup: {_exc}")
 
+# Paper-bet cohort tagging (default paper P&L reports the current cohort only).
+try:
+    from src.data.database import init_paper_cohort as _init_paper_cohort
+
+    _init_paper_cohort()
+except Exception as _exc:  # pragma: no cover - logged but non-fatal at import time
+    logger.warning(f"Paper cohort schema init failed at startup: {_exc}")
+
 # Lazy load simulators (they take time to initialize)
 # Cache per gender to avoid re-initializing
 _fast_simulators = {}  # {'male': simulator, 'female': simulator}
@@ -4839,8 +4847,8 @@ def betting_strategies():
     """Wave 5.8: per-strategy bankroll + P&L rollup for the Live Betting UI.
 
     Returns starting bankroll, current bankroll, open exposure, realised P&L,
-    ROI, win rate and bet counts for each strategy in BETTING_LIVE_STRATEGIES
-    plus any retired strategy that still has historical real bets.
+    ROI, win rate and bet counts for each strategy in BETTING_LIVE_STRATEGIES.
+    Historical real rows stay in bet_ledger and are not listed.
     """
     try:
         from src.integrations.polymarket.risk_gate import get_strategy_breakdown
@@ -5239,7 +5247,10 @@ def betting_bankroll_history():
 
             grouped = defaultdict(list)
             for r in rows:
-                grouped[r["strategy_label"] or "(none)"].append(r)
+                label = r["strategy_label"] or ""
+                if label not in live_strategies:
+                    continue
+                grouped[label].append(r)
 
             for name, lst in grouped.items():
                 base = _strat_starting(name, conn)
@@ -5939,9 +5950,18 @@ def betting_place():
     """
     try:
         from src.integrations.polymarket.bet_placement import place_bet
+        from config import BETTING_CONFIG, is_live_league
         payload = request.get_json(silent=True) or {}
+        fixture_key = str(payload.get('fixture_key', ''))
+        prefix = fixture_key.split('-', 1)[0].strip().lower()
+        if (prefix in (BETTING_CONFIG.get('live_exclude_prefixes') or [])
+                or not is_live_league(prefix)):
+            return jsonify({
+                'success': False,
+                'error': f"League prefix '{prefix}' is not on the live allowlist (BETTING_LEAGUE_POLICY)",
+            }), 403
         result = place_bet(
-            fixture_key=str(payload.get('fixture_key', '')),
+            fixture_key=fixture_key,
             match_id=payload.get('match_id'),
             market_type=str(payload.get('market_type', '')),
             polymarket_market_id=str(payload.get('polymarket_market_id', '')),
@@ -6410,17 +6430,32 @@ def paper_trades_page():
 
 @app.route('/api/paper/strategies', methods=['GET'])
 def paper_strategies():
-    """Per-strategy summary: bankroll, P&L, win rate, bet counts."""
+    """Per-strategy summary: bankroll, P&L, win rate, bet counts.
+
+    Query: ?cohort=post_edge_20261108 (default) | legacy_pre_edge_20261108 | all
+    The default reports the CURRENT paper cohort only; the legacy calibration
+    holdout stays in the table and is selected explicitly.
+    """
     try:
         from src.integrations.polymarket.paper_strategies import STRATEGIES
+        from src.integrations.polymarket.paper_cohorts import (
+            ALL_COHORTS, cohort_filter_sql, resolve_cohort_arg,
+        )
+        from src.integrations.polymarket.paper_sample_size import sample_size_wait
         starting_by_name = {s.name: s.starting_bankroll_usdc for s in STRATEGIES}
         descriptions = {s.name: s.description for s in STRATEGIES}
         enabled = {s.name: s.enabled for s in STRATEGIES}
 
+        try:
+            cohort = resolve_cohort_arg(request.args.get('cohort'))
+        except ValueError as exc:
+            return jsonify({"success": False, "error": str(exc)}), 400
+        cohort_sql, cohort_params = cohort_filter_sql(cohort)
+
         with get_db_connection() as conn:
             cur = conn.cursor()
             cur.execute(
-                """
+                f"""
                 SELECT strategy_label,
                        COUNT(*) AS n_bets,
                        SUM(CASE WHEN status = 'settled' THEN 1 ELSE 0 END) AS n_settled,
@@ -6430,16 +6465,37 @@ def paper_strategies():
                                 THEN pnl_realised_usdc ELSE 0 END) AS held_pnl,
                        SUM(CASE WHEN status = 'settled' AND cashout_triggered_at IS NOT NULL
                                 THEN pnl_realised_usdc ELSE 0 END) AS cashout_pnl,
+                       SUM(CASE WHEN status = 'settled' THEN size_usdc ELSE 0 END) AS settled_stake,
                        SUM(CASE WHEN status NOT IN ('settled', 'cancelled', 'errored') THEN size_usdc ELSE 0 END) AS open_size,
                        MIN(proposed_at) AS first_bet_at,
                        MAX(proposed_at) AS last_bet_at
                 FROM bet_ledger
                 WHERE bet_kind = 'paper'
+                  AND {cohort_sql}
                 GROUP BY strategy_label
-                """
+                """,
+                cohort_params,
             )
             rows = {r["strategy_label"]: dict(r) for r in cur.fetchall()}
+            cur.execute(
+                f"""
+                SELECT strategy_label, pnl_realised_usdc, size_usdc, settled_at
+                FROM bet_ledger
+                WHERE bet_kind = 'paper'
+                  AND status = 'settled'
+                  AND {cohort_sql}
+                """,
+                cohort_params,
+            )
+            settled_by_strategy = {}
+            for row in cur.fetchall():
+                settled_by_strategy.setdefault(row["strategy_label"], []).append({
+                    "pnl_realised_usdc": row["pnl_realised_usdc"],
+                    "size_usdc": row["size_usdc"],
+                    "settled_at": row["settled_at"],
+                })
 
+        as_of = datetime.now(timezone.utc)
         out = []
         for s in STRATEGIES:
             r = rows.get(s.name, {})
@@ -6450,9 +6506,17 @@ def paper_strategies():
             held_pnl = float(r.get("held_pnl") or 0.0)
             cashout_pnl = float(r.get("cashout_pnl") or 0.0)
             open_size = float(r.get("open_size") or 0.0)
+            settled_stake = float(r.get("settled_stake") or 0.0)
+            # Total P&L is the sum of the two P&L columns. Bankroll ROI is that
+            # total divided by the strategy's starting bankroll ($1,000).
+            total_pnl = round(round(held_pnl, 2) + round(cashout_pnl, 2), 2)
             bankroll = s.starting_bankroll_usdc + realised
             win_rate = (n_won / n_settled) if n_settled else None
-            roi_pct = (realised / s.starting_bankroll_usdc * 100) if s.starting_bankroll_usdc else None
+            roi_pct = (
+                (total_pnl / s.starting_bankroll_usdc * 100)
+                if s.starting_bankroll_usdc else None
+            )
+            stake_roi_pct = (total_pnl / settled_stake * 100) if settled_stake > 0 else None
             out.append({
                 "name":          s.name,
                 "description":   s.description,
@@ -6464,15 +6528,43 @@ def paper_strategies():
                 "realised_pnl":  round(realised, 2),
                 "held_pnl":      round(held_pnl, 2),
                 "cashout_pnl":   round(cashout_pnl, 2),
+                "total_pnl":     total_pnl,
                 "open_size":     round(open_size, 2),
+                "settled_stake": round(settled_stake, 2),
                 "roi_pct":       round(roi_pct, 2) if roi_pct is not None else None,
+                "stake_roi_pct": round(stake_roi_pct, 2) if stake_roi_pct is not None else None,
                 "n_bets":        n_bets,
                 "n_settled":     n_settled,
                 "n_won":         n_won,
                 "win_rate":      win_rate,
                 "first_bet_at":  r.get("first_bet_at"),
                 "last_bet_at":   r.get("last_bet_at"),
+                "sample_wait":   sample_size_wait(
+                    settled_by_strategy.get(s.name, []),
+                    enabled=s.enabled,
+                    n_bets=n_bets,
+                    now=as_of,
+                ),
             })
+
+        def _retired_without_bets(row):
+            return (not row["enabled"]) and int(row["n_bets"] or 0) == 0
+
+        # Highest bankroll ROI first. Retired strategies with no bets stay last.
+        out.sort(key=lambda row: (
+            1 if _retired_without_bets(row) else 0,
+            -(row["roi_pct"] if row["roi_pct"] is not None else float("-inf")),
+            row["name"],
+        ))
+        included = [row for row in out if not _retired_without_bets(row)]
+        book_pnl = sum(row["total_pnl"] for row in included)
+        book_starting = sum(row["starting"] for row in included)
+        book_stake = sum(row["settled_stake"] for row in included)
+        book = {
+            "total_pnl": round(book_pnl, 2),
+            "bankroll_roi_pct": round(book_pnl / book_starting * 100, 2) if book_starting else None,
+            "stake_roi_pct": round(book_pnl / book_stake * 100, 2) if book_stake else None,
+        }
         # Totals row
         total_starting = sum(x["starting"] for x in out)
         total_realised = sum(x["realised_pnl"] for x in out)
@@ -6482,7 +6574,10 @@ def paper_strategies():
         total_open = sum(x["open_size"] for x in out)
         return jsonify({
             "success": True,
+            "cohort": cohort,
+            "cohort_all": cohort == ALL_COHORTS,
             "strategies": out,
+            "book": book,
             "totals": {
                 "starting": total_starting,
                 "realised_pnl": round(total_realised, 2),
@@ -6502,15 +6597,23 @@ def paper_strategies():
 def paper_bets():
     """Open + recent paper bets, ordered by proposed_at desc.
 
-    Query: ?status=open|settled|all (default 'all'), ?limit=50, ?strategy=name
+    Query: ?status=open|settled|all (default 'all'), ?limit=50, ?strategy=name,
+           ?cohort=post_edge_20261108 (default) | legacy_pre_edge_20261108 | all
     """
     try:
+        from src.integrations.polymarket.paper_cohorts import (
+            ALL_COHORTS, cohort_filter_sql, resolve_cohort_arg,
+        )
         status = (request.args.get('status') or 'all').lower()
         strategy = request.args.get('strategy')
         try:
             limit = max(1, min(int(request.args.get('limit') or 100), 500))
         except ValueError:
             limit = 100
+        try:
+            cohort = resolve_cohort_arg(request.args.get('cohort'))
+        except ValueError as exc:
+            return jsonify({"success": False, "error": str(exc)}), 400
 
         where = ["bet_kind = 'paper'"]
         params = []
@@ -6521,6 +6624,9 @@ def paper_bets():
         if strategy:
             where.append("strategy_label = ?")
             params.append(strategy)
+        cohort_sql, cohort_params = cohort_filter_sql(cohort)
+        where.append(cohort_sql)
+        params.extend(cohort_params)
 
         sql = f"""
             SELECT *
@@ -6536,7 +6642,13 @@ def paper_bets():
             cur.execute(sql, params)
             bets = [dict(r) for r in cur.fetchall()]
             _enrich_paper_bets(conn, bets)
-        return jsonify({"success": True, "bets": bets, "n": len(bets)})
+        return jsonify({
+            "success": True,
+            "cohort": cohort,
+            "cohort_all": cohort == ALL_COHORTS,
+            "bets": bets,
+            "n": len(bets),
+        })
     except Exception as e:
         logger.error(f"Error in /api/paper/bets: {e}")
         return jsonify({"success": False, "error": str(e)}), 500
@@ -6552,20 +6664,35 @@ def paper_bankroll_history():
     bankroll_at_proposal (which can be stale if bets settle in a
     different order than they were placed); cumulative-sum is the
     canonical bankroll over time.
+
+    Query: ?cohort=post_edge_20261108 (default) | legacy_pre_edge_20261108 | all
+    Each cohort's curve starts from the strategy's starting bankroll, so the
+    legacy holdout and the current cohort are never chained together.
     """
     try:
         from src.integrations.polymarket.paper_strategies import STRATEGIES
+        from src.integrations.polymarket.paper_cohorts import (
+            ALL_COHORTS, cohort_filter_sql, resolve_cohort_arg,
+        )
         starting = {s.name: s.starting_bankroll_usdc for s in STRATEGIES}
+
+        try:
+            cohort = resolve_cohort_arg(request.args.get('cohort'))
+        except ValueError as exc:
+            return jsonify({"success": False, "error": str(exc)}), 400
+        cohort_sql, cohort_params = cohort_filter_sql(cohort)
 
         with get_db_connection() as conn:
             cur = conn.cursor()
             cur.execute(
-                """
+                f"""
                 SELECT strategy_label, settled_at, pnl_realised_usdc, side_label, fixture_key
                 FROM bet_ledger
                 WHERE bet_kind = 'paper' AND status = 'settled'
+                  AND {cohort_sql}
                 ORDER BY strategy_label, settled_at ASC
-                """
+                """,
+                cohort_params,
             )
             rows = [dict(r) for r in cur.fetchall()]
 
@@ -6601,7 +6728,12 @@ def paper_bankroll_history():
                     "fixture_key": r.get("fixture_key"),
                     "pnl":         round(pnl, 2),
                 })
-        return jsonify({"success": True, "history": by_strategy})
+        return jsonify({
+            "success": True,
+            "cohort": cohort,
+            "cohort_all": cohort == ALL_COHORTS,
+            "history": by_strategy,
+        })
     except Exception as e:
         logger.error(f"Error in /api/paper/bankroll-history: {e}")
         return jsonify({"success": False, "error": str(e)}), 500

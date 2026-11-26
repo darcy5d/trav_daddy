@@ -53,8 +53,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from src.data.database import get_connection, get_db_connection, get_active_model_snapshot
 from src.integrations.polymarket import PolymarketClient
 from src.integrations.polymarket.bet_placement import place_bet
+from config import V2V3_SIM_CONFIG
 from src.integrations.polymarket.paper_inputs import (
-    get_recent_xi, get_default_venue_for_team,
+    get_default_venue_for_team, check_confirmed_xi, select_bowlers_from_xi,
+    XI_CREX_CONFIRMED, XI_HISTORICAL_FALLBACK,
 )
 from src.integrations.polymarket.paper_strategies import get_enabled_strategies
 from src.integrations.polymarket.upcoming import (
@@ -241,53 +243,24 @@ def post_toss_live_scan(
     gender = fix["gender"]
     t1, t2 = fix["team1_id"], fix["team2_id"]
 
-    def _derive_bowlers(xi: List[int]) -> List[int]:
-        if len(xi) >= 11:
-            return xi[6:11]
-        if len(xi) >= 5:
-            return xi[-5:]
-        return []
-
+    # Real money post-toss needs a confirmed XI on both sides; the paper scan
+    # instead falls back to the recent-XI proxy and flags the bet.
     with get_db_connection() as conn:
-        recent_t1_bat, recent_t1_bowl = get_recent_xi(conn, t1, fmt, gender)
-        recent_t2_bat, recent_t2_bowl = get_recent_xi(conn, t2, fmt, gender)
-        venue_id = get_default_venue_for_team(conn, t1, fmt, gender)
-
-        if team1_xi_override and len(team1_xi_override) >= 11:
-            t1_bat = team1_xi_override[:11]
-            t1_bowl = _derive_bowlers(team1_xi_override)
-            if len(t1_bowl) < 5:
-                seen = set(t1_bat)
-                for p in recent_t1_bowl:
-                    if p not in seen and len(t1_bowl) < 5:
-                        t1_bowl.append(p)
-                        seen.add(p)
-            logger.info(f"  Using team1 XI override: {len(t1_bat)} batters, {len(t1_bowl)} bowlers")
-        else:
-            if team1_xi_override:
-                logger.warning(
-                    f"  team1 XI override only has {len(team1_xi_override)} names "
-                    f"(<11); falling back to recent-XI proxy"
-                )
-            t1_bat, t1_bowl = recent_t1_bat, recent_t1_bowl
-
-        if team2_xi_override and len(team2_xi_override) >= 11:
-            t2_bat = team2_xi_override[:11]
-            t2_bowl = _derive_bowlers(team2_xi_override)
-            if len(t2_bowl) < 5:
-                seen = set(t2_bat)
-                for p in recent_t2_bowl:
-                    if p not in seen and len(t2_bowl) < 5:
-                        t2_bowl.append(p)
-                        seen.add(p)
-            logger.info(f"  Using team2 XI override: {len(t2_bat)} batters, {len(t2_bowl)} bowlers")
-        else:
-            if team2_xi_override:
-                logger.warning(
-                    f"  team2 XI override only has {len(team2_xi_override)} names "
-                    f"(<11); falling back to recent-XI proxy"
-                )
-            t2_bat, t2_bowl = recent_t2_bat, recent_t2_bowl
+        venue_id = fix.get("venue_id") or get_default_venue_for_team(conn, t1, fmt, gender)
+        ok1, why1 = check_confirmed_xi(conn, team1_xi_override, t1, fmt, gender)
+        ok2, why2 = check_confirmed_xi(conn, team2_xi_override, t2, fmt, gender)
+        summary["xi_check"] = {"team1": why1, "team2": why2}
+        if not (ok1 and ok2):
+            msg = f"XI not confirmed (team1: {why1}; team2: {why2}); no live post-toss bet"
+            logger.warning(f"  {msg}")
+            summary["exit_reason"] = "xi_not_confirmed"
+            summary["xi_status"] = XI_HISTORICAL_FALLBACK
+            return summary
+        t1_bat = list(team1_xi_override[:11])
+        t2_bat = list(team2_xi_override[:11])
+        t1_bowl = select_bowlers_from_xi(conn, t1_bat, fmt, gender)
+        t2_bowl = select_bowlers_from_xi(conn, t2_bat, fmt, gender)
+        summary["xi_status"] = XI_CREX_CONFIRMED
 
     if len(t1_bat) < 11 or len(t1_bowl) < 5 or len(t2_bat) < 11 or len(t2_bowl) < 5:
         msg = (f"Insufficient lineup data even after fallback: t1 bat={len(t1_bat)} bowl={len(t1_bowl)}, "
@@ -322,15 +295,12 @@ def post_toss_live_scan(
         logger.info(f"    Loading V2 simulator (format={fmt}, gender={gender})...")
         from src.models.vectorized_nn_sim_v2 import V2Simulator, V2SimulatorConfig
         sim_v2 = V2Simulator(V2SimulatorConfig(format_type=fmt, gender=gender))
-        # V2 doesn't pin toss; we adjust toss_field_prob to bias the
-        # toss decision toward what actually happened. This is the same
-        # convention paper_bet_post_toss_scan uses so the V2 number is
-        # comparable across paper and live.
+        toss_loser_team_id = t2 if toss_winner_team_id == t1 else t1
+        bat_first_team_id = toss_loser_team_id if toss_chose_field else toss_winner_team_id
         v2_result = sim_v2.simulate_matches(
-            300, t1_bat, t1_bowl, t2_bat, t2_bowl,
+            V2V3_SIM_CONFIG["n_sims"], t1_bat, t1_bowl, t2_bat, t2_bowl,
             venue_id=venue_id, team1_id=t1, team2_id=t2,
-            use_toss=True, toss_field_prob=(0.65 if not toss_chose_field else 0.35),
-            seed=42,
+            seed=42, toss_bat_first_team_id=bat_first_team_id,
         )
         v2_t1_prob = float(v2_result["team1_win_prob"])
 
@@ -339,7 +309,7 @@ def post_toss_live_scan(
         from src.models.vectorized_nn_sim_v3 import V3Simulator, V3SimulatorConfig
         sim_v3 = V3Simulator(V3SimulatorConfig(format_type=fmt, gender=gender))
         v3_result = sim_v3.simulate_matches(
-            300, t1_bat, t1_bowl, t2_bat, t2_bowl,
+            V2V3_SIM_CONFIG["n_sims"], t1_bat, t1_bowl, t2_bat, t2_bowl,
             venue_id=venue_id, team1_id=t1, team2_id=t2,
             toss_pinned=True,
             toss_winner_team_id=toss_winner_team_id,
@@ -555,6 +525,9 @@ def post_toss_live_scan(
                 side="BUY",
                 size_usdc=stake,
                 requested_mode="auto",
+                # Cap the FOK at the price the strategy will accept rather than
+                # walking the ladder to whatever the stake needs.
+                max_acceptable_price=model_prob - (strat.min_edge_pp / 100.0),
                 strategy_label=strat.name,
                 bankroll_at_proposal=bankroll_now,
                 phase="post_toss",

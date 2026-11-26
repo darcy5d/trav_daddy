@@ -15,6 +15,13 @@
 #
 # Usage:
 #     scripts/watchdog_twap_daemon.sh
+#
+# PAPER-ONLY (2026-11-08): this watchdog deliberately relaunches the post-toss
+# daemon WITHOUT `--also-live`, so a restart can never re-enable the live
+# post-toss scan. Adding `--also-live` back here would make the daemon spawn
+# live_bet_post_toss_scan.py again (that script would still be refused by
+# BETTING_MODE / kill switch / empty whitelist, but the flag should not return
+# by accident).
 
 set -u
 
@@ -190,7 +197,7 @@ cd "${REPO_ROOT}" || {
 
 AUTO_INSTALL_PLAYWRIGHT_CHROMIUM=false \
 nohup "${PYTHON}" "${SCRIPT}" \
-  --poll-interval 90 --lookback-min 45 --lookahead-min 30 --also-live \
+  --poll-interval 90 --lookback-min 45 --lookahead-min 30 \
   >> "${LOG}" 2>&1 < /dev/null &
 disown 2>/dev/null || true
 

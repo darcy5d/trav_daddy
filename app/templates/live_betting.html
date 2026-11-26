@@ -298,20 +298,6 @@
     }
     canvas.lb-chart { display: block; max-width: 100%; height: 220px; background: rgba(0,0,0,0.05); border-radius: 6px; }
 
-    /* Summary tiles (mirror of pt-totals) - sits under the wallet-bar */
-    .lb-totals {
-        display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
-        gap: 0.6rem; margin: 0.4rem 0 1rem 0;
-    }
-    .lb-total-cell {
-        padding: 0.7rem 0.9rem; border: 1px solid var(--border-color); border-radius: 8px;
-        background: var(--bg-secondary);
-    }
-    .lb-total-label { color: var(--text-muted); font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.5px; }
-    .lb-total-value { font-size: 1.5rem; font-weight: 700; margin-top: 0.2rem; }
-    .lb-total-value.positive { color: var(--accent-primary); }
-    .lb-total-value.negative { color: #ef4444; }
-
     /* Auto-toss daemon badge + button (mirror of pt-poller-*) */
     .lb-poller-badge {
         display: inline-flex; align-items: center;
@@ -393,141 +379,101 @@
 </style>
 {% endblock %}
 {% block content %}
-<div class="lb-header">
-    <h1>Live Betting</h1>
-    <div style="display: flex; gap: 0.6rem; align-items: center; flex-wrap: wrap;">
-        <span id="lb-poller-badge" class="lb-poller-badge lb-poller-off"
-              title="Status of the auto-toss-detection daemon. When started from this page, the daemon spawns BOTH paper AND live post-toss scans for each detected toss.">Auto-toss: --</span>
-        <button class="lb-poller-toggle" id="lb-poller-toggle"
-                title="Start/stop the auto-toss-detection daemon (starts with --also-live so live bets are placed too).">Start auto-toss</button>
-        <div class="lb-mode-toggle" id="mode-toggle">
-            <button data-mode="OFF">OFF</button>
-            <button data-mode="MANUAL">MANUAL</button>
-            <button data-mode="AUTO">AUTO</button>
-        </div>
-        <button class="lb-kill" id="kill-switch-btn">KILL SWITCH</button>
+{% from 'partials/book_header.html' import book_header %}
+{% call book_header('Live Betting', 'Real-money book. Mode, the kill switch, and envelope graduation sit in the header. Wallet, status, league policy, and the ops dashboard follow the shared sections.', 'toast-area') %}
+    <span id="lb-poller-badge" class="lb-poller-badge lb-poller-off"
+          title="Status of the auto-toss-detection daemon. When started from this page, the daemon spawns BOTH paper AND live post-toss scans for each detected toss.">Auto-toss: --</span>
+    <button class="lb-poller-toggle" id="lb-poller-toggle"
+            title="Start/stop the auto-toss-detection daemon (starts with --also-live so live bets are placed too).">Start auto-toss</button>
+    <div class="lb-mode-toggle" id="mode-toggle">
+        <button data-mode="OFF">OFF</button>
+        <button data-mode="MANUAL">MANUAL</button>
+        <button data-mode="AUTO">AUTO</button>
     </div>
-</div>
+    <button class="lb-kill" id="kill-switch-btn">KILL SWITCH</button>
+    <span id="scale-up-msg" style="color: var(--text-muted); font-size: 0.75rem;">
+        Need at least <span id="scale-up-min-bets">50</span> settled bets to enable graduation.
+    </span>
+    <span id="scale-up-actions" style="display:none;">
+        <button class="lb-actions" onclick="scaleUp('500')">Graduate to $500 envelope</button>
+        <button class="lb-actions" onclick="scaleUp('1000')">Graduate to $1000 envelope</button>
+    </span>
+{% endcall %}
 
-<div class="lb-wallet-bar" id="wallet-bar" title="Live on-chain USDC balance in the Polymarket proxy wallet (queried via py-clob-client)">
-    <div class="lb-wallet-cell" title="Wallet cash + open positions (CLOB mid) + unredeemed winning tokens">
-        <div class="lb-label">Portfolio value</div>
-        <div class="lb-value" id="portfolio-value">--</div>
-        <div class="lb-sub" id="portfolio-value-sub">cash + open + redeemable</div>
-    </div>
-    <div class="lb-wallet-cell">
-        <div class="lb-label">Polymarket wallet</div>
-        <div class="lb-value" id="wallet-balance">--</div>
-        <div class="lb-sub" id="wallet-balance-sub">USDC on Polygon</div>
-    </div>
-    <div class="lb-wallet-cell" title="Max total open exposure (portfolio × deploy fraction). Scales when you top up.">
-        <div class="lb-label">Deploy cap</div>
-        <div class="lb-value" id="wallet-envelope">--</div>
-        <div class="lb-sub" id="wallet-envelope-sub">95% of portfolio</div>
-    </div>
-    <div class="lb-wallet-cell" title="Free USDC cash as a share of total portfolio (cash + open positions)">
-        <div class="lb-label">Cash share</div>
-        <div class="lb-value" id="wallet-funded-pct">--</div>
-        <div class="lb-sub" id="wallet-funded-sub">&nbsp;</div>
-    </div>
-    <div class="lb-wallet-cell">
-        <div class="lb-label">On-chain approvals</div>
-        <div class="lb-value" id="wallet-approvals">--</div>
-        <div class="lb-sub" id="wallet-approvals-sub">Exchange + CTF</div>
-    </div>
-</div>
+{% set book_layout = {
+    'book': 'live',
+    'section_id': 'lb-strategies-section',
+    'table_id': 'strategies-table',
+    'body_id': 'strategies-body',
+    'total_id': 'lb-total-pnl',
+    'cashout_id': 'lb-book-cashout',
+    'held_id': 'lb-book-held',
+    'open_id': 'lb-total-open',
+    'bankroll_roi_id': 'lb-book-bankroll-roi',
+    'stake_roi_id': 'lb-book-stake-roi',
+    'settled_id': 'lb-book-settled',
+    'win_id': 'lb-book-win',
+    'footer_name': 'Live book',
+    'footer_note': 'Enabled strategies only. Bankroll ROI uses the wallet slice before P&L.',
+    'empty_copy': 'No strategies configured (BETTING_LIVE_STRATEGIES empty)',
+    'section_note': 'This table lists only the live whitelist. An empty whitelist is an empty book, ready for a later promotion. Historical bets stay in the ledger and are not listed here.',
+    'open_note': 'Filled size still open',
+    'open_title': 'Sum of fill_size_usdc where the bet is filled and not yet settled.',
+    'bankroll_roi_note': 'P&L ÷ wallet slice before P&L',
+    'bankroll_roi_title': 'Sum of realised P&L divided by the sum of wallet bases (current bankroll minus realised P&L) for enabled strategies.',
+    'bankroll_col_title': 'Current wallet slice (portfolio times weight). Retired rows are $0.',
+    'bankroll_roi_col_title': 'Realised P&L divided by the wallet slice before P&L.',
+    'win_note': 'Settled bets with P&L > 0',
+    'win_title': 'Settled rows with realised P&L above zero, divided by settled bets. A profitable cashout counts.',
+    'sample_wait_title': 'Blank on live. Sample wait is a paper sample-size figure, not a go-live timer.',
+    'significance_title': 'Blank on live. The one-sided p-value is a paper sample figure, not a go-live timer.'
+} %}
+{% include 'partials/book_layout.html' %}
 
-<div class="lb-totals" id="lb-totals" title="Wallet-driven: sum of each live strategy's share of portfolio value (cash + open positions). Tops up automatically when you fund Polymarket.">
-    <div class="lb-total-cell">
-        <div class="lb-total-label">Total Bankroll</div>
-        <div class="lb-total-value" id="lb-total-bankroll">--</div>
-    </div>
-    <div class="lb-total-cell">
-        <div class="lb-total-label">Realised P&amp;L</div>
-        <div class="lb-total-value" id="lb-total-pnl">--</div>
-    </div>
-    <div class="lb-total-cell">
-        <div class="lb-total-label">ROI</div>
-        <div class="lb-total-value" id="lb-total-roi">--</div>
-    </div>
-    <div class="lb-total-cell">
-        <div class="lb-total-label">Open Stakes</div>
-        <div class="lb-total-value" id="lb-total-open">--</div>
-    </div>
-</div>
+{% set book_chart = {
+    'section_id': 'lb-chart-section',
+    'canvas_id': 'lb-bankroll-chart',
+    'legend_id': 'lb-chart-legend'
+} %}
+{% include 'partials/book_chart.html' %}
 
-<div class="lb-status-bar" id="status-bar">
-    <div class="lb-status-cell"><div class="lb-label">Mode</div><div class="lb-value" id="status-mode">--</div></div>
-    <div class="lb-status-cell"><div class="lb-label">Today P&L</div><div class="lb-value" id="status-todays-pl">--</div></div>
-    <div class="lb-status-cell"><div class="lb-label">Today bets</div><div class="lb-value" id="status-todays-bets">--</div></div>
-    <div class="lb-status-cell"><div class="lb-label">Open exposure</div><div class="lb-value" id="status-exposure">--</div></div>
-    <div class="lb-status-cell"><div class="lb-label">Today stake cap left</div><div class="lb-value" id="status-cap-today">--</div><div class="lb-cap-bar"><span class="lb-cap-bar-fill" id="status-cap-today-bar"></span></div></div>
-    <div class="lb-status-cell"><div class="lb-label">Deposit cap left</div><div class="lb-value" id="status-cap-deposit">--</div><div class="lb-cap-bar"><span class="lb-cap-bar-fill" id="status-cap-deposit-bar"></span></div></div>
-    <div class="lb-status-cell"><div class="lb-label">Settled bets total</div><div class="lb-value" id="status-settled-total">--</div></div>
-    <div class="lb-status-cell"><div class="lb-label">Auto markets</div><div class="lb-value" id="status-auto-markets" style="font-size: 0.75rem;">--</div></div>
-</div>
+{% set book_cards = {
+    'section_id': 'lb-open-section',
+    'title': 'Open Live Bets',
+    'note': '',
+    'count_id': 'lb-open-count',
+    'chips_id': 'lb-open-filter-chips',
+    'chips_class': 'lb-filter-chips',
+    'body_id': 'lb-open-body',
+    'body_class': 'lb-card-list',
+    'empty': 'Loading...'
+} %}
+{% include 'partials/book_cards.html' %}
 
-<div class="lb-section">
-    <h2>Bankroll Over Time</h2>
-    <div class="lb-chart-card">
-        <canvas id="lb-bankroll-chart" class="lb-chart" width="900" height="220"></canvas>
-        <div id="lb-chart-legend" style="margin-top:0.5rem; font-size:0.75rem; display:flex; gap:0.8rem; flex-wrap:wrap;"></div>
-    </div>
-</div>
+{% set book_cards = {
+    'section_id': 'lb-settled-section',
+    'title': 'Recent Settled',
+    'note': '(last 7 days)',
+    'count_id': 'lb-settled-count',
+    'chips_id': 'lb-settled-filter-chips',
+    'chips_class': 'lb-filter-chips',
+    'body_id': 'lb-settled-body',
+    'body_class': 'lb-card-list',
+    'empty': 'Loading...'
+} %}
+{% include 'partials/book_cards.html' %}
 
-<div class="lb-section">
-    <h2>Strategies <small style="font-weight: 400; color: var(--text-muted); font-size: 0.7rem;">— per-strategy bankroll + open exposure</small></h2>
-    <p style="color: var(--text-muted); font-size: 0.75rem; margin: 0.2rem 0 0.5rem 0;">
-        Live strategies share the wallet by allocation weight; retired rows keep historical P&amp;L only ($0 bankroll).
-        Remove a strategy from <code>BETTING_LIVE_STRATEGIES</code> in <code>.env</code> to retire it.
-    </p>
-    <table class="lb-table" id="strategies-table">
-        <thead><tr>
-            <th>Strategy</th>
-            <th title="Wallet slice before settled trading P&amp;L">Basis</th>
-            <th title="Current wallet slice (portfolio × weight)">Bankroll</th>
-            <th>Open</th>
-            <th title="Per UTC kickoff date when kickoff-day cap mode is on">Cap left</th>
-            <th>Realised P&L</th>
-            <th>ROI</th>
-            <th>Bets</th>
-            <th>Win rate</th>
-        </tr></thead>
-        <tbody id="strategies-body">
-            <tr><td colspan="9" style="text-align:center; color: var(--text-muted);">Loading...</td></tr>
-        </tbody>
-    </table>
-</div>
-
-<div class="lb-section">
-    <h2>Upcoming Fixtures - Post-Toss Re-scan
-        <small style="font-weight: 400; color: var(--text-muted); font-size: 0.75rem;">
-            (V3 with PINNED toss + optional XI override; routes through live <code>place_bet()</code>)
-        </small>
-    </h2>
-    <p style="color: var(--text-muted); font-size: 0.8rem; margin: 0.2rem 0 0.5rem 0;">
-        Once the toss happens, click "Toss + Re-scan" to re-sim with the actual toss outcome. Live bets
-        placed via this path are tagged <code>phase='post_toss'</code> in the bet ledger so they're
-        analytically distinct from pre-toss bets. The auto-toss button at the top of the page does
-        this automatically when CREX detects the toss.
-    </p>
-    <table class="lb-fixtures-table" id="lb-fixtures-table">
-        <thead>
-            <tr>
-                <th>Match</th>
-                <th>Format</th>
-                <th id="lb-fixtures-kickoff-th">Kickoff</th>
-                <th>Market (T1 / T2)</th>
-                <th style="text-align:right">Pre-toss live</th>
-                <th style="text-align:right">Post-toss live</th>
-                <th></th>
-            </tr>
-        </thead>
-        <tbody id="lb-fixtures-body">
-            <tr><td colspan="7" style="color:var(--text-muted);text-align:center;padding:1rem">Loading...</td></tr>
-        </tbody>
-    </table>
-</div>
+{% set book_upcoming = {
+    'section_id': 'lb-upcoming-section',
+    'subtitle': 'V3 with PINNED toss + optional XI override. This page routes the toss button through live place_bet().',
+    'note': 'Once the toss happens, click Toss + Re-scan to re-sim with the actual toss outcome. Live bets placed via this path are tagged phase=post_toss. The auto-toss button in the header does this when CREX detects the toss.',
+    'table_id': 'lb-fixtures-table',
+    'body_id': 'lb-fixtures-body',
+    'kickoff_id': 'lb-fixtures-kickoff-th',
+    'pre_label': 'Pre-toss live',
+    'post_label': 'Post-toss live'
+} %}
+{% include 'partials/book_upcoming.html' %}
 
 <!-- Modal for live post-toss form (mirrors paper trades modal) -->
 <div id="lb-toss-modal" style="display:none; position:fixed; inset:0; background:rgba(0,0,0,0.6); z-index:1000; align-items:center; justify-content:center;">
@@ -588,28 +534,43 @@
     </div>
 </div>
 
-<div class="lb-section">
-    <div class="lb-section-header">
-        <h2>Open Live Bets <span class="lb-section-subtitle" id="lb-open-count"></span></h2>
-        <div class="lb-section-controls">
-            <div class="lb-filter-chips" id="lb-open-filter-chips"></div>
-        </div>
+<div class="lb-wallet-bar" id="wallet-bar" title="Live on-chain USDC balance in the Polymarket proxy wallet (queried via py-clob-client)">
+    <div class="lb-wallet-cell" title="Wallet cash + open positions (CLOB mid) + unredeemed winning tokens">
+        <div class="lb-label">Portfolio value</div>
+        <div class="lb-value" id="portfolio-value">--</div>
+        <div class="lb-sub" id="portfolio-value-sub">cash + open + redeemable</div>
     </div>
-    <div id="lb-open-body" class="lb-card-list">
-        <div class="lb-empty">Loading...</div>
+    <div class="lb-wallet-cell">
+        <div class="lb-label">Polymarket wallet</div>
+        <div class="lb-value" id="wallet-balance">--</div>
+        <div class="lb-sub" id="wallet-balance-sub">USDC on Polygon</div>
+    </div>
+    <div class="lb-wallet-cell" title="Max total open exposure (portfolio × deploy fraction). Scales when you top up.">
+        <div class="lb-label">Deploy cap</div>
+        <div class="lb-value" id="wallet-envelope">--</div>
+        <div class="lb-sub" id="wallet-envelope-sub">95% of portfolio</div>
+    </div>
+    <div class="lb-wallet-cell" title="Free USDC cash as a share of total portfolio (cash + open positions)">
+        <div class="lb-label">Cash share</div>
+        <div class="lb-value" id="wallet-funded-pct">--</div>
+        <div class="lb-sub" id="wallet-funded-sub">&nbsp;</div>
+    </div>
+    <div class="lb-wallet-cell">
+        <div class="lb-label">On-chain approvals</div>
+        <div class="lb-value" id="wallet-approvals">--</div>
+        <div class="lb-sub" id="wallet-approvals-sub">Exchange + CTF</div>
     </div>
 </div>
 
-<div class="lb-section">
-    <div class="lb-section-header">
-        <h2>Recent Settled <span class="lb-section-subtitle">(last 7 days)</span> <span class="lb-section-subtitle" id="lb-settled-count"></span></h2>
-        <div class="lb-section-controls">
-            <div class="lb-filter-chips" id="lb-settled-filter-chips"></div>
-        </div>
-    </div>
-    <div id="lb-settled-body" class="lb-card-list">
-        <div class="lb-empty">Loading...</div>
-    </div>
+<div class="lb-status-bar" id="status-bar">
+    <div class="lb-status-cell"><div class="lb-label">Mode</div><div class="lb-value" id="status-mode">--</div></div>
+    <div class="lb-status-cell"><div class="lb-label">Today P&L</div><div class="lb-value" id="status-todays-pl">--</div></div>
+    <div class="lb-status-cell"><div class="lb-label">Today bets</div><div class="lb-value" id="status-todays-bets">--</div></div>
+    <div class="lb-status-cell"><div class="lb-label">Open exposure</div><div class="lb-value" id="status-exposure">--</div></div>
+    <div class="lb-status-cell"><div class="lb-label">Today stake cap left</div><div class="lb-value" id="status-cap-today">--</div><div class="lb-cap-bar"><span class="lb-cap-bar-fill" id="status-cap-today-bar"></span></div></div>
+    <div class="lb-status-cell"><div class="lb-label">Deposit cap left</div><div class="lb-value" id="status-cap-deposit">--</div><div class="lb-cap-bar"><span class="lb-cap-bar-fill" id="status-cap-deposit-bar"></span></div></div>
+    <div class="lb-status-cell"><div class="lb-label">Settled bets total</div><div class="lb-value" id="status-settled-total">--</div></div>
+    <div class="lb-status-cell"><div class="lb-label">Auto markets</div><div class="lb-value" id="status-auto-markets" style="font-size: 0.75rem;">--</div></div>
 </div>
 
 <div class="lb-section">
@@ -673,17 +634,7 @@
         </tbody>
     </table>
 
-    <h3 style="margin-top: 1rem; font-size: 0.85rem;">Envelope graduation</h3>
-    <p style="color: var(--text-muted); font-size: 0.75rem;" id="scale-up-msg">
-        Need at least <span id="scale-up-min-bets">50</span> settled bets to enable graduation.
-    </p>
-    <div id="scale-up-actions" style="display:none;">
-        <button class="lb-actions" onclick="scaleUp('500')" style="margin-right: 0.5rem;">Graduate to $500 envelope</button>
-        <button class="lb-actions" onclick="scaleUp('1000')">Graduate to $1000 envelope</button>
-    </div>
 </div>
-
-<div id="toast-area"></div>
 
 <script>
     let currentStatus = null;
@@ -920,93 +871,14 @@
     }
 
     async function fetchStrategies() {
-        let data;
+        let data = null;
         try {
             const r = await fetch('/api/betting/strategies');
             data = await r.json();
         } catch (err) {
-            document.getElementById('strategies-body').innerHTML =
-                '<tr><td colspan="9" style="text-align:center; color: var(--text-muted);">Error loading strategies.</td></tr>';
-            return;
+            data = null;
         }
-        const body = document.getElementById('strategies-body');
-        const rows = (data && data.strategies) ? data.strategies : [];
-        if (!rows.length) {
-            body.innerHTML = '<tr><td colspan="9" style="text-align:center; color: var(--text-muted);">No strategies configured (BETTING_LIVE_STRATEGIES empty).</td></tr>';
-            return;
-        }
-        body.innerHTML = rows.map(r => {
-            const badge = r.enabled
-                ? '<span class="lb-strategy-badge on">LIVE</span>'
-                : '<span class="lb-strategy-badge off">retired</span>';
-            const rowCls = r.enabled ? 'lb-strategy-row' : 'lb-strategy-row disabled';
-            const winRate = r.win_rate !== null && r.win_rate !== undefined
-                ? (r.win_rate * 100).toFixed(1) + '%'
-                : '--';
-            const bankrollCell = r.enabled
-                ? `<td class="${plClass(r.current_bankroll_usdc - r.starting_bankroll_usdc)}">${fmtUsd(r.current_bankroll_usdc)}</td>`
-                : `<td style="color:var(--text-muted)">${fmtUsd(0)}</td>`;
-            const basisCell = r.enabled
-                ? fmtUsd(r.starting_bankroll_usdc)
-                : `<span style="color:var(--text-muted)">${fmtUsd(0)}</span>`;
-            const roiCell = (r.roi_pct !== null && r.roi_pct !== undefined)
-                ? `<td class="${plClass(r.roi_pct)}">${r.roi_pct.toFixed(2)}%</td>`
-                : '<td style="color:var(--text-muted)">—</td>';
-            const capDayLines = (r.open_by_kickoff_day_utc && Object.keys(r.open_by_kickoff_day_utc).length)
-                ? Object.entries(r.open_by_kickoff_day_utc).map(
-                    ([d, v]) => `${d}: ${fmtUsd(v)} open`
-                  ).join('\n')
-                : '';
-            const capTitle = r.kickoff_day_cap_usdc != null
-                ? `Per UTC kickoff date cap: ${fmtUsd(r.kickoff_day_cap_usdc)}`
-                  + (capDayLines ? `\n${capDayLines}` : '')
-                : 'Remaining flat open cap headroom';
-            const capCell = `<td title="${capTitle.replace(/"/g, '&quot;')}">${fmtUsd(r.cap_remaining_usdc)}</td>`;
-            return `
-                <tr class="${rowCls}">
-                    <td><span class="lb-strategy-name">${r.strategy_label}</span>${badge}</td>
-                    <td>${basisCell}</td>
-                    ${bankrollCell}
-                    <td>${fmtUsd(r.open_exposure_usdc)}</td>
-                    ${capCell}
-                    <td class="${plClass(r.realised_pnl_usdc)}">${fmtUsd(r.realised_pnl_usdc)}</td>
-                    ${roiCell}
-                    <td>${r.n_settled}/${r.n_total}${r.n_errored ? ' <span style="color:#ef4444; font-size:0.7rem;">err:' + r.n_errored + '</span>' : ''}</td>
-                    <td>${winRate}</td>
-                </tr>
-            `;
-        }).join('');
-        updateLiveTotals(rows);
-    }
-
-    // Roll-up tiles above the page (mirror of paper trades' pt-totals).
-    // Aggregates the per-strategy rows from /api/betting/strategies into
-    // four headline numbers that match the paper-trades visual pattern.
-    function updateLiveTotals(rows) {
-        if (!rows || !rows.length) {
-            ['lb-total-bankroll','lb-total-pnl','lb-total-roi','lb-total-open']
-                .forEach(id => { document.getElementById(id).textContent = '--'; });
-            return;
-        }
-        const enabled = rows.filter(r => r.enabled);
-        // Use enabled-only for the headline tiles; retired strategies that
-        // still have historical bets shouldn't drag the live ROI number.
-        const sumStart = enabled.reduce((a, r) => a + (r.starting_bankroll_usdc || 0), 0);
-        const sumBank  = enabled.reduce((a, r) => a + (r.current_bankroll_usdc || 0), 0);
-        const sumPnl   = enabled.reduce((a, r) => a + (r.realised_pnl_usdc || 0), 0);
-        const sumOpen  = enabled.reduce((a, r) => a + (r.open_exposure_usdc || 0), 0);
-        const roi = sumStart > 0 ? (sumPnl / sumStart * 100) : 0;
-        const set = (id, value, signed) => {
-            const el = document.getElementById(id);
-            el.textContent = value;
-            el.className = 'lb-total-value' + (signed
-                ? (signed > 0 ? ' positive' : signed < 0 ? ' negative' : '')
-                : '');
-        };
-        set('lb-total-bankroll', fmtUsd(sumBank), sumBank - sumStart);
-        set('lb-total-pnl',      fmtUsd(sumPnl),  sumPnl);
-        set('lb-total-roi',      roi.toFixed(2) + '%', roi);
-        set('lb-total-open',     fmtUsd(sumOpen), 0);
+        paintBookLayout('live', data);
     }
 
     // ---- Card UI helpers (Wave 5.8.3, mirrors /paper-trades) ----

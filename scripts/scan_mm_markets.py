@@ -351,6 +351,7 @@ def main() -> int:
         except ValueError:
             PID_FILE.unlink(missing_ok=True)
     PID_FILE.write_text(str(os.getpid()))
+    _write_status(db_ok=True, iter_count=0)
     signal.signal(signal.SIGTERM, _handle_shutdown)
     signal.signal(signal.SIGINT, _handle_shutdown)
     deadline = (

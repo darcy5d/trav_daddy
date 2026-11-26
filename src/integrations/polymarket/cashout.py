@@ -51,7 +51,7 @@ from __future__ import annotations
 import json
 import logging
 import sqlite3
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, Optional
 
@@ -374,9 +374,10 @@ def _insert_partial_cashout_sell_row(
             status, mode, bet_kind, strategy_label, phase,
             pnl_realised_usdc,
             cashout_triggered_at, cashout_price, cashout_pnl_usdc,
-            cashout_threshold_used, cashout_order_id, cashout_reason
+            cashout_threshold_used, cashout_order_id, cashout_reason,
+            paper_cohort
         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'SELL', ?, ?, ?, ?,
-                  'settled', 'auto', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                  'settled', 'auto', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             now, now, now, now,
@@ -389,9 +390,90 @@ def _insert_partial_cashout_sell_row(
             cashout_pnl,
             now, avg_price, cashout_pnl,
             return_ratio, cashout_oid, reason,
+            # Inherit the parent BUY row's cohort so a PARTIAL cashout SELL row
+            # stays inside the same cohort as the position it belongs to.
+            _g("paper_cohort"),
         ),
     )
     return int(cur.lastrowid)
+
+
+def _claim_real_sell(conn: sqlite3.Connection, bet_id: int, expected_fill_size: float) -> Optional[str]:
+    """Commit a short-lived claim so a second scan cannot sell the same stake.
+
+    The claim is released if the exchange sell does not fill. A claim older
+    than 10 minutes can be taken over, so a crash mid-sell does not stick
+    the position forever. Returns the claim token, or None if another worker
+    holds a fresh claim.
+    """
+    now = _utc_now_iso()
+    token = f"pending:{now}"
+    stale_before = (
+        datetime.now(timezone.utc) - timedelta(minutes=10)
+    ).isoformat()
+    cur = conn.execute(
+        """
+        UPDATE bet_ledger
+           SET cashout_order_id = ?
+         WHERE bet_id = ?
+           AND status = 'filled'
+           AND fill_size_usdc IS NOT NULL
+           AND ABS(fill_size_usdc - ?) < 0.01
+           AND (
+                cashout_order_id IS NULL
+                OR cashout_order_id = ''
+                OR (
+                    cashout_order_id LIKE 'pending:%'
+                    AND substr(cashout_order_id, 9) < ?
+                )
+           )
+        """,
+        (token, bet_id, float(expected_fill_size), stale_before),
+    )
+    if cur.rowcount != 1:
+        conn.rollback()
+        return None
+    conn.commit()
+    return token
+
+
+def _release_real_sell_claim(conn: sqlite3.Connection, bet_id: int, token: str) -> None:
+    conn.execute(
+        """
+        UPDATE bet_ledger
+           SET cashout_order_id = NULL
+         WHERE bet_id = ?
+           AND status = 'filled'
+           AND cashout_order_id = ?
+        """,
+        (bet_id, token),
+    )
+    conn.commit()
+
+
+def _open_stake_unchanged(conn: sqlite3.Connection, bet_id: int, expected_fill_size: float) -> bool:
+    """Take the write lock and confirm this open stake is still the one we priced.
+
+    Two cashout scans overlap (every 3 minutes, and again 90s later). Both used
+    to read the same filled BUY, then each insert a SELL tranche. A no-op
+    UPDATE locks the row; the waiter re-checks the WHERE after the first
+    commit, so a second booking of the same stake returns False.
+    """
+    cur = conn.execute(
+        """
+        UPDATE bet_ledger
+           SET fill_size_usdc = fill_size_usdc
+         WHERE bet_id = ?
+           AND status = 'filled'
+           AND fill_size_usdc IS NOT NULL
+           AND ABS(fill_size_usdc - ?) < 0.01
+        """,
+        (bet_id, float(expected_fill_size)),
+    )
+    if cur.rowcount == 1:
+        return True
+    conn.rollback()
+    return False
 
 
 def execute_cashout(
@@ -495,6 +577,15 @@ def execute_cashout(
     else:
         if poly_client is None:
             poly_client = PolymarketClient()
+        claim = _claim_real_sell(conn, bet_id, float(fill_size_usdc))
+        if claim is None:
+            return {
+                "success": False,
+                "bet_id": bet_id,
+                "error": "stake-changed-or-already-closed",
+                "is_simulated": False,
+                "filled_shares": 0.0,
+            }
         # A stop-loss is a forced exit: liquidate progressively into whatever
         # bids exist down to the ruin floor instead of holding for the tight
         # profit-take slippage (which rotted collapsing positions to ~0).
@@ -509,6 +600,7 @@ def execute_cashout(
             min_exit_price=stop_min_exit,
         )
         if not sell.get("success"):
+            _release_real_sell_claim(conn, bet_id, claim)
             logger.info(
                 f"Cashout SELL did not fill for bet_id={bet_id}: "
                 f"{sell.get('reason')} (holding, will retry)"
@@ -538,6 +630,18 @@ def execute_cashout(
     cashout_pnl = round(proceeds - entry_cost_sold - fee, 4)
     return_ratio = avg_price / fill_price if fill_price else 0.0
     is_full = filled_fraction >= 1.0 - 1e-6
+
+    if is_simulated and not _open_stake_unchanged(conn, bet_id, float(fill_size_usdc)):
+        logger.info(
+            f"Cashout skipped bet_id={bet_id}: open stake changed or already closed"
+        )
+        return {
+            "success": False,
+            "bet_id": bet_id,
+            "error": "stake-changed-or-already-closed",
+            "is_simulated": is_simulated,
+            "filled_shares": 0.0,
+        }
 
     if is_full:
         # --- Full exit: settle the BUY row with the real fill ---
@@ -617,7 +721,8 @@ def execute_cashout(
         conn.execute(
             "UPDATE bet_ledger "
             "SET fill_size_usdc = ?, "
-            "    exit_cost_usdc = COALESCE(exit_cost_usdc, 0.0) + ? "
+            "    exit_cost_usdc = COALESCE(exit_cost_usdc, 0.0) + ?, "
+            "    cashout_order_id = NULL "
             "WHERE bet_id = ?",
             (max(0.0, new_fill), round(float(entry_cost_sold), 6), bet_id),
         )

@@ -210,6 +210,73 @@ def _parse_explicit_format(text: str) -> Optional[str]:
 # CREX Scraper Class
 # ============================================================================
 
+# Common cricket team abbreviations (CREX abbreviation -> full name)
+CREX_TEAM_CODES = {
+    # International teams
+    'aus': 'australia', 'ind': 'india', 'eng': 'england', 'pak': 'pakistan',
+    'nz': 'new zealand', 'sa': 'south africa', 'wi': 'west indies',
+    'sl': 'sri lanka', 'ban': 'bangladesh', 'afg': 'afghanistan',
+    'zim': 'zimbabwe', 'ire': 'ireland', 'sco': 'scotland', 'ned': 'netherlands',
+    'uae': 'united arab emirates', 'nam': 'namibia', 'oma': 'oman',
+    'usa': 'united states of america', 'can': 'canada', 'ken': 'kenya',
+    'nep': 'nepal', 'png': 'papua new guinea', 'hk': 'hong kong',
+    'tha': 'thailand', 'mas': 'malaysia', 'sin': 'singapore', 'bhu': 'bhutan',
+    'mya': 'myanmar', 'jpn': 'japan', 'kor': 'korea', 'idn': 'indonesia',
+    'uga': 'uganda', 'tan': 'tanzania', 'rwa': 'rwanda', 'nig': 'nigeria',
+    'bot': 'botswana', 'gha': 'ghana', 'cam': 'cameroon', 'moz': 'mozambique',
+    'mwi': 'malawi', 'les': 'lesotho', 'esw': 'eswatini', 'swz': 'swaziland',
+    'ger': 'germany', 'aut': 'austria', 'ita': 'italy', 'fra': 'france',
+    'bel': 'belgium', 'esp': 'spain', 'por': 'portugal', 'cze': 'czech republic',
+    'ber': 'bermuda', 'cay': 'cayman islands', 'bar': 'barbados',
+    'jam': 'jamaica', 'tto': 'trinidad and tobago', 'guy': 'guyana',
+    'lwi': 'leeward islands', 'wwi': 'windward islands',
+    # Gulf / Middle East / additional associate nations
+    'qat': 'qatar', 'bhr': 'bahrain', 'kwt': 'kuwait', 'sau': 'saudi arabia',
+    'mdv': 'maldives', 'irn': 'iran', 'rom': 'romania', 'hun': 'hungary',
+    'srb': 'serbia', 'swe': 'sweden', 'den': 'denmark', 'nor': 'norway',
+    'fin': 'finland', 'grc': 'greece', 'tur': 'turkey', 'isr': 'israel',
+    'arg': 'argentina', 'bra': 'brazil', 'chl': 'chile', 'per': 'peru',
+    'mex': 'mexico', 'pan': 'panama', 'cri': 'costa rica', 'blz': 'belize',
+    'bah': 'bahamas', 'khm': 'cambodia', 'chn': 'china', 'fji': 'fiji',
+    'van': 'vanuatu', 'sam': 'samoa', 'cok': 'cook islands', 'ton': 'tonga',
+    'cyp': 'cyprus', 'bgd': 'bangladesh', 'bol': 'bolivia',
+    'mng': 'mongolia', 'lux': 'luxembourg', 'mlt': 'malta',
+    # NZ domestic (men's)
+    # Note: 'can' is reserved for Canada (country), use 'ctb' for Canterbury
+    'akl': 'auckland', 'wel': 'wellington', 'ctb': 'canterbury', 'ota': 'otago',
+    'cd': 'central districts', 'nd': 'northern districts',
+    # NZ Women's Super Smash abbreviations
+    'ahw': 'auckland',  # Auckland Hearts Women
+    'wbw': 'wellington',  # Wellington Blaze Women
+    'cmw': 'canterbury',  # Canterbury Magicians Women
+    'chw': 'central districts',  # Central Hinds Women
+    'nbw': 'northern districts',  # Northern Brave Women
+    'osw': 'otago',  # Otago Sparks Women
+    'wfw': 'wellington',
+    # Australia domestic
+    'nsw': 'new south wales', 'vic': 'victoria', 'qld': 'queensland',
+    'tas': 'tasmania', 'wa': 'western australia',
+    'ss': 'sydney sixers', 'st': 'sydney thunder', 'ps': 'perth scorchers',
+    # BBL only: CREX also uses "MS" for Multan Sultans — prune/contradiction logic applies
+    'ms': 'melbourne stars', 'mr': 'melbourne renegades', 'bh': 'brisbane heat',
+    'hs': 'hobart hurricanes', 'as': 'adelaide strikers',
+    # IPL franchises
+    'rcb': 'royal challengers bangalore',
+    # CREX live codes the name-derived abbreviations do not emit.
+    # Uganda generates UGA; the toss line says UGN. Nepal Premier League
+    # tabs are not the initials of those franchise names.
+    'ugn': 'uganda',
+    'lbl': 'lumbini lions',
+    'cwr': 'chitwan rhinos',
+    'jkb': 'janakpur bolts',
+    'kmg': 'kathmandu gurkhas',
+    'kny': 'karnali yaks',
+    'pka': 'pokhara avengers',
+    'spr': 'sudurpaschim royals',
+    'bk': 'biratnagar kings',
+}
+
+
 class CREXScraper:
     """
     Scraper for CREX cricket match data.
@@ -3374,60 +3441,8 @@ class CREXScraper:
             'royal challengers women': 'royal challengers bangalore',
         }
         
-        # Common cricket team abbreviations (CREX abbreviation -> full name)
-        team_abbreviations = {
-            # International teams
-            'aus': 'australia', 'ind': 'india', 'eng': 'england', 'pak': 'pakistan',
-            'nz': 'new zealand', 'sa': 'south africa', 'wi': 'west indies',
-            'sl': 'sri lanka', 'ban': 'bangladesh', 'afg': 'afghanistan',
-            'zim': 'zimbabwe', 'ire': 'ireland', 'sco': 'scotland', 'ned': 'netherlands',
-            'uae': 'united arab emirates', 'nam': 'namibia', 'oma': 'oman',
-            'usa': 'united states of america', 'can': 'canada', 'ken': 'kenya',
-            'nep': 'nepal', 'png': 'papua new guinea', 'hk': 'hong kong',
-            'tha': 'thailand', 'mas': 'malaysia', 'sin': 'singapore', 'bhu': 'bhutan',
-            'mya': 'myanmar', 'jpn': 'japan', 'kor': 'korea', 'idn': 'indonesia',
-            'uga': 'uganda', 'tan': 'tanzania', 'rwa': 'rwanda', 'nig': 'nigeria',
-            'bot': 'botswana', 'gha': 'ghana', 'cam': 'cameroon', 'moz': 'mozambique',
-            'mwi': 'malawi', 'les': 'lesotho', 'esw': 'eswatini', 'swz': 'swaziland',
-            'ger': 'germany', 'aut': 'austria', 'ita': 'italy', 'fra': 'france',
-            'bel': 'belgium', 'esp': 'spain', 'por': 'portugal', 'cze': 'czech republic',
-            'ber': 'bermuda', 'cay': 'cayman islands', 'bar': 'barbados',
-            'jam': 'jamaica', 'tto': 'trinidad and tobago', 'guy': 'guyana',
-            'lwi': 'leeward islands', 'wwi': 'windward islands',
-            # Gulf / Middle East / additional associate nations
-            'qat': 'qatar', 'bhr': 'bahrain', 'kwt': 'kuwait', 'sau': 'saudi arabia',
-            'mdv': 'maldives', 'irn': 'iran', 'rom': 'romania', 'hun': 'hungary',
-            'srb': 'serbia', 'swe': 'sweden', 'den': 'denmark', 'nor': 'norway',
-            'fin': 'finland', 'grc': 'greece', 'tur': 'turkey', 'isr': 'israel',
-            'arg': 'argentina', 'bra': 'brazil', 'chl': 'chile', 'per': 'peru',
-            'mex': 'mexico', 'pan': 'panama', 'cri': 'costa rica', 'blz': 'belize',
-            'bah': 'bahamas', 'khm': 'cambodia', 'chn': 'china', 'fji': 'fiji',
-            'van': 'vanuatu', 'sam': 'samoa', 'cok': 'cook islands', 'ton': 'tonga',
-            'cyp': 'cyprus', 'bgd': 'bangladesh', 'bol': 'bolivia',
-            'mng': 'mongolia', 'lux': 'luxembourg', 'mlt': 'malta',
-            # NZ domestic (men's)
-            # Note: 'can' is reserved for Canada (country), use 'ctb' for Canterbury
-            'akl': 'auckland', 'wel': 'wellington', 'ctb': 'canterbury', 'ota': 'otago',
-            'cd': 'central districts', 'nd': 'northern districts',
-            # NZ Women's Super Smash abbreviations
-            'ahw': 'auckland',  # Auckland Hearts Women
-            'wbw': 'wellington',  # Wellington Blaze Women
-            'cmw': 'canterbury',  # Canterbury Magicians Women
-            'chw': 'central districts',  # Central Hinds Women
-            'nbw': 'northern districts',  # Northern Brave Women
-            'osw': 'otago',  # Otago Sparks Women
-            'wfw': 'wellington',
-            # Australia domestic
-            'nsw': 'new south wales', 'vic': 'victoria', 'qld': 'queensland',
-            'tas': 'tasmania', 'wa': 'western australia',
-            'ss': 'sydney sixers', 'st': 'sydney thunder', 'ps': 'perth scorchers',
-            # BBL only: CREX also uses "MS" for Multan Sultans — prune/contradiction logic applies
-            'ms': 'melbourne stars', 'mr': 'melbourne renegades', 'bh': 'brisbane heat',
-            'hs': 'hobart hurricanes', 'as': 'adelaide strikers',
-            # IPL franchises
-            'rcb': 'royal challengers bangalore',
-        }
-        
+        team_abbreviations = CREX_TEAM_CODES
+
         # Handle "A" teams (e.g., "Pakistan A Women", "India A Women")
         # These are development squads that don't have separate DB entries.
         # Map them to the parent team (Pakistan, India, etc.)

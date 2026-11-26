@@ -601,6 +601,14 @@ def get_strategy_breakdown() -> Dict[str, Any]:
     """Wave 5.8: per-strategy roll-up for /live-betting UI.
 
     Bankroll is wallet-driven: portfolio_value × allocation_weight per strategy.
+    Only BETTING_LIVE_STRATEGIES are listed. Historical real rows stay in
+    bet_ledger and are not added to this rollup, so an empty whitelist is an
+    empty book. Held P&L, cashout P&L, settled size_usdc, and match wins are
+    summed on the same real-only rows. This function does not read the paper
+    cohort and does not use a paper starting bankroll as the ROI denominator.
+    Basis ROI stays realised P&L / max(0, current bankroll − realised P&L).
+    Stake ROI is realised P&L / settled size_usdc. Win rate stays settled rows
+    with realised P&L > 0; n_match_wins is settle_outcome = 1 and is not that rate.
     """
     from config import BETTING_CONFIG
     from src.data.database import get_connection
@@ -622,28 +630,15 @@ def get_strategy_breakdown() -> Dict[str, Any]:
     try:
         portfolio = get_portfolio_value(conn)
         cur = conn.cursor()
-        cur.execute(
-            """
-            SELECT DISTINCT strategy_label
-            FROM bet_ledger
-            WHERE COALESCE(bet_kind, 'real') = 'real'
-              AND strategy_label IS NOT NULL
-            """
-        )
-        historical = [r["strategy_label"] for r in cur.fetchall()]
-        all_labels = sorted(set(live_strategies) | set(historical))
+        # Whitelist only. Do not union in historical strategy_label values.
+        all_labels = list(live_strategies)
 
         rows = []
         for label in all_labels:
-            enabled = label in live_strategies
-            weight = strategy_allocation_weight(label) if enabled else 0.0
-            if enabled:
-                current_bankroll = get_strategy_bankroll(label, conn)
-                open_cap = get_strategy_open_cap_usdc(label, conn)
-            else:
-                # Retired strategies hold no wallet slice; keep historical P&L only.
-                current_bankroll = 0.0
-                open_cap = 0.0
+            enabled = True
+            weight = strategy_allocation_weight(label)
+            current_bankroll = get_strategy_bankroll(label, conn)
+            open_cap = get_strategy_open_cap_usdc(label, conn)
 
             cur.execute(
                 """
@@ -654,7 +649,13 @@ def get_strategy_breakdown() -> Dict[str, Any]:
                     COALESCE(SUM(CASE WHEN status='errored' THEN 1 ELSE 0 END), 0) AS n_errored,
                     COALESCE(SUM(CASE WHEN filled_at IS NOT NULL AND settled_at IS NULL THEN fill_size_usdc ELSE 0 END), 0.0) AS open_exposure,
                     COALESCE(SUM(CASE WHEN status='settled' THEN pnl_realised_usdc ELSE 0 END), 0.0) AS realised_pnl,
-                    COALESCE(SUM(CASE WHEN status='settled' AND pnl_realised_usdc > 0 THEN 1 ELSE 0 END), 0) AS n_wins
+                    COALESCE(SUM(CASE WHEN status='settled' AND cashout_triggered_at IS NULL
+                                      THEN pnl_realised_usdc ELSE 0 END), 0.0) AS held_pnl,
+                    COALESCE(SUM(CASE WHEN status='settled' AND cashout_triggered_at IS NOT NULL
+                                      THEN pnl_realised_usdc ELSE 0 END), 0.0) AS cashout_pnl,
+                    COALESCE(SUM(CASE WHEN status='settled' THEN size_usdc ELSE 0 END), 0.0) AS settled_stake,
+                    COALESCE(SUM(CASE WHEN status='settled' AND pnl_realised_usdc > 0 THEN 1 ELSE 0 END), 0) AS n_wins,
+                    COALESCE(SUM(CASE WHEN status='settled' AND settle_outcome = 1 THEN 1 ELSE 0 END), 0) AS n_match_wins
                 FROM bet_ledger
                 WHERE COALESCE(bet_kind, 'real') = 'real'
                   AND strategy_label = ?
@@ -664,8 +665,12 @@ def get_strategy_breakdown() -> Dict[str, Any]:
             row = cur.fetchone()
             n_settled = int(row["n_settled"] or 0)
             n_wins = int(row["n_wins"] or 0)
+            n_match_wins = int(row["n_match_wins"] or 0)
             open_exposure = float(row["open_exposure"] or 0.0)
             realised_pnl = float(row["realised_pnl"] or 0.0)
+            held_pnl = float(row["held_pnl"] or 0.0)
+            cashout_pnl = float(row["cashout_pnl"] or 0.0)
+            settled_stake = float(row["settled_stake"] or 0.0)
             open_by_kickoff_day: Dict[str, float] = {}
             kickoff_day_cap = 0.0
             if enabled and kickoff_day_mode:
@@ -683,6 +688,9 @@ def get_strategy_breakdown() -> Dict[str, Any]:
                 cap_remaining = max(0.0, open_cap - open_exposure) if open_cap > 0 else 0.0
             basis = max(0.0, current_bankroll - realised_pnl) if enabled else 0.0
             roi_pct = round(100.0 * realised_pnl / basis, 2) if enabled and basis > 0 else None
+            stake_roi_pct = (
+                round(100.0 * realised_pnl / settled_stake, 2) if settled_stake > 0 else None
+            )
             rows.append({
                 "strategy_label": label,
                 "enabled": enabled,
@@ -697,15 +705,29 @@ def get_strategy_breakdown() -> Dict[str, Any]:
                 "open_by_kickoff_day_utc": open_by_kickoff_day if kickoff_day_mode and enabled else {},
                 "cap_remaining_usdc": round(cap_remaining, 2),
                 "realised_pnl_usdc": round(realised_pnl, 2),
+                "held_pnl_usdc": round(held_pnl, 2),
+                "cashout_pnl_usdc": round(cashout_pnl, 2),
+                "settled_stake_usdc": round(settled_stake, 2),
                 "roi_pct": roi_pct,
+                "stake_roi_pct": stake_roi_pct,
                 "n_total": int(row["n_total"] or 0),
                 "n_settled": n_settled,
                 "n_open": int(row["n_open"] or 0),
                 "n_errored": int(row["n_errored"] or 0),
+                "n_wins": n_wins,
+                "n_match_wins": n_match_wins,
                 "win_rate": round(n_wins / n_settled, 3) if n_settled > 0 else None,
             })
     finally:
         conn.close()
+
+    # Rank by this book's basis ROI. A missing ROI (retired, or no basis) sorts
+    # last. This is not the paper starting-bankroll ROI.
+    rows.sort(key=lambda r: (
+        r["roi_pct"] is None,
+        -(r["roi_pct"] if r["roi_pct"] is not None else 0.0),
+        r["strategy_label"],
+    ))
 
     return {
         "strategies": rows,

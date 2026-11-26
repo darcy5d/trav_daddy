@@ -22,7 +22,9 @@ try:
     status = json.load(open(sys.argv[1]))
     written = datetime.fromisoformat(status["written_at_utc"].replace("Z", "+00:00"))
     age = (datetime.now(timezone.utc) - written).total_seconds()
-    raise SystemExit(0 if status.get("db_ok") and age < 360 else 1)
+    # A sweep walks every live book. 20 minutes covers a slow pass; the
+    # collector writes a heartbeat before the first sweep and after each one.
+    raise SystemExit(0 if status.get("db_ok") and age < 1200 else 1)
 except Exception:
     raise SystemExit(1)
 PY
@@ -39,6 +41,8 @@ if [[ -f "$PID_FILE" ]]; then
 fi
 
 echo "$(date -u +%FT%TZ) restarting MM snapshot collector" >> "$WATCHDOG_LOG"
-nohup python3 "$ROOT/scripts/scan_mm_markets.py" \
+# System python3 does not have this repo's dependencies. Every other cron
+# job uses the Apple Silicon virtualenv; the collector has to as well.
+nohup "$ROOT/venv311/bin/python" "$ROOT/scripts/scan_mm_markets.py" \
   --loop --interval-min 2 --hours-ahead 48 --max-stale-hours 6 \
   --markets moneyline >> "$LOG_FILE" 2>&1 &
